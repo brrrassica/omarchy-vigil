@@ -31,7 +31,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 - [x] Scanners installed and run on demand.
 - [x] Tests for checks, fixes, the report contract and marketplace rules.
 
-## Phase 2 (0.2, this release): pillars and hand-offs
+## Phase 2 (0.2): pillars and hand-offs
 
 - [x] Five pillars: Harden, Detect, Supply chain, Privacy, Care.
 - [x] ClamUI: detected (Flatpak or system package), opened from the panel,
@@ -43,14 +43,18 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       the original, rolls back if Avahi does not restart.
 - [x] ID `keasbeexd.vigil`, matching the other keasbeexd plugins.
 
-## Phase 3: undo, dismissals, history
+## Phase 3 (0.3, this release): undo, reviewed warnings, history
 
-- Undo from the panel for each `/etc` drop-in, as a terminal action that
-  removes only a file that still starts with Vigil's marker line.
-- Dismiss a heuristic finding as reviewed (never findings that are direct
-  evidence), with the reason kept and the finding shown dimmed.
-- Score history from the history Vigil already records.
-- `preview.png` and the marketplace submission (checklist below).
+- [x] Undo from the panel for each `/etc` change, as a terminal action that
+      removes a file only while its first line is still Vigil's marker, and
+      restores Avahi's original from the backup.
+- [x] Mark a warning as reviewed: dimmed, not scored, no notification, and
+      back as new if the finding changes. Never for failures, system-wide
+      preload, Bumblebee's result or passwordless sudo. No free-text reason
+      field: a text box would be one more input to secure for little gain.
+- [x] Score history: one score per day for 30 days, as bars on the Overview
+      with a hover readout and a one-line summary in words.
+- [ ] `preview.png` and the marketplace submission (checklist below).
 
 ## Phase 4: deeper supply chain and detection
 

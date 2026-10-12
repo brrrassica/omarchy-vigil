@@ -19,7 +19,7 @@ root runs in a terminal you can watch.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.2.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.3.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -43,13 +43,35 @@ you ask.
 | `←` `→` or `1`–`6` | Switch tabs |
 | `↑` `↓`, `Enter` | Move through findings, open one |
 | `F` | Fix the selected finding (asks first) |
+| `D` | Mark the selected warning as reviewed, or show it again |
 | `R` | Check again |
 | `Esc` | Cancel a confirmation, or close |
 
 The shield is dim until the first check finishes, about eight seconds after
 login. It turns red when something needs fixing and a softer red when only
-improvements are left. The **Overview** tab shows a score out of 100, how
-each pillar is doing, and the findings to fix first.
+improvements are left. The **Overview** tab shows a score out of 100, a bar
+for each of the last 30 days, how each pillar is doing, and the findings to
+fix first.
+
+### Reviewed warnings
+
+Some warnings are deliberate on your machine: a port you opened on purpose,
+a startup line you wrote yourself. Open the finding and choose **Mark as
+reviewed**. It stays in its tab, dimmed, and no longer lowers the score or
+triggers notifications. If the finding changes (another port opens, another
+line appears), it comes back as new. **Show again** undoes it.
+
+Only warnings can be marked as reviewed. Failures can't, and neither can
+three checks that are direct evidence or a live risk: system-wide preload,
+Bumblebee's known-compromised result, and passwordless sudo.
+
+### Undo
+
+Every change Vigil makes in `/etc` can be undone from the finding it fixed:
+open it and choose **Undo Vigil's change**. The undo runs in a terminal like
+the fix did, and it deletes the file only if its first line is still Vigil's
+marker; a file someone has edited since is left alone. For Avahi, undo puts
+back the original file Vigil saved before its first change.
 
 From a keybinding or script:
 
@@ -152,6 +174,8 @@ The panel always says which kind an action is:
    doing it itself.
 4. **Open an app**: **Open ClamUI** starts ClamUI directly, with a fixed
    command and no shell. It changes nothing, so it does not ask first.
+5. **Mark as reviewed** and **Show again** only change Vigil's own state
+   file, so they do not ask first either.
 
 Vigil never runs anything from its own folder as root, never adds a sudoers
 rule, polkit policy, service or timer, and never changes a setting on its
@@ -170,7 +194,7 @@ a scanner (Arch mirrors), updating ClamAV's signatures (ClamAV's servers),
 
 | Path | Written by | When |
 |---|---|---|
-| `~/.local/state/omarchy-vigil/state.json` | the helper, mode 0600 | every check: which findings you have already seen, and the last 30 scores |
+| `~/.local/state/omarchy-vigil/state.json` | the helper, mode 0600 | every check: which findings you have already seen, which you marked as reviewed, and one score per day for 30 days |
 | `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` | the helper | only when you set the opt-out variables |
 | `/etc/sysctl.d/90-omarchy-vigil.conf` | terminal action | only when you apply the kernel settings |
 | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf` | terminal action | only when you turn LLMNR off |
@@ -205,6 +229,7 @@ nothing keeps running. These stay behind until you remove them:
   table above with `sudo rm <file>`, then reboot (or restart the service
   named in the table). For Avahi, restore the original with
   `sudo mv /etc/avahi/avahi-daemon.conf.vigil-backup /etc/avahi/avahi-daemon.conf`.
+  Easier: use **Undo** on each finding before you remove Vigil.
 - Apps and scanners you installed through Vigil. Remove ClamUI with
   `flatpak uninstall --user io.github.linx_systems.ClamUI`, and `clamav`,
   `rkhunter`, `lynis` or `arch-audit` with `omarchy pkg drop <name>`.

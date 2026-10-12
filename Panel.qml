@@ -141,14 +141,8 @@ Panel {
     cancelPending()
     if (!report) return
     if (kind === "helper") {
-      if (!Model.isHelperAction(action) || fixProc.running) return
-      fixBuffer = ""
-      fixOverflow = false
-      fixAction = action
-      fixProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, "fix", action]
-      fixProc.running = true
-      fixDeadline.restart()
-      setStatus("Working…", false)
+      if (!Model.isHelperAction(action)) return
+      runHelper(["fix", action])
     } else if (kind === "terminal") {
       var launcher = Model.launcherPath(report.tools)
       var script = Model.terminalScript(action, report.tools)
@@ -157,6 +151,36 @@ Panel {
       setStatus("Opened in a terminal. Vigil checks again when you reopen this panel.", false)
       root.close()
     }
+  }
+
+  // Runs bin/vigil with one of three fixed verbs and an id the panel already
+  // validated: `fix <helper action>`, `dismiss <check id>`, `undismiss <check id>`.
+  function runHelper(args) {
+    if (fixProc.running || args.length !== 2) return
+    if (["fix", "dismiss", "undismiss"].indexOf(args[0]) === -1 || !/^[a-z0-9-]{1,40}$/.test(args[1])) return
+    fixBuffer = ""
+    fixOverflow = false
+    fixAction = args[1]
+    fixProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, args[0], args[1]]
+    fixProc.running = true
+    fixDeadline.restart()
+    setStatus("Working…", false)
+  }
+
+  // Marking a warning as reviewed changes no system setting and is undone
+  // with one click, so it does not ask first.
+  function setReviewed(check, on) {
+    if (!check || busy) return
+    if (on && (!check.dismissible || check.dismissed)) return
+    if (!on && !check.dismissed) return
+    runHelper([on ? "dismiss" : "undismiss", check.id])
+  }
+
+  function requestUndo(check) {
+    if (!check || !report || busy || check.undo.action === "") return
+    if (!Model.canRun({ kind: "terminal", action: check.undo.action }, report.tools, report.apps)) return
+    pendingKind = "terminal"
+    pendingAction = check.undo.action
   }
 
   function finishFix(code) {
@@ -359,6 +383,10 @@ Panel {
       onTextKey: function(t) {
         if (t === "r" || t === "R") root.runAudit()
         else if (t === "f" || t === "F") root.requestFix(root.selectedCheck())
+        else if (t === "d" || t === "D") {
+          var sel = root.selectedCheck()
+          if (sel) root.setReviewed(sel, !sel.dismissed)
+        }
         else if (t >= "1" && t <= "6") root.selectTab(root.tabs[Number(t) - 1])
       }
 
@@ -501,6 +529,11 @@ Panel {
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
             }
+            ScoreHistory {
+              visible: root.report !== null && root.report.history.length > 0
+              width: parent.width
+              history: root.report ? root.report.history : []
+            }
             Repeater {
               model: root.report ? ["harden", "detect", "supply", "privacy", "care"] : []
               delegate: CategoryRow {
@@ -553,7 +586,7 @@ Panel {
           Text {
             textFormat: Text.PlainText
             width: parent.width
-            text: "R check again · ← → tabs · Enter details · F fix · Vigil " + (root.report ? root.report.version : "")
+            text: "R check again · ← → tabs · Enter details · F fix · D reviewed · Vigil " + (root.report ? root.report.version : "")
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -565,6 +598,82 @@ Panel {
   }
 
   // ---- components
+
+  // Daily score for the last 30 days: one bar per day, newest on the right,
+  // in the text colour (one series, so no legend; the caption names it).
+  // Hovering a bar reads out its day and score; the line under the bars says
+  // the same in words for anyone who does not hover.
+  component ScoreHistory: Column {
+    id: hist
+    property var history: []
+    readonly property int slots: 30
+    readonly property real barGap: Style.spaceReal(2)
+    readonly property real chartHeight: Style.space(36)
+    property int hovered: -1
+    spacing: Style.space(4)
+
+    Text {
+      textFormat: Text.PlainText
+      width: parent.width
+      text: hist.hovered >= 0 && hist.hovered < hist.history.length
+        ? Model.shortDate(hist.history[hist.hovered].date) + ": " + hist.history[hist.hovered].score
+        : "Score, last " + hist.slots + " days"
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    Item {
+      width: parent.width
+      height: hist.chartHeight
+
+      Row {
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        spacing: hist.barGap
+        Repeater {
+          model: hist.history
+          delegate: Item {
+            required property var modelData
+            required property int index
+            width: Math.max(2, (hist.width - hist.barGap * (hist.slots - 1)) / hist.slots)
+            height: hist.chartHeight
+            Rectangle {
+              anchors.bottom: parent.bottom
+              width: parent.width
+              height: Math.max(2, hist.chartHeight * modelData.score / 100)
+              radius: Math.min(2, width / 2)
+              color: root.foreground
+              opacity: hist.hovered === index ? 1 : (index === hist.history.length - 1 ? 0.85 : 0.35)
+            }
+            MouseArea {
+              anchors.fill: parent
+              hoverEnabled: true
+              onEntered: hist.hovered = index
+              onExited: if (hist.hovered === index) hist.hovered = -1
+            }
+          }
+        }
+      }
+      Rectangle {
+        anchors.bottom: parent.bottom
+        width: parent.width
+        height: 1
+        color: root.foreground
+        opacity: 0.15
+      }
+    }
+
+    Text {
+      textFormat: Text.PlainText
+      width: parent.width
+      text: Model.historySummary(hist.history)
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      wrapMode: Text.WordWrap
+    }
+  }
 
   component CategoryRow: CursorSurface {
     id: catRow
@@ -605,11 +714,15 @@ Panel {
     property bool selected: false
     property bool expanded: false
     readonly property bool runnable: check !== null && root.report !== null && Model.canRun(check.fix, root.report.tools, root.report.apps)
+    readonly property bool undoable: check !== null && root.report !== null && check.undo.action !== ""
+      && Model.canRun({ kind: "terminal", action: check.undo.action }, root.report.tools, root.report.apps)
+    readonly property bool reviewable: check !== null && (check.dismissible || check.dismissed)
     signal clicked()
 
     hasCursor: selected
     foreground: root.foreground
     implicitHeight: rowColumn.implicitHeight + Style.spacing.rowPaddingX
+    opacity: check !== null && check.dismissed ? 0.6 : 1
 
     MouseArea {
       anchors.fill: parent
@@ -657,7 +770,9 @@ Panel {
       Text {
         textFormat: Text.PlainText
         width: parent.width
-        text: row.check ? row.check.summary : ""
+        text: !row.check ? ""
+          : (row.check.dismissed ? "Reviewed" + (row.check.dismissedAt !== "" ? " " + Model.shortDate(row.check.dismissedAt) : "") + ". " : "")
+            + row.check.summary
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
@@ -683,13 +798,32 @@ Panel {
         font.pixelSize: Style.font.caption
         wrapMode: Text.WrapAnywhere
       }
-      Button {
-        visible: row.expanded && row.runnable
-        text: row.check ? row.check.fix.label : ""
-        foreground: root.foreground
-        fontFamily: root.fontFamily
-        bordered: true
-        onClicked: root.requestFix(row.check)
+      Flow {
+        visible: row.expanded && (row.runnable || row.undoable || row.reviewable)
+        width: parent.width
+        spacing: Style.space(8)
+        Button {
+          visible: row.runnable && !(row.check !== null && row.check.dismissed)
+          text: row.check ? row.check.fix.label : ""
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          bordered: true
+          onClicked: root.requestFix(row.check)
+        }
+        Button {
+          visible: row.undoable
+          text: row.check ? row.check.undo.label : ""
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.requestUndo(row.check)
+        }
+        Button {
+          visible: row.reviewable
+          text: row.check !== null && row.check.dismissed ? "Show again" : "Mark as reviewed"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.setReviewed(row.check, !row.check.dismissed)
+        }
       }
       Text {
         textFormat: Text.PlainText

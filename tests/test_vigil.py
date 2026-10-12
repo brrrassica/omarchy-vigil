@@ -679,3 +679,126 @@ def test_plugin_inventory(v):
     c = v.check_plugins()
     assert c["status"] == "info" and "2 third-party plugins" in c["summary"]
     assert "Vigil" not in c["detail"] and "acme.weather" in c["detail"] and "broken.plugin" in c["detail"]
+
+
+# --------------------------------------------------------------------------
+# Undo, reviewed warnings, score history
+
+def test_etc_mark_matches_model(v):
+    src = (REPO / "Model.js").read_text()
+    assert 'var VIGIL_MARK = "%s"' % v.ETC_MARK in src
+
+
+def test_undo_offered_only_for_vigil_owned_files(v):
+    v.UNITS[("is-active", "systemd-resolved.service")] = "active"
+    path = "/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf"
+    sysfile(v, path, v.ETC_MARK + "\n[Resolve]\nLLMNR=no\n")
+    llmnr = {c["id"]: c for c in v.audit(peek=True)["checks"]}["llmnr"]
+    assert llmnr["status"] == "pass" and llmnr["undo"]["action"] == "undo-llmnr"
+    sysfile(v, path, "# edited by hand\n" + v.ETC_MARK + "\n[Resolve]\nLLMNR=no\n")
+    llmnr = {c["id"]: c for c in v.audit(peek=True)["checks"]}["llmnr"]
+    assert llmnr["undo"]["action"] == ""
+
+
+def test_undo_never_follows_symlink(v, tmp_path):
+    real = put(tmp_path / "x.conf", "")
+    real.write_text(v.ETC_MARK + "\n")
+    os.makedirs(v.ROOT + "/etc/sysctl.d")
+    os.symlink(real, v.ROOT + "/etc/sysctl.d/90-omarchy-vigil.conf")
+    assert v.undo_available("undo-sysctl") is False
+
+
+def test_sysctl_undo_shows_on_both_sysctl_checks(v):
+    sysfile(v, "/etc/sysctl.d/90-omarchy-vigil.conf", v.ETC_MARK + "\nkernel.kptr_restrict=2\n")
+    checks = {c["id"]: c for c in v.audit(peek=True)["checks"]}
+    assert checks["kernel-hardening"]["undo"]["action"] == "undo-sysctl"
+    assert checks["network-hardening"]["undo"]["action"] == "undo-sysctl"
+
+
+def test_avahi_undo_needs_backup(v):
+    assert v.undo_available("undo-avahi") is False
+    sysfile(v, v.AVAHI_BACKUP, "[publish]\n")
+    assert v.undo_available("undo-avahi") is True
+
+
+def port_listening(v):
+    sysfile(v, "/proc/net/tcp", "  sl local rem st\n   0: 00000000:0016 00000000:0000 0A\n")
+
+
+def test_dismiss_warning_roundtrip(v):
+    port_listening(v)
+    before = v.audit()
+    ports = {c["id"]: c for c in before["checks"]}["open-ports"]
+    assert ports["status"] == "warn" and ports["dismissible"] and not ports["dismissed"]
+    res = v.set_dismissed("open-ports", True)
+    assert res["ok"], res
+    after = v.audit()
+    ports = {c["id"]: c for c in after["checks"]}["open-ports"]
+    assert ports["dismissed"] and re.fullmatch(r"\d{4}-\d{2}-\d{2}", ports["dismissedAt"])
+    assert after["score"] > before["score"] and after["counts"]["dismissed"] == 1
+    assert v.set_dismissed("open-ports", False)["ok"]
+    assert not {c["id"]: c for c in v.audit()["checks"]}["open-ports"]["dismissed"]
+
+
+def test_dismissal_lapses_when_finding_changes(v):
+    port_listening(v)
+    v.audit()
+    v.set_dismissed("open-ports", True)
+    sysfile(v, "/proc/net/tcp", "  sl local rem st\n   0: 00000000:0016 00000000:0000 0A\n"
+                                "   1: 00000000:1F90 00000000:0000 0A\n")
+    report = v.audit()
+    ports = {c["id"]: c for c in report["checks"]}["open-ports"]
+    assert not ports["dismissed"] and "open-ports" in report["new"]
+
+
+def test_failures_and_evidence_cannot_be_dismissed(v):
+    ufw(v, enabled="no", active="inactive")
+    sysfile(v, "/etc/ld.so.preload", "/usr/lib/libevil.so\n")
+    v.audit()
+    assert v.set_dismissed("firewall", True)["ok"] is False
+    assert v.set_dismissed("ld-preload", True)["ok"] is False
+    assert v.set_dismissed("nonexistent", True)["ok"] is False
+    v.UNITS[("is-active", "systemd-resolved.service")] = "active"
+    c = {c["id"]: c for c in v.audit(peek=True)["checks"]}
+    assert c["firewall"]["dismissible"] is False and c["llmnr"]["dismissible"] is True
+
+
+def test_dismissed_finding_does_not_notify(v):
+    v.audit()                                    # baseline
+    port_listening(v)
+    v.set_dismissed("open-ports", True)
+    assert "open-ports" not in v.audit()["new"]
+
+
+def test_forged_dismissal_entries_are_ignored(v):
+    port_listening(v)
+    v.audit()
+    p = Path(v.HOME, ".local/state/omarchy-vigil/state.json")
+    state = json.loads(p.read_text())
+    state["dismissed"] = [{"fp": "../../etc", "at": "x"}, "junk", {"fp": "open-ports:zz"}]
+    p.write_text(json.dumps(state))
+    assert not {c["id"]: c for c in v.audit()["checks"]}["open-ports"]["dismissed"]
+
+
+def test_history_is_daily_and_capped(v):
+    v.audit()
+    v.audit()
+    report = v.audit()
+    assert len(report["history"]) == 1 and report["history"][0]["score"] == report["score"]
+    p = Path(v.HOME, ".local/state/omarchy-vigil/state.json")
+    state = json.loads(p.read_text())
+    state["history"] = [{"at": "2026-01-%02dT10:00:00+0000" % d, "score": 50 + d} for d in range(1, 32)] + \
+                       [{"at": "bad", "score": 1}, {"at": "2026-02-01", "score": 900}, {"at": "2026-02-02", "score": True}]
+    p.write_text(json.dumps(state))
+    hist = v.audit()["history"]
+    assert len(hist) == v.HISTORY_MAX
+    assert all(re.fullmatch(r"\d{4}-\d{2}-\d{2}", h["date"]) and 0 <= h["score"] <= 100 for h in hist)
+    assert hist == sorted(hist, key=lambda h: h["date"])
+
+
+def test_cli_dismiss_rejects_bad_ids():
+    import subprocess
+    vigil = str(REPO / "bin" / "vigil")
+    for args in (["dismiss", "../x"], ["dismiss"], ["undismiss", "A"], ["dismiss", "a", "b"]):
+        p = subprocess.run(["/usr/bin/python3", "-I", "-S", vigil] + args, capture_output=True, timeout=30)
+        assert p.returncode == 2, args

@@ -183,3 +183,100 @@ test("pillars are the only categories", () => {
   }
   assert.equal(parse(report({ checks: [check({ category: "scan" })] })), null)
 })
+
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+
+// Run a terminal action's body for real, with its /etc paths moved into a
+// temporary directory and sudo and service restarts made harmless.
+function runUndo(id, setup) {
+  const dir = mkdtempSync(path.join(tmpdir(), "vigil-undo-"))
+  let body = M.TERMINAL_ACTIONS[id].run
+  body = body.split("/etc/").join(dir + "/etc/").split("sudo ").join("")
+    .split("/usr/bin/systemctl").join("/usr/bin/true").split("/usr/bin/sysctl").join("/usr/bin/true")
+  setup(dir)
+  const res = spawnSync("/usr/bin/bash", ["-c", "( set -e; " + body + " )"], { encoding: "utf8" })
+  return { dir, status: res.status, out: res.stdout + res.stderr }
+}
+
+function place(dir, rel, text) {
+  const full = dir + rel
+  execFileSync("/usr/bin/mkdir", ["-p", path.dirname(full)])
+  writeFileSync(full, text)
+  return full
+}
+
+test("undo removes only files that still carry the Vigil marker", () => {
+  const rel = "/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf"
+  let f
+  let r = runUndo("undo-llmnr", (d) => { f = place(d, rel, M.VIGIL_MARK + "\n[Resolve]\nLLMNR=no\n") })
+  assert.equal(r.status, 0, r.out)
+  assert.equal(existsSync(f), false)
+  rmSync(r.dir, { recursive: true })
+
+  r = runUndo("undo-llmnr", (d) => { f = place(d, rel, "# mine now\n" + M.VIGIL_MARK + "\n") })
+  assert.equal(r.status, 1)
+  assert.match(r.out, /left alone/)
+  assert.equal(existsSync(f), true)
+  rmSync(r.dir, { recursive: true })
+
+  r = runUndo("undo-llmnr", () => {})
+  assert.equal(r.status, 0)
+  assert.match(r.out, /Nothing to undo/)
+  rmSync(r.dir, { recursive: true })
+})
+
+test("avahi undo restores the backup", () => {
+  let conf
+  const r = runUndo("undo-avahi", (d) => {
+    conf = place(d, "/etc/avahi/avahi-daemon.conf", "[publish]\ndisable-publishing=yes\n")
+    place(d, "/etc/avahi/avahi-daemon.conf.vigil-backup", "[publish]\n#disable-publishing=no\n")
+  })
+  assert.equal(r.status, 0, r.out)
+  assert.equal(readFileSync(conf, "utf8"), "[publish]\n#disable-publishing=no\n")
+  assert.equal(existsSync(conf + ".vigil-backup"), false)
+  rmSync(r.dir, { recursive: true })
+})
+
+test("undo, review and history fields are validated", () => {
+  const undo = (u) => parse(report({ checks: [check({ undo: u })] }))
+  assert.equal(undo({ action: "undo-sysctl", label: "Undo" }).checks[0].undo.action, "undo-sysctl")
+  assert.equal(undo({ action: "", label: "" }).checks[0].undo.action, "")
+  assert.equal(undo({ action: "firewall-on", label: "x" }), null, "undo must be an undo- action")
+  assert.equal(undo({ action: "undo-anything", label: "x" }), null)
+  assert.equal(undo("undo-sysctl"), null)
+
+  const warn = { status: "warn", weight: 1 }
+  assert.ok(parse(report({ checks: [check(Object.assign({ dismissible: true, dismissed: true, dismissedAt: "2026-10-12" }, warn))] })))
+  assert.equal(parse(report({ checks: [check(Object.assign({ dismissible: false, dismissed: true }, warn))] })), null)
+  assert.equal(parse(report({ checks: [check({ status: "fail", dismissible: true, dismissed: true })] })), null)
+  assert.equal(parse(report({ checks: [check(Object.assign({ dismissible: "yes" }, warn))] })), null)
+  assert.equal(parse(report({ checks: [check(Object.assign({ dismissible: true, dismissed: true, dismissedAt: "<b>" }, warn))] })), null)
+
+  assert.deepEqual(parse(report({ history: [{ date: "2026-10-11", score: 70 }, { date: "2026-10-12", score: 80 }] })).history.length, 2)
+  assert.equal(parse(report({ history: [{ date: "yesterday", score: 70 }] })), null)
+  assert.equal(parse(report({ history: [{ date: "2026-10-12", score: 101 }] })), null)
+  assert.equal(parse(report({ history: [{ date: "2026-10-12", score: 7.5 }] })), null)
+  assert.equal(parse(report({ history: Array.from({ length: 61 }, () => ({ date: "2026-10-12", score: 1 })) })), null)
+})
+
+test("reviewed warnings drop out of findings and counts", () => {
+  const r = parse(report({ checks: [
+    check({ id: "a", status: "warn", weight: 2, dismissible: true, dismissed: true }),
+    check({ id: "b", status: "warn", weight: 1, dismissible: true }),
+    check({ id: "c", status: "info", weight: 0 }),
+    check({ id: "d", status: "pass", weight: 1 })
+  ] }))
+  assert.deepEqual(M.topFindings(r).map((c) => c.id), ["b"])
+  assert.equal(M.countBy(r, "harden", "warn"), 1)
+  assert.deepEqual(M.checksFor(r, "harden").map((c) => c.id), ["b", "c", "a", "d"])
+})
+
+test("history helpers", () => {
+  assert.equal(M.shortDate("2026-10-12"), "Oct 12")
+  assert.equal(M.shortDate("2026-13-01"), "")
+  assert.equal(M.historySummary([]), "")
+  assert.match(M.historySummary([{ date: "2026-10-12", score: 80 }]), /^Today 80/)
+  assert.equal(M.historySummary([{ date: "2026-10-01", score: 60 }, { date: "2026-10-12", score: 85 }, { date: "2026-10-05", score: 40 }].slice(0, 2)),
+    "Oct 1 60 → Oct 12 85 · low 60, high 85")
+})

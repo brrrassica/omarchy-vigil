@@ -119,6 +119,21 @@ function dropIn(path, lines) {
   return "printf '%s\\n' " + quoted.join(" ") + " | sudo /usr/bin/tee " + path + " >/dev/null"
 }
 
+// Undo for a drop-in Vigil wrote: removes it only while its first line is
+// still exactly VIGIL_MARK, so a file someone has since edited is left alone.
+function undoDropIn(name, path, afterText, after) {
+  return {
+    title: "Undo the Vigil change to " + name,
+    what: ["Deletes " + path + " if its first line is still the Vigil marker.",
+           "A file edited since Vigil wrote it is left alone.", afterText],
+    run: "f=" + path + "; "
+         + "[ -e \"$f\" ] || { echo 'Nothing to undo.'; exit 0; }; "
+         + "[ \"$(/usr/bin/head -n 1 -- \"$f\")\" = '" + VIGIL_MARK + "' ] "
+         + "|| { echo 'The file was changed since Vigil wrote it, so it was left alone.'; exit 1; }; "
+         + "sudo /usr/bin/rm -f -- \"$f\" && " + after
+  }
+}
+
 // Each entry: title, what (lines shown before anything runs), and either a
 // constant `run` script or an Omarchy `tool` (resolved to a root-owned path
 // in /usr/bin or /usr/share/omarchy/bin by the helper) with constant `args`.
@@ -311,6 +326,32 @@ var TERMINAL_ACTIONS = {
     title: "Trim system logs",
     what: ["Runs: sudo journalctl --vacuum-time=2weeks", "Keeps the last two weeks of logs."],
     run: "sudo /usr/bin/journalctl --vacuum-time=2weeks"
+  },
+  "undo-sysctl": undoDropIn("kernel and network settings", "/etc/sysctl.d/90-omarchy-vigil.conf",
+    "Reloads the remaining settings. The previous values come back after a reboot.",
+    "sudo /usr/bin/sysctl --system >/dev/null; echo 'Removed. The previous kernel values come back after a reboot.'"),
+  "undo-llmnr": undoDropIn("LLMNR", "/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf",
+    "Then restarts systemd-resolved.",
+    "sudo /usr/bin/systemctl restart systemd-resolved.service"),
+  "undo-dns-fallback": undoDropIn("the DNS fallback", "/etc/systemd/resolved.conf.d/90-omarchy-vigil-fallback.conf",
+    "Then restarts systemd-resolved.",
+    "sudo /usr/bin/systemctl restart systemd-resolved.service"),
+  "undo-sshd": undoDropIn("SSH", "/etc/ssh/sshd_config.d/00-omarchy-vigil.conf",
+    "Then reloads sshd if it is running. Passwords and root login go back to your other settings.",
+    "if /usr/bin/systemctl is-active --quiet sshd.service; then sudo /usr/bin/systemctl reload sshd.service; fi"),
+  "undo-connectivity": undoDropIn("the connectivity check", "/etc/NetworkManager/conf.d/90-omarchy-vigil-connectivity.conf",
+    "Then reloads NetworkManager.",
+    "sudo /usr/bin/systemctl reload NetworkManager.service"),
+  "undo-mac": undoDropIn("the hardware address", "/etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf",
+    "Then reloads NetworkManager. Takes effect when you next connect.",
+    "sudo /usr/bin/systemctl reload NetworkManager.service"),
+  "undo-avahi": {
+    title: "Undo: restore the original Avahi settings",
+    what: ["Puts back /etc/avahi/avahi-daemon.conf.vigil-backup, the file as it was before Vigil first changed it,",
+           "and restarts Avahi. Edits made to the file since then are lost."],
+    run: "b=/etc/avahi/avahi-daemon.conf.vigil-backup; "
+         + "[ -f \"$b\" ] || { echo 'There is no backup to restore.'; exit 0; }; "
+         + "sudo /usr/bin/mv -f -- \"$b\" /etc/avahi/avahi-daemon.conf && sudo /usr/bin/systemctl restart avahi-daemon.service"
   }
 }
 
@@ -401,11 +442,43 @@ function validCheck(c) {
   if (typeof c.weight !== "number" || !isFinite(c.weight) || c.weight < 0 || c.weight > 3 || Math.floor(c.weight) !== c.weight) return null
   var f = validFix(c.fix)
   if (!f) return null
+  var undo = { action: "", label: "" }
+  if (c.undo !== undefined) {
+    if (!c.undo || typeof c.undo !== "object" || !isString(c.undo.action, 32) || !isString(c.undo.label, 60)) return null
+    if (c.undo.action !== "") {
+      if (c.undo.action.indexOf("undo-") !== 0 || !terminalAction(c.undo.action)) return null
+      undo = { action: c.undo.action, label: plain(c.undo.label, 60) }
+    }
+  }
+  var dismissible = c.dismissible === true
+  var dismissed = c.dismissed === true
+  if ((c.dismissible !== undefined && typeof c.dismissible !== "boolean")
+      || (c.dismissed !== undefined && typeof c.dismissed !== "boolean")) return null
+  if (dismissed && (!dismissible || c.status !== "warn")) return null
+  var dismissedAt = ""
+  if (c.dismissedAt !== undefined && c.dismissedAt !== "") {
+    if (!isString(c.dismissedAt, 10) || !/^\d{4}-\d{2}-\d{2}$/.test(c.dismissedAt)) return null
+    dismissedAt = c.dismissedAt
+  }
   return {
     id: c.id, category: c.category, status: c.status, weight: c.weight,
     title: plain(c.title, 80), summary: plain(c.summary, MAX_STR), why: plain(c.why, MAX_STR * 2),
-    detail: plain(c.detail, MAX_DETAIL), fix: f
+    detail: plain(c.detail, MAX_DETAIL), fix: f, undo: undo,
+    dismissible: dismissible, dismissed: dismissed, dismissedAt: dismissedAt
   }
+}
+
+function parseHistory(h) {
+  if (h === undefined) return []
+  if (!Array.isArray(h) || h.length > 60) return null
+  var out = []
+  for (var i = 0; i < h.length; i++) {
+    var e = h[i]
+    if (!e || typeof e !== "object" || !isString(e.date, 10) || !/^\d{4}-\d{2}-\d{2}$/.test(e.date)) return null
+    if (typeof e.score !== "number" || !isFinite(e.score) || e.score < 0 || e.score > 100 || Math.floor(e.score) !== e.score) return null
+    out.push({ date: e.date, score: e.score })
+  }
+  return out
 }
 
 function parseReport(text) {
@@ -453,7 +526,10 @@ function parseReport(text) {
       fresh.push(id)
     }
   }
+  var history = parseHistory(d.history)
+  if (!history) return null
   return {
+    history: history,
     version: plain(d.version, 20), generatedAt: plain(d.generatedAt, 40),
     score: Math.round(d.score), level: d.level, checks: checks, tools: tools, apps: apps, fresh: fresh
   }
@@ -475,8 +551,10 @@ function checksFor(report, category) {
   var out = []
   for (var i = 0; i < report.checks.length; i++)
     if (report.checks[i].category === category) out.push(report.checks[i])
+  // Reviewed warnings sort after the information rows, just above "pass".
+  function rank(c) { return c.dismissed ? STATUSES.indexOf("info") + 0.5 : STATUSES.indexOf(c.status) }
   out.sort(function(a, b) {
-    var d = STATUSES.indexOf(a.status) - STATUSES.indexOf(b.status)
+    var d = rank(a) - rank(b)
     return d !== 0 ? d : b.weight - a.weight
   })
   return out
@@ -488,7 +566,7 @@ function topFindings(report, max) {
   var out = []
   for (var i = 0; i < report.checks.length; i++) {
     var c = report.checks[i]
-    if ((c.status === "fail" || c.status === "warn") && c.weight > 0) out.push(c)
+    if ((c.status === "fail" || c.status === "warn") && c.weight > 0 && !c.dismissed) out.push(c)
   }
   out.sort(function(a, b) {
     if (a.status !== b.status) return a.status === "fail" ? -1 : 1
@@ -502,9 +580,29 @@ function countBy(report, category, status) {
   var n = 0
   for (var i = 0; i < report.checks.length; i++) {
     var c = report.checks[i]
-    if ((category === "" || c.category === category) && c.status === status) n++
+    if ((category === "" || c.category === category) && c.status === status && !c.dismissed) n++
   }
   return n
+}
+
+var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+function shortDate(date) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(date))
+  if (!m) return ""
+  var month = Number(m[2])
+  return month >= 1 && month <= 12 ? MONTHS[month - 1] + " " + Number(m[3]) : ""
+}
+
+// One line that states the history in words, for when the bars are not seen.
+function historySummary(history) {
+  if (!history || history.length === 0) return ""
+  var lo = 100, hi = 0
+  for (var i = 0; i < history.length; i++) { lo = Math.min(lo, history[i].score); hi = Math.max(hi, history[i].score) }
+  var first = history[0], last = history[history.length - 1]
+  if (history.length === 1) return "Today " + last.score + ". The chart fills in day by day."
+  return shortDate(first.date) + " " + first.score + " \u2192 " + shortDate(last.date) + " " + last.score
+    + " \u00b7 low " + lo + ", high " + hi
 }
 
 function statusGlyph(status) {
@@ -549,6 +647,7 @@ if (typeof module !== "undefined") {
     topFindings: topFindings, countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
     tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
     categoryLabel: categoryLabel, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
+    shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,
     SYSCTL_LINES: SYSCTL_LINES
   }

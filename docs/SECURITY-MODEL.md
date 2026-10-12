@@ -81,6 +81,19 @@ no polkit policy, no service, no timer and no daemon.
   appears exactly once under `[publish]`, keeps the first original, takes a
   rollback copy from `mktemp` in the same root-owned directory, and restores
   it if the edit does not verify or Avahi does not restart.
+- Undo actions are constant scripts too. Each deletes a fixed path only if
+  the file's first line is exactly Vigil's marker, read with `head -n 1` and
+  compared as a whole string, so a file someone rewrote is left alone. The
+  helper offers undo only for files whose first line it has itself read as
+  the marker through an `O_NOFOLLOW` descriptor. `tests/model.test.mjs`
+  runs every undo script against temporary files.
+- Marking a warning as reviewed stores a fingerprint (check id plus a hash
+  of its status, summary and detail) in the state file. A changed finding
+  has a new fingerprint, so a dismissal cannot hide a new problem. The
+  helper refuses failures and a fixed list of evidence checks, and the panel
+  rejects a report that claims a dismissed failure. State updates hold an
+  exclusive `flock` on the state directory's own descriptor, so a background
+  check and a dismissal cannot overwrite each other.
 - App actions map an id and an install kind reported by the helper
   (`native`, `flatpak` or nothing) to one of two fixed argv arrays. The
   helper reports `flatpak` only when `/usr/bin/flatpak` is root-owned and the

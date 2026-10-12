@@ -27,6 +27,7 @@ Rules this file keeps (they follow the marketplace review guidance):
 Standard library only. No network access of any kind.
 """
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -41,7 +42,7 @@ import sys
 import time
 from base64 import b64decode
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1591,6 +1592,61 @@ def check_journal():
 
 
 # ---------------------------------------------------------------------------
+# Undo: files in /etc that Vigil's terminal actions wrote. A file counts as
+# Vigil's only while its first line is exactly ETC_MARK (Model.js writes the
+# same line), so a file someone has since rewritten is never offered for undo.
+
+ETC_MARK = "# Written by Vigil (keasbeexd.vigil). Delete this file to undo."
+
+UNDO_FILES = {
+    "undo-sysctl": "/etc/sysctl.d/90-omarchy-vigil.conf",
+    "undo-llmnr": "/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf",
+    "undo-dns-fallback": "/etc/systemd/resolved.conf.d/90-omarchy-vigil-fallback.conf",
+    "undo-sshd": "/etc/ssh/sshd_config.d/00-omarchy-vigil.conf",
+    "undo-connectivity": "/etc/NetworkManager/conf.d/90-omarchy-vigil-connectivity.conf",
+    "undo-mac": "/etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf",
+}
+AVAHI_BACKUP = "/etc/avahi/avahi-daemon.conf.vigil-backup"
+
+CHECK_UNDO = {
+    "kernel-hardening": "undo-sysctl", "network-hardening": "undo-sysctl", "llmnr": "undo-llmnr",
+    "dns-fallback": "undo-dns-fallback", "ssh-server": "undo-sshd", "connectivity-check": "undo-connectivity",
+    "mac-address": "undo-mac", "avahi": "undo-avahi",
+}
+
+
+def vigil_owned(path):
+    """True when the file's first line is exactly Vigil's marker."""
+    try:
+        data = read_file(sys_path(path), SMALL_FILE_MAX)
+    except Refused:
+        return False
+    if data is None:
+        return False
+    return data.split(b"\n", 1)[0].decode("utf-8", "replace") == ETC_MARK
+
+
+def undo_available(action):
+    if action == "undo-avahi":
+        try:
+            st = os.lstat(sys_path(AVAHI_BACKUP))
+        except OSError:
+            return False
+        return stat.S_ISREG(st.st_mode)
+    path = UNDO_FILES.get(action)
+    return bool(path) and vigil_owned(path)
+
+
+# Dismissing marks a warning as reviewed. Failures never can be, and neither
+# can these, which are direct evidence or a live privilege grant.
+NEVER_DISMISS = {"ld-preload", "bumblebee", "passwordless-sudo"}
+
+
+def dismissible(c):
+    return c["status"] == "warn" and c["weight"] > 0 and c["id"] not in NEVER_DISMISS
+
+
+# ---------------------------------------------------------------------------
 # State: previously seen findings and a short score history
 
 def _state_dir():
@@ -1640,35 +1696,128 @@ def write_atomic(dirfd, name, data, mode=0o600):
         os.close(fd)
 
 
+def _lock(dirfd):
+    """Serialise state read-modify-write between the panel's audits and
+    dismiss/undismiss. flock on the held directory descriptor itself, so there
+    is no separate lock file to plant a symlink at."""
+    fcntl.flock(dirfd, fcntl.LOCK_EX)
+
+
+def load_state():
+    """The state file, read-only; {} when it does not exist or is not ours."""
+    try:
+        dirfd = _open_home_dir(list(STATE_DIR))
+    except (OSError, Refused):
+        return {}
+    try:
+        return _read_state(dirfd)
+    except Refused:
+        return {}
+    finally:
+        os.close(dirfd)
+
+
+_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_FP = re.compile(r"^[a-z0-9-]{1,40}:[0-9a-f]{12}$")
+
+
+def state_dismissed(state):
+    """{fingerprint: date} from the state, validated and capped."""
+    out = {}
+    for d in state.get("dismissed", [])[:SEEN_MAX] if isinstance(state.get("dismissed"), list) else []:
+        if isinstance(d, dict) and isinstance(d.get("fp"), str) and _FP.match(d["fp"]):
+            at = d.get("at") if isinstance(d.get("at"), str) and _DATE.match(d.get("at")) else ""
+            out[d["fp"]] = at
+    return out
+
+
+def state_history(state):
+    """One entry per day, oldest first: [{"date", "score"}], at most HISTORY_MAX."""
+    days = {}
+    for h in state.get("history", []) if isinstance(state.get("history"), list) else []:
+        if not isinstance(h, dict):
+            continue
+        at, score = h.get("at"), h.get("score")
+        if not isinstance(at, str) or isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 100:
+            continue
+        date = at[:10]
+        if _DATE.match(date):
+            days[date] = score          # later entries for the same day win
+    return [{"date": d, "score": days[d]} for d in sorted(days)][-HISTORY_MAX:]
+
+
 def fingerprint(c):
     h = hashlib.sha256((c["status"] + "\n" + c["summary"] + "\n" + c["detail"]).encode()).hexdigest()[:12]
     return c["id"] + ":" + h
 
 
 def update_state(report):
-    """Record findings; return the ids of fail/warn findings not seen before."""
+    """Record findings and today's score; return (new finding ids, saved)."""
     try:
         dirfd = _state_dir()
     except (OSError, Refused):
         return [], False
     try:
+        _lock(dirfd)
         try:
             state = _read_state(dirfd)
         except Refused:
             return [], False
-        seen = [s for s in state.get("seen", []) if isinstance(s, str)][:SEEN_MAX]
+        seen = set(s for s in state.get("seen", []) if isinstance(s, str))
+        dismissed = state_dismissed(state)
         current = [fingerprint(c) for c in report["checks"] if c["status"] in ("fail", "warn") and c["weight"] > 0]
         first_run = "seen" not in state
-        new = [] if first_run else [f.split(":", 1)[0] for f in current if f not in seen]
-        history = [h for h in state.get("history", []) if isinstance(h, dict)][-(HISTORY_MAX - 1):]
-        history.append({"at": report["generatedAt"], "score": report["score"],
-                        "fail": report["counts"]["fail"], "warn": report["counts"]["warn"]})
-        out = {"schema": SCHEMA, "seen": current[:SEEN_MAX], "history": history}
+        new = [] if first_run else [f.split(":", 1)[0] for f in current if f not in seen and f not in dismissed]
+        history = state_history(state)
+        today = report["generatedAt"][:10]
+        history = [h for h in history if h["date"] != today] + [{"date": today, "score": report["score"]}]
+        out = {
+            "schema": SCHEMA, "seen": current[:SEEN_MAX],
+            "dismissed": [{"fp": f, "at": a} for f, a in list(dismissed.items())[-SEEN_MAX:]],
+            "history": [{"at": h["date"], "score": h["score"]} for h in history[-HISTORY_MAX:]],
+        }
         try:
             write_atomic(dirfd, STATE_NAME, json.dumps(out, separators=(",", ":")).encode())
         except OSError:
-            pass
+            return sorted(set(new))[:LIST_MAX], False
+        report["history"] = history[-HISTORY_MAX:]
         return sorted(set(new))[:LIST_MAX], True
+    finally:
+        os.close(dirfd)
+
+
+def set_dismissed(check_id, on):
+    """Mark the current warning of `check_id` as reviewed, or show it again."""
+    report = audit(peek=True)
+    c = next((x for x in report["checks"] if x["id"] == check_id), None)
+    if c is None:
+        return {"ok": False, "action": "", "message": "Unknown check."}
+    try:
+        dirfd = _state_dir()
+    except (OSError, Refused):
+        return {"ok": False, "action": "", "message": "Could not open Vigil's state folder."}
+    try:
+        _lock(dirfd)
+        try:
+            state = _read_state(dirfd)
+        except Refused as e:
+            return {"ok": False, "action": "", "message": clean("Refused: %s" % e)}
+        dismissed = state_dismissed(state)
+        if on:
+            if not dismissible(c):
+                return {"ok": False, "action": "", "message": "This finding cannot be marked as reviewed."}
+            dismissed[fingerprint(c)] = report["generatedAt"][:10]
+            msg = "Marked as reviewed. It comes back if the finding changes."
+        else:
+            dismissed = {f: a for f, a in dismissed.items() if f.split(":", 1)[0] != check_id}
+            msg = "Showing it again."
+        state["dismissed"] = [{"fp": f, "at": a} for f, a in list(dismissed.items())[-SEEN_MAX:]]
+        state["schema"] = SCHEMA
+        try:
+            write_atomic(dirfd, STATE_NAME, json.dumps(state, separators=(",", ":")).encode())
+        except OSError:
+            return {"ok": False, "action": "", "message": "Could not save."}
+        return {"ok": True, "action": "", "message": msg}
     finally:
         os.close(dirfd)
 
@@ -1679,6 +1828,8 @@ def update_state(report):
 def score_of(checks):
     score = 100
     for c in checks:
+        if c.get("dismissed"):
+            continue
         w = c["weight"]
         if c["status"] == "fail":
             score -= 10 * w
@@ -1702,10 +1853,21 @@ def audit(peek=False):
         c["detail"] = clean(c["detail"], 3000) if "\n" not in c["detail"] else "\n".join(
             clean(x, STR_MAX) for x in c["detail"].splitlines()[:LIST_MAX + 1])
         checks.append(c)
+    state = load_state()
+    dismissed = state_dismissed(state)
+    for c in checks:
+        c["dismissible"] = dismissible(c)
+        fp = fingerprint(c)
+        c["dismissed"] = c["dismissible"] and fp in dismissed
+        c["dismissedAt"] = dismissed.get(fp, "") if c["dismissed"] else ""
+        action = CHECK_UNDO.get(c["id"], "")
+        c["undo"] = {"action": action, "label": "Undo Vigil's change"} if action and undo_available(action) \
+            else {"action": "", "label": ""}
     counts = {k: 0 for k in ("fail", "warn", "pass", "info", "na", "unknown")}
     for c in checks:
         counts[c["status"]] = counts.get(c["status"], 0) + 1
-    scored = [c for c in checks if c["weight"] > 0]
+    counts["dismissed"] = sum(1 for c in checks if c["dismissed"])
+    scored = [c for c in checks if c["weight"] > 0 and not c["dismissed"]]
     level = "fail" if any(c["status"] == "fail" for c in scored) else (
         "warn" if any(c["status"] == "warn" for c in scored) else "ok")
     tools = {}
@@ -1721,7 +1883,7 @@ def audit(peek=False):
         "durationMs": int((time.monotonic() - started) * 1000),
         "score": score_of(checks), "level": level, "counts": counts,
         "checks": checks, "tools": tools, "apps": {"clamui": clamui_install()},
-        "new": [], "stateSaved": False,
+        "new": [], "stateSaved": False, "history": state_history(state),
     }
     if not peek:
         report["new"], report["stateSaved"] = update_state(report)
@@ -1923,10 +2085,13 @@ def main(argv):
     if len(argv) == 3 and argv[1] == "fix" and re.fullmatch(r"[a-z][a-z0-9-]{0,31}", argv[2]):
         emit(run_fix(argv[2]))
         return 0
+    if len(argv) == 3 and argv[1] in ("dismiss", "undismiss") and re.fullmatch(r"[a-z0-9-]{1,40}", argv[2]):
+        emit(set_dismissed(argv[2], argv[1] == "dismiss"))
+        return 0
     if len(argv) == 2 and argv[1] == "version":
         emit({"version": VERSION})
         return 0
-    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil version\n")
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil version\n")
     return 2
 
 
