@@ -13,6 +13,7 @@ import re
 import stat
 import struct
 import threading
+import time
 from pathlib import Path
 
 import sys
@@ -474,29 +475,88 @@ def test_clean_thumbnails_stays_inside(v, tmp_path):
     assert list(thumbs.iterdir()) == []
 
 
-def test_clean_user_clears_thumbnails_and_trash(v):
+DAY = 86400
+
+
+def aged(path, days):
+    t = time.time() - days * DAY
+    os.utime(path, (t, t), follow_symlinks=False)
+    return path
+
+
+def test_empty_trash_needs_no_desktop_session(v, tmp_path):
+    outside = put(tmp_path / "outside.txt", "keep me")
+    trash = Path(v.HOME, ".local/share/Trash")
+    put(trash / "files" / "old.txt", "x")
+    put(trash / "info" / "old.txt.trashinfo", "[Trash Info]")
+    put(trash / "files" / "project" / "ro" / "obj", "x")
+    os.chmod(trash / "files" / "project" / "ro", 0o555)          # e.g. a Go module folder
+    os.symlink(outside, trash / "files" / "link")
+    put(trash / "directorysizes", "1 2 project")
+    res = v.run_fix("empty-trash")
+    assert res["ok"] and res["message"] == "Trash emptied.", res
+    assert list((trash / "files").iterdir()) == [] and list((trash / "info").iterdir()) == []
+    assert not (trash / "directorysizes").exists()
+    assert outside.read_text() == "keep me"
+    assert v.check_trash()["status"] == "pass"
+
+
+def test_clean_app_cache_keeps_what_is_in_use(v, tmp_path):
+    outside = put(tmp_path / "outside.bin", "keep me")
+    cache = Path(v.HOME, ".cache")
+    old = aged(put(cache / "app" / "old.bin", "x" * 2_000_000), 10)
+    new = put(cache / "app" / "new.bin", "x" * 2_000_000)
+    stale_dir = put(cache / "gone" / "deep" / "f", "x" * 10)
+    aged(stale_dir, 30); aged(stale_dir.parent, 30); aged(stale_dir.parent.parent, 30)
+    thumb = aged(put(cache / "thumbnails" / "normal" / "t.png", "x"), 30)
+    link = cache / "app" / "link"
+    os.symlink(outside, link); aged(link, 30)
+    aged(cache / "app", 30)
+    c = v.check_user_cache()
+    assert c["status"] == "info" and "not used in the past week" in c["summary"], c
+    assert c["fix"]["action"] == "clean-app-cache"
+    res = v.run_fix("clean-app-cache")
+    assert res["ok"] and res["message"].startswith("Freed "), res
+    assert not old.exists() and new.exists() and thumb.exists()
+    assert not (cache / "gone").exists()
+    assert not os.path.lexists(link) and outside.read_text() == "keep me"
+    assert (cache / "app").exists()                                  # still holds new.bin
+    assert v.check_user_cache()["status"] == "pass"
+
+
+def test_clean_user_runs_every_no_root_cleanup(v):
     thumbs = Path(v.HOME, ".cache/thumbnails")
     put(thumbs / "normal" / "a.png", "x")
     put(Path(v.HOME, ".local/share/Trash/files/old.txt"), "x" * 5000)
-    v.TRUSTED.add(v.sys_path("/usr/bin/gio"))
-    v.COMMANDS[("/usr/bin/gio", "trash", "--empty")] = (0, "")
+    aged(put(Path(v.HOME, ".cache/app/old.bin"), "x" * 2_000_000), 10)
     res = v.run_fix("clean-user")
     assert res["ok"], res
+    assert "Removed 1 thumbnail" in res["message"] and "Trash emptied" in res["message"]
+    assert "Freed" in res["message"]
     assert list(thumbs.iterdir()) == []
-    assert "Trash emptied" in res["message"]
 
 
-def test_clean_user_keeps_going_without_gio(v):
-    put(Path(v.HOME, ".cache/thumbnails/normal/a.png"), "x")
-    put(Path(v.HOME, ".local/share/Trash/files/old.txt"), "x" * 5000)
+def test_clean_user_on_a_tidy_home(v):
     res = v.run_fix("clean-user")
-    assert res["ok"], res
-    assert "Removed 1 thumbnail" in res["message"] and "not emptied" in res["message"]
+    assert res["ok"] and "trash" not in res["message"].lower() and "cache" not in res["message"].lower(), res
 
 
-def test_clean_user_skips_an_empty_trash(v):
-    res = v.run_fix("clean-user")              # no gio, no trash: nothing to refuse
-    assert res["ok"] and "trash" not in res["message"].lower(), res
+PACCACHE = "/usr/bin/paccache"
+
+
+def test_pacman_cache_reports_what_can_be_freed(v):
+    sysfile(v, "/var/cache/pacman/pkg/a-1-1-x86_64.pkg.tar.zst", "x" * 50000)
+    assert "Could not work out" in v.check_pacman_cache()["summary"]          # no paccache
+    v.TRUSTED.add(v.sys_path(PACCACHE))
+    v.COMMANDS[(PACCACHE, "-d", "-k2", "--nocolor")] = (0, "\n==> no candidate packages found for pruning\n")
+    v.COMMANDS[(PACCACHE, "-d", "-u", "-k0", "--nocolor")] = (
+        0, "\n==> finished dry run: 3 candidates (disk space saved: 1.50 GiB)\n")
+    c = v.check_pacman_cache()
+    assert c["summary"].endswith("1.5 GB can be freed."), c
+    assert c["fix"] == {"kind": "terminal", "action": "clean-pacman-cache", "label": "Free 1.5 GB"}
+    v.COMMANDS[(PACCACHE, "-d", "-u", "-k0", "--nocolor")] = (0, "==> no candidate packages found for pruning")
+    c = v.check_pacman_cache()
+    assert c["status"] == "pass" and "kept for rollback" in c["summary"] and c["fix"]["kind"] == "none"
 
 
 def test_size_checks(v):

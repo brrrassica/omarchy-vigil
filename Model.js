@@ -53,7 +53,7 @@ function inList(v, list) {
 
 var HELPER_ACTIONS = ["ssh-perms", "gnupg-perms", "optout-on", "optout-off", "clean-thumbnails", "empty-trash",
                       "credential-perms", "integrity-accept", "arch-audit-refresh", "osv-refresh", "aur-refresh",
-                      "virus-scan-now", "clean-user"]
+                      "virus-scan-now", "clean-user", "clean-app-cache"]
 
 // What the confirmation card says before a helper action runs.
 var HELPER_INFO = {
@@ -69,8 +69,11 @@ var HELPER_INFO = {
                         what: ["Deletes everything in ~/.cache/thumbnails. Previews are recreated when needed."] },
   "empty-trash": { title: "Empty the trash",
                    what: ["Permanently deletes the files in the trash. This cannot be undone."] },
-  "clean-user": { title: "Clear thumbnails and empty the trash",
+  "clean-user": { title: "Clear thumbnails, the trash and unused caches",
                   what: ["The no-root half of Clean all."] },
+  "clean-app-cache": { title: "Clear unused application caches",
+                       what: ["Deletes files in ~/.cache that no app has read or written for a week.",
+                              "Caches in use are left alone; apps rebuild anything they need."] },
   "credential-perms": { title: "Make credential files private",
                         what: ["Sets files such as ~/.aws/credentials, ~/.netrc and ~/.git-credentials to 600,",
                                "so only you can read them. Their contents are not read or changed."] },
@@ -161,6 +164,11 @@ function undoDropIn(name, path, afterText, after) {
 // Each entry: title, what (lines shown before anything runs), and either a
 // constant `run` script or an Omarchy `tool` (resolved to a root-owned path
 // in /usr/bin or /usr/share/omarchy/bin by the helper) with constant `args`.
+// Shared by the package-cache fix and Clean all: show the size before and after.
+var PKG_DU = "$(/usr/bin/du -sh /var/cache/pacman/pkg 2>/dev/null | /usr/bin/cut -f1)"
+var PACCACHE_RUN = "before=" + PKG_DU + "; sudo /usr/bin/paccache -rk2; sudo /usr/bin/paccache -ruk0; "
+  + "echo \"Package cache: $before before, " + PKG_DU + " now.\""
+
 var TERMINAL_ACTIONS = {
   "firewall-on": {
     title: "Turn the firewall on",
@@ -361,23 +369,26 @@ var TERMINAL_ACTIONS = {
     run: "/usr/bin/arch-audit --upgradable && echo 'Done. Nothing listed means nothing to fix.'"
   },
   "clean-pacman-cache": {
-    title: "Trim the package cache",
-    what: ["Runs: sudo paccache -rk2", "Keeps the two newest versions of each package for rollback."],
-    run: "sudo /usr/bin/paccache -rk2"
+    title: "Free space in the package cache",
+    what: ["Runs: sudo paccache -rk2, then sudo paccache -ruk0",
+           "Keeps the two newest versions of each installed package, for rollback, as Omarchy does,",
+           "and removes the downloads of packages you no longer have installed."],
+    run: PACCACHE_RUN
   },
+
   "clean-orphans": {
     title: "Review orphaned packages",
     what: ["Runs the Omarchy command omarchy-update-orphan-pkgs", "It lists them and asks before removing anything."],
     tool: "omarchy-update-orphan-pkgs", args: ""
   },
   "clean-system": {
-    title: "Trim the package cache and system logs",
-    what: ["Runs: sudo paccache -rk2, then sudo journalctl --vacuum-time=2weeks",
-           "Keeps the two newest versions of each package, for rollback, and two weeks of logs."],
-    run: "if [ -x /usr/bin/paccache ]; then sudo /usr/bin/paccache -rk2; "
-      + "else echo 'paccache is not installed (pacman-contrib), so the package cache was left as is.'; fi; "
-      + "sudo /usr/bin/journalctl --vacuum-time=2weeks"
+    title: "Free space in the package cache and trim system logs",
+    what: ["Runs: sudo paccache -rk2, sudo paccache -ruk0, then sudo journalctl --vacuum-time=2weeks",
+           "Keeps the two newest versions of each installed package, for rollback, and two weeks of logs;",
+           "removes the downloads of packages you no longer have installed."],
+    run: PACCACHE_RUN + "; sudo /usr/bin/journalctl --vacuum-time=2weeks"
   },
+
   "clean-journal": {
     title: "Trim system logs",
     what: ["Runs: sudo journalctl --vacuum-time=2weeks", "Keeps the last two weeks of logs."],
@@ -482,7 +493,7 @@ function canRun(fixObj, tools, apps) {
 // Orphaned packages are left out on purpose: removing packages can take away
 // something you use, so that stays a separate, reviewed step.
 
-var CLEAN_ALL = { "clean-thumbnails": "user", "empty-trash": "user",
+var CLEAN_ALL = { "clean-thumbnails": "user", "empty-trash": "user", "clean-app-cache": "user",
                   "clean-pacman-cache": "system", "clean-journal": "system" }
 
 function cleanAllPlan(report) {
@@ -506,7 +517,7 @@ function cleanAllConfirmation(report) {
   var plan = cleanAllPlan(report)
   if (plan.items.length === 0) return null
   var lines = plan.items.slice(0)
-  lines.push("Thumbnails and the trash are cleared right away. The trash cannot be restored.")
+  if (plan.user) lines.push("Files are cleared right away. The trash cannot be restored; caches rebuild themselves.")
   if (plan.system) lines.push("Then a terminal opens for the package cache and logs; sudo asks for your password once.")
   lines.push("Orphaned packages are left out: removing packages deserves a look, so use Review and remove.")
   return { title: "Clean all", lines: lines }

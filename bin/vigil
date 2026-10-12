@@ -2671,18 +2671,129 @@ def check_trash():
                        ("helper", "empty-trash"), "Empty", 1024 * 1024 * 1024)
 
 
+CACHE_UNUSED_DAYS = 7
+CACHE_SKIP = {"thumbnails"}            # its own row and its own cleanup
+
+
+def _cache_scan(dfd, cutoff, deadline, budget):
+    """(total bytes, bytes in files unused since cutoff) below dfd, never following symlinks."""
+    total = old = 0
+    with os.scandir(dfd) as it:
+        entries = list(it)[:max(0, budget[0])]
+    for e in entries:
+        budget[0] -= 1
+        if budget[0] <= 0 or time.monotonic() > deadline:
+            break
+        try:
+            if e.is_dir(follow_symlinks=False):
+                sub = os.open(e.name, O_DIR, dir_fd=dfd)
+                try:
+                    t, o = _cache_scan(sub, cutoff, deadline, budget)
+                finally:
+                    os.close(sub)
+                total, old = total + t, old + o
+            elif e.is_file(follow_symlinks=False):
+                st = e.stat(follow_symlinks=False)
+                size = st.st_blocks * 512
+                total += size
+                if st.st_uid == os.geteuid() and max(st.st_atime, st.st_mtime) < cutoff:
+                    old += size
+        except OSError:
+            continue
+    return total, old
+
+
+def _cache_cutoff():
+    return time.time() - CACHE_UNUSED_DAYS * 86400
+
+
 @check
 def check_user_cache():
-    return _size_check("user-cache", "Application caches", home_path(".cache"),
-                       "Browsers and apps keep caches here. They rebuild themselves, so this is mostly about "
-                       "disk space.", None, "", 5 * 1024 * 1024 * 1024)
+    cid, cat, title = "user-cache", "care", "Application caches"
+    why = ("Browsers and apps keep caches in ~/.cache. They rebuild themselves, so this is about disk space. "
+           "Vigil only clears files no app has used for a week, so nothing that is running is disturbed.")
+    try:
+        dfd = _open_home_dir([".cache"])
+    except (OSError, Refused):
+        return result(cid, cat, title, "pass", "Empty.", why, weight=0)
+    try:
+        total = old = 0
+        budget = [WALK_MAX_ENTRIES]
+        deadline = time.monotonic() + WALK_MAX_SECONDS
+        with os.scandir(dfd) as it:
+            tops = [e.name for e in it if e.name not in CACHE_SKIP]
+        for name in tops:
+            try:
+                st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+                if stat.S_ISDIR(st.st_mode):
+                    sub = os.open(name, O_DIR, dir_fd=dfd)
+                    try:
+                        t, o = _cache_scan(sub, _cache_cutoff(), deadline, budget)
+                    finally:
+                        os.close(sub)
+                elif stat.S_ISREG(st.st_mode):
+                    t = st.st_blocks * 512
+                    o = t if st.st_uid == os.geteuid() and max(st.st_atime, st.st_mtime) < _cache_cutoff() else 0
+                else:
+                    continue
+            except OSError:
+                continue
+            total, old = total + t, old + o
+    finally:
+        os.close(dfd)
+    if not total:
+        return result(cid, cat, title, "pass", "Empty.", why, weight=0)
+    if old < 1024 * 1024:
+        return result(cid, cat, title, "pass", "%s, all of it in use." % human(total), why, weight=0)
+    return result(cid, cat, title, "warn" if old >= 5 * 1024 ** 3 else "info",
+                  "%s; %s not used in the past week." % (human(total), human(old)), why,
+                  fix=fix("helper", "clean-app-cache", "Clear unused"), weight=0)
+
+
+_UNITS = {"B": 1, "KiB": 1024, "MiB": 1024 ** 2, "GiB": 1024 ** 3, "TiB": 1024 ** 4}
+_PACCACHE_SAVED = re.compile(r"disk space saved: ([0-9]+(?:\.[0-9]+)?) (B|KiB|MiB|GiB|TiB)\)")
+
+
+def _paccache_freeable():
+    """Bytes `paccache -rk2` plus `paccache -ruk0` would free, from dry runs; None if unknown."""
+    tool = "/usr/bin/paccache"
+    if not is_trusted_executable(sys_path(tool)):
+        return None
+    total = 0
+    for args in (["-d", "-k2"], ["-d", "-u", "-k0"]):
+        rc, out = run([tool] + args + ["--nocolor"], timeout=20, limit=CMD_MAX)
+        if rc != 0:
+            return None
+        if "no candidate packages found" in out:
+            continue
+        m = _PACCACHE_SAVED.search(out)
+        if not m:
+            return None
+        total += int(float(m.group(1)) * _UNITS[m.group(2)])
+    return total
 
 
 @check
 def check_pacman_cache():
-    return _size_check("pacman-cache", "Package cache", sys_path("/var/cache/pacman/pkg"),
-                       "Every package version pacman ever downloaded. Keeping the last two of each is enough "
-                       "to roll back a bad update.", ("terminal", "clean-pacman-cache"), "Keep last two", 3 * 1024 ** 3)
+    cid, cat, title = "pacman-cache", "care", "Package cache"
+    why = ("Every package version pacman downloaded. Omarchy keeps the two newest of each so a bad update can "
+           "be rolled back; Vigil keeps those and frees the rest, including packages you have since removed.")
+    path = sys_path("/var/cache/pacman/pkg")
+    if not exists(path):
+        return result(cid, cat, title, "pass", "Empty.", why, weight=0)
+    size, complete = _dir_size(path, time.monotonic() + WALK_MAX_SECONDS)
+    if not size:
+        return result(cid, cat, title, "pass", "Empty.", why, weight=0)
+    shown = ("" if complete else "at least ") + human(size)
+    free = _paccache_freeable()
+    if free is None:
+        return result(cid, cat, title, "info", "%s. Could not work out how much can be freed." % shown, why,
+                      weight=0)
+    if free < 1024 * 1024:
+        return result(cid, cat, title, "pass", "%s, all of it kept for rollback." % shown, why, weight=0)
+    return result(cid, cat, title, "warn" if free >= 2 * 1024 ** 3 else "info",
+                  "%s; %s can be freed." % (shown, human(free)), why,
+                  fix=fix("terminal", "clean-pacman-cache", "Free %s" % human(free)), weight=0)
 
 
 @check
@@ -3126,6 +3237,17 @@ def fix_optout_off():
     return "Opt-out variables removed. They stop applying from your next login."
 
 
+def _own_writable_dir(dfd):
+    """True if dfd is our directory; makes it writable first (Go and other
+    tools leave read-only folders behind, which would otherwise never empty)."""
+    st = os.fstat(dfd)
+    if st.st_uid != os.geteuid():
+        return False
+    if st.st_mode & 0o700 != 0o700:
+        os.fchmod(dfd, stat.S_IMODE(st.st_mode) | 0o700)
+    return True
+
+
 def _clear_dir_contents(dfd, budget):
     """Delete regular files and empty subdirectories below dfd without ever
     following a symlink; symlinks themselves are unlinked, never followed."""
@@ -3142,7 +3264,7 @@ def _clear_dir_contents(dfd, budget):
             except OSError:
                 continue
             try:
-                if os.fstat(sub).st_uid != os.geteuid():
+                if not _own_writable_dir(sub):
                     continue
                 removed += _clear_dir_contents(sub, budget)
             finally:
@@ -3172,26 +3294,130 @@ def fix_clean_thumbnails():
     return "Removed %d thumbnail%s." % (n, "" if n == 1 else "s")
 
 
+TRASH = (".local", "share", "Trash")
+
+
 def fix_empty_trash():
-    gio = "/usr/bin/gio"
-    if not is_trusted_executable(sys_path(gio)):
-        raise Refused("gio is not installed")
-    rc, _ = run([gio, "trash", "--empty"], timeout=60, limit=4096)
-    if rc != 0:
-        raise Refused("gio could not empty the trash")
+    """Empty the trash directly, following the freedesktop.org trash layout
+    (files/, info/, expunged/ and the directorysizes cache). This needs no
+    desktop session, which the helper deliberately does not have."""
+    budget = [WALK_MAX_ENTRIES]
+    found = False
+    for sub in ("files", "info", "expunged"):
+        try:
+            dfd = _open_home_dir(list(TRASH) + [sub])
+        except FileNotFoundError:
+            continue
+        found = True
+        try:
+            _clear_dir_contents(dfd, budget)
+        finally:
+            os.close(dfd)
+    try:
+        tfd = _open_home_dir(list(TRASH))
+    except FileNotFoundError:
+        tfd = None
+    if tfd is not None:
+        try:
+            os.unlink("directorysizes", dir_fd=tfd)
+        except OSError:
+            pass
+        finally:
+            os.close(tfd)
+    if not found:
+        return "The trash is already empty."
+    if budget[0] <= 0:
+        return "Emptied part of the trash; it held too many files for one go. Run it again."
     return "Trash emptied."
 
 
-def fix_clean_user():
-    """Clean all, the part that needs no root: thumbnails, then the trash."""
-    msgs = [fix_clean_thumbnails()]
-    size, _ = _dir_size(home_path(".local", "share", "Trash"), time.monotonic() + WALK_MAX_SECONDS)
-    if size:
+def _clear_unused(dfd, cutoff, budget):
+    """Delete our files below dfd that nothing has read or written since cutoff,
+    and folders that were already that old and are now empty. Returns bytes freed."""
+    freed = 0
+    with os.scandir(dfd) as it:
+        names = [e.name for e in it][:max(0, budget[0])]
+    for name in names:
+        if budget[0] <= 0:
+            break
+        budget[0] -= 1
         try:
-            msgs.append(fix_empty_trash())
-        except Refused as e:
-            msgs.append("The trash was not emptied: %s." % e)
-    return " ".join(msgs)
+            st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+        except OSError:
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            try:
+                sub = os.open(name, O_DIR, dir_fd=dfd)
+            except OSError:
+                continue
+            try:
+                if not _own_writable_dir(sub):
+                    continue
+                freed += _clear_unused(sub, cutoff, budget)
+            finally:
+                os.close(sub)
+            if st.st_mtime < cutoff:
+                try:
+                    os.rmdir(name, dir_fd=dfd)
+                except OSError:
+                    pass
+        elif st.st_uid == os.geteuid() and max(st.st_atime, st.st_mtime) < cutoff:
+            try:
+                os.unlink(name, dir_fd=dfd)
+                freed += st.st_blocks * 512 if stat.S_ISREG(st.st_mode) else 0
+            except OSError:
+                pass
+    return freed
+
+
+def fix_clean_app_cache():
+    try:
+        dfd = _open_home_dir([".cache"])
+    except FileNotFoundError:
+        return "There are no application caches."
+    try:
+        cutoff, budget, freed = _cache_cutoff(), [WALK_MAX_ENTRIES], 0
+        with os.scandir(dfd) as it:
+            tops = [e.name for e in it if e.name not in CACHE_SKIP]
+        for name in tops:
+            try:
+                st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                try:
+                    sub = os.open(name, O_DIR, dir_fd=dfd)
+                except OSError:
+                    continue
+                try:
+                    if _own_writable_dir(sub):
+                        freed += _clear_unused(sub, cutoff, budget)
+                finally:
+                    os.close(sub)
+                if st.st_mtime < cutoff:
+                    try:
+                        os.rmdir(name, dir_fd=dfd)
+                    except OSError:
+                        pass
+            elif st.st_uid == os.geteuid() and max(st.st_atime, st.st_mtime) < cutoff:
+                try:
+                    os.unlink(name, dir_fd=dfd)
+                    freed += st.st_blocks * 512 if stat.S_ISREG(st.st_mode) else 0
+                except OSError:
+                    pass
+    finally:
+        os.close(dfd)
+    if not freed:
+        return "No application cache needed clearing."
+    return "Freed %s of application cache unused for a week." % human(freed)
+
+
+def fix_clean_user():
+    """Clean all, the part that needs no root: thumbnails, the trash, unused caches."""
+    msgs = [fix_clean_thumbnails(), fix_empty_trash(), fix_clean_app_cache()]
+    return " ".join(m for m in msgs if "already empty" not in m and "application cache" not in m.split(" of ")[0]
+                    and "No application cache" not in m and "no application caches" not in m) \
+        or "Nothing needed cleaning."
 
 
 def fix_credential_perms():
@@ -3242,6 +3468,7 @@ FIXES = {
     "clean-thumbnails": fix_clean_thumbnails,
     "empty-trash": fix_empty_trash,
     "clean-user": fix_clean_user,
+    "clean-app-cache": fix_clean_app_cache,
 }
 
 
