@@ -634,7 +634,7 @@ function levelText(report) {
 }
 
 function categoryLabel(category) {
-  return { overview: "Overview", harden: "Harden", detect: "Detect", supply: "Supply chain",
+  return { overview: "Overview", harden: "Harden", detect: "Detect", supply: "Supply",
            privacy: "Privacy", care: "Care" }[category] || ""
 }
 

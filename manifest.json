@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Vigil",
-    "description": "Security score in the bar; Harden, Detect, Supply chain, Privacy and Care tabs in the panel",
+    "description": "Security score in the bar; Harden, Detect, Supply, Privacy and Care tabs in the panel",
     "category": "System",
     "aliases": [
       "vigil",

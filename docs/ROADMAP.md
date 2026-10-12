@@ -7,7 +7,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 |---|---|---|
 | Harden | Can someone get in? | Omarchy's own security commands |
 | Detect | Is something bad already here? | ClamUI for virus scanning and quarantine |
-| Supply chain | Can I trust what I installed? | Bumblebee for known-compromised components |
+| Supply | Can I trust what I installed? | Bumblebee for known-compromised components |
 | Privacy | What am I leaking? | Black Ops for telemetry blocking |
 | Care | Is the system tidy and recoverable? | Omarchy's orphan and update commands |
 
@@ -33,11 +33,11 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 
 ## Phase 2 (0.2): pillars and hand-offs
 
-- [x] Five pillars: Harden, Detect, Supply chain, Privacy, Care.
+- [x] Five pillars: Harden, Detect, Supply, Privacy, Care (one word each).
 - [x] ClamUI: detected (Flatpak or system package), opened from the panel,
       installed from Flathub on request.
 - [x] Bumblebee: its last result read (never written) and shown under
-      Supply chain.
+      Supply.
 - [x] Inventory of other Omarchy plugins.
 - [x] Avahi edit made fail-closed: refuses an unexpected file layout, keeps
       the original, rolls back if Avahi does not restart.

@@ -280,3 +280,9 @@ test("history helpers", () => {
   assert.equal(M.historySummary([{ date: "2026-10-01", score: 60 }, { date: "2026-10-12", score: 85 }, { date: "2026-10-05", score: 40 }].slice(0, 2)),
     "Oct 1 60 → Oct 12 85 · low 60, high 85")
 })
+
+test("every pillar and tab label is one word", () => {
+  for (const cat of ["overview", "harden", "detect", "supply", "privacy", "care"]) {
+    assert.match(M.categoryLabel(cat), /^[A-Z][a-z]+$/, cat)
+  }
+})

@@ -7,7 +7,7 @@ one panel, five pillars.
 |---|---|
 | **Harden** | Can someone get in? Firewall, SSH, kernel protections, disk encryption, screen lock, sudo, USB and Thunderbolt authorization, updates, open ports. |
 | **Detect** | Is something bad already here? Malware hiding places, virus scanning through [ClamUI](https://github.com/linx-systems/clamui), rootkit checks. |
-| **Supply chain** | Can I trust what I installed? Known-compromised packages through [Bumblebee](https://github.com/duketopceo/omarchy-bumblebee), known vulnerabilities, AUR packages, your other Omarchy plugins. |
+| **Supply** | Can I trust what I installed? Known-compromised packages through [Bumblebee](https://github.com/duketopceo/omarchy-bumblebee), known vulnerabilities, AUR packages, your other Omarchy plugins. |
 | **Privacy** | What does this machine tell the networks it joins? DNS fallback, hardware address, connectivity pings, announcements, telemetry opt-outs. |
 | **Care** | Is the system tidy? Thumbnails, trash, caches, old packages and logs. |
 
@@ -132,7 +132,7 @@ score; checks with weight 0 are information and never lower it.
 | ClamAV virus engine | Whether ClamAV is installed and its signatures are under a week old; updates them with `freshclam`; quick scan of `~/Downloads` in a terminal. |
 | Rootkit Hunter | Installs rkhunter, records a baseline, and runs `rkhunter --check`. |
 
-### Supply chain
+### Supply
 
 | Check | What it does |
 |---|---|
