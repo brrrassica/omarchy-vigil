@@ -183,7 +183,7 @@ Panel {
     if (!report) return
     if (kind === "full-scan") {
       var scanLauncher = Model.launcherPath(report.tools)
-      var scanScript = Model.terminalScript("lynis-scan", report.tools)
+      var scanScript = Model.terminalScript("password-check", report.tools)
       if (scanLauncher !== "" && scanScript !== "") Quickshell.execDetached([scanLauncher, scanScript])
       refreshFeeds("full")
       return

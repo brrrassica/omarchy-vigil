@@ -18,9 +18,9 @@ These hold for every pillar, now and in later phases:
    never put into a command or a notification.
 3. **Virus scans run as you.** ClamAV scans (Vigil's quick scan and ClamUI)
    never run as root: malware scanners have had parser bugs, and running
-   them unprivileged limits what a malicious file can do. Lynis needs root
-   to read account data; it runs only in a Full scan you start, in the
-   visible terminal, limited to three test groups.
+   them unprivileged limits what a malicious file can do. The one check
+   that needs root, accounts without a password, runs only in a Full scan
+   you start, in the visible terminal, and keeps only account names.
 4. **Hand off, don't absorb.** ClamUI keeps quarantine, Bumblebee keeps its
    catalog, Black Ops keeps telemetry blocking. Vigil reads their results and
    opens them; it does not run their code or write their files.
@@ -80,12 +80,15 @@ no polkit policy, no service, no timer and no daemon.
   Each script prints what it will do and waits for Enter before running.
   `tests/model.test.mjs` runs `bash -n` on every script.
 - **Learn more** opens a page with `xdg-open` (root-owned, in `/usr/bin`) as
-  a two-element argv, no shell. The URL is either a constant from the `DOCS`
-  table in `Model.js` or Lynis's page built from a test ID that must match
-  `lynis-[a-z]{3,6}-[0-9]{4}`; anything else is dropped when the report is
-  validated. Lynis row names and text come from files root owns
-  (`/usr/share/lynis/db/tests.db`, and Lynis's report copied by the terminal
-  action) and are cleaned and shown as plain text only.
+  a two-element argv, no shell. The URL is a constant from the `DOCS` table
+  in `Model.js`, chosen by id; any other id is dropped when the report is
+  validated.
+- The password check's terminal step runs one constant `awk` over
+  `/etc/shadow` with sudo and writes only the names of accounts whose
+  password field is empty, as you, to a 0600 file in the state folder. The
+  helper reads it with its owner-checked, no-follow reader, keeps only names
+  that are valid account names and exist in `/etc/passwd`, and treats the
+  file's date as when the check last ran.
 - The screen-lock fix runs Omarchy's own `omarchy-shell-config` helper
   (resolved from a trusted directory, no root) with a constant `jq` program,
   the way Omarchy's own commands edit `shell.json`.

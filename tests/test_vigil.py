@@ -1372,11 +1372,11 @@ def test_cli_refresh_feeds_arguments():
 # Source dates and the last full update, shown on the Overview
 
 def test_source_status_lists_only_what_is_set_up(v):
-    assert v.source_status() == []
+    assert [s["id"] for s in v.source_status()] == ["password-check"]       # always offered: run a Full scan
     v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan", v.ROOT + "/usr/bin/arch-audit"}
     os.makedirs(os.path.join(v.HOME, "Downloads"))
     got = {s["id"]: s for s in v.source_status()}
-    assert set(got) == {"signatures", "virus-scan", "arch-audit"}
+    assert set(got) == {"signatures", "virus-scan", "arch-audit", "password-check"}
     assert got["signatures"]["state"] == "never" and got["arch-audit"]["state"] == "never"
     sysfile(v, "/var/lib/clamav/daily.cld", "")
     v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
@@ -1414,7 +1414,8 @@ def test_last_run_recorded(v):
     v.refresh_due_feeds(force=True)
     assert v.last_run()["ok"] is True
     report = v.audit(peek=True)
-    assert report["lastRun"]["ok"] is True and [s["id"] for s in report["sources"]] == ["arch-audit"]
+    assert report["lastRun"]["ok"] is True
+    assert [s["id"] for s in report["sources"]] == ["arch-audit", "password-check"]
 
 
 def test_update_message_separates_refreshing_from_findings(v):
@@ -1437,7 +1438,8 @@ def test_source_labels_name_the_source_not_a_finding(v):
     v.TRUSTED |= {v.ROOT + "/usr/bin/arch-audit", v.ROOT + "/usr/bin/clamscan"}
     os.makedirs(os.path.join(v.HOME, "Downloads"))
     labels = [s["label"] for s in v.source_status()]
-    assert labels == ["ClamAV virus signatures", "Downloads virus scan", "Arch vulnerability database"]
+    assert labels == ["ClamAV virus signatures", "Downloads virus scan", "Arch vulnerability database",
+                      "Full scan (password check)"]
 
 
 def test_warnings_cost_less_than_failures(v):
@@ -1447,74 +1449,75 @@ def test_warnings_cost_less_than_failures(v):
 
 
 # --------------------------------------------------------------------------
-# Lynis (Full scan): only the shortlisted, newcomer-relevant tests become rows.
+# Accounts, shell history and old network services (Vigil's own; Lynis is retired)
 
-LYNIS_DAT = """report_datetime_end=2026-10-12 10:00:03
-warning[]=AUTH-9283|Found accounts without password|-|-|
-warning[]=AUTH-9204|Multiple users with UID 0 found in passwd file|-|-|
-suggestion[]=AUTH-9204|Use vipw to delete the 'toor' user if not used.|-|-|
-suggestion[]=AUTH-9262|Install a PAM module for password strength testing|-|-|
-suggestion[]=INSE-8322|Removing the telnet server package and replace with SSH when possible|-|-|
-suggestion[]=not an id|Should be dropped|-|-|
-warning[]=HOME-9310|\x1b[31mIncorrect\u202e file type found for shell history file|-|-|
+PASSWD = """root:x:0:0::/root:/usr/bin/bash
+bin:x:1:1::/:/usr/bin/nologin
+marc:x:1000:1000::/home/marc:/usr/bin/bash
 """
 
 
-def lynis_state(v, text):
-    put(Path(v.HOME, ".local/state/omarchy-vigil/lynis.dat"), text, 0o600)
+def test_accounts_clean(v):
+    sysfile(v, "/etc/passwd", PASSWD)
+    c = v.check_accounts()
+    assert c["status"] == "pass" and "A Full scan also checks" in c["summary"]
+    put(Path(v.HOME, ".local/state/omarchy-vigil/no-password.txt"), "", 0o600)
+    assert v.check_accounts()["summary"] == "No extra root accounts, shared IDs or accounts without a password."
 
 
-def test_parse_lynis(v):
-    d = v.parse_lynis(LYNIS_DAT)
-    assert d["date"] == "2026-10-12"
-    assert [i["id"] for i in d["items"]] == ["AUTH-9283", "AUTH-9204", "AUTH-9204", "AUTH-9262", "INSE-8322",
-                                             "HOME-9310"]
-    assert "\x1b" not in d["items"][-1]["text"] and "\u202e" not in d["items"][-1]["text"]
-    assert v.parse_lynis("foo=bar\n") is None and v.parse_lynis("") is None
+def test_accounts_findings(v):
+    sysfile(v, "/etc/passwd", PASSWD + "toor:x:0:0::/root:/usr/bin/bash\ntwin:x:1000:1000::/home/t:/bin/sh\n")
+    put(Path(v.HOME, ".local/state/omarchy-vigil/no-password.txt"), "marc\nnot-a-user\n../../x\n", 0o600)
+    c = v.check_accounts()
+    assert c["status"] == "fail"
+    assert c["summary"] == ("Another account has root's powers, 1 account has no password and some accounts "
+                            "share one ID.")
+    assert "Root powers: toor" in c["detail"] and "No password: marc" in c["detail"]
+    assert "Same ID: marc, twin" in c["detail"] and "not-a-user" not in c["detail"]
+    assert "sudo passwd -l" in c["howto"]
+    sysfile(v, "/etc/passwd", PASSWD + "twin:x:1000:1000::/home/t:/bin/sh\n")
+    put(Path(v.HOME, ".local/state/omarchy-vigil/no-password.txt"), "", 0o600)
+    assert v.check_accounts()["status"] == "warn"
 
 
-def test_only_shortlisted_lynis_tests_become_rows(v):
-    lynis_state(v, LYNIS_DAT)
-    rows = {r["id"]: r for r in v.lynis_rows()}
-    assert set(rows) == {"lynis-auth-9283", "lynis-auth-9204", "lynis-inse-8322", "lynis-home-9310"}
-    r = rows["lynis-auth-9204"]
-    assert r["title"] == "Another account with root powers" and r["status"] == "warn" and r["weight"] == 1
-    assert r["summary"] == "Multiple users with UID 0 found in passwd file"
-    assert "toor" in r["detail"] and "2026" not in r["detail"]
-    assert r["fix"] == {"kind": "docs", "action": "lynis-auth-9204", "label": "Learn more"}
-    assert r["howto"] and r["why"].count(". ") <= 1
-    assert rows["lynis-home-9310"]["category"] == "detect"
-    for tid, (pillar, title, why, howto) in v.LYNIS_TESTS.items():
-        assert re.fullmatch(r"[A-Z]{4}-[0-9]{4}", tid) and pillar in ("harden", "detect") and title and howto
+def test_accounts_password_list_must_be_ours(v, tmp_path):
+    sysfile(v, "/etc/passwd", PASSWD)
+    planted = put(tmp_path / "planted", "marc\n")
+    d = Path(v.HOME, ".local/state/omarchy-vigil")
+    d.mkdir(parents=True, mode=0o700)
+    os.symlink(planted, d / "no-password.txt")
+    assert v.no_password_scan() == ("", None)
+    assert v.check_accounts()["status"] == "pass"
 
 
-def test_lynis_rows_in_a_full_audit_and_reviews_persist(v):
-    lynis_state(v, LYNIS_DAT)
-    checks = {c["id"]: c for c in v.audit(peek=True)["checks"]}
-    assert "lynis-auth-9283" in checks and "lynis-auth-9262" not in checks
-    assert "scanner-lynis" not in checks and "scanner-rkhunter" not in checks
-    assert v.set_dismissed("lynis-auth-9283", True)["ok"]
-    lynis_state(v, LYNIS_DAT.replace("10-12", "10-19"))           # next Full scan, same finding
-    assert {c["id"]: c for c in v.audit(peek=True)["checks"]}["lynis-auth-9283"]["dismissed"]
-    lynis_state(v, LYNIS_DAT.replace("Found accounts without password", "Found accounts without password|bob"))
-    assert not {c["id"]: c for c in v.audit(peek=True)["checks"]}["lynis-auth-9283"]["dismissed"]  # new evidence
+def test_shell_history(v):
+    assert v.check_shell_history()["status"] == "pass"
+    put(Path(v.HOME, ".bash_history"), "ls\n")
+    assert v.check_shell_history()["status"] == "pass"
+    os.symlink("/dev/null", Path(v.HOME, ".zsh_history"))
+    c = v.check_shell_history()
+    assert c["status"] == "warn" and "~/.zsh_history is a link" in c["detail"] and c["howto"]
 
 
-def test_lynis_is_a_source_on_the_overview(v):
-    assert not [s for s in v.source_status() if s["id"] == "lynis"]
-    v.TRUSTED.add(v.sys_path("/usr/bin/lynis"))
-    assert [s for s in v.source_status() if s["id"] == "lynis"][0]["state"] == "never"
-    lynis_state(v, "report_datetime_end=%s 10:00:00\n" % time.strftime("%Y-%m-%d"))
-    src = [s for s in v.source_status() if s["id"] == "lynis"][0]
-    assert src["state"] == "ok" and src["label"] == "Full scan (password checks)"
+def test_old_services(v):
+    assert v.check_old_services()["status"] == "pass"
+    v.UNITS[("is-enabled", "telnet.socket")] = "enabled"
+    v.UNITS[("is-active", "tftpd.service")] = "active"
+    c = v.check_old_services()
+    assert c["status"] == "warn" and c["summary"] == "telnet.socket and tftpd.service switched on."
+    assert c["fix"] == {"kind": "terminal", "action": "old-services-off", "label": "Switch them off"}
 
 
-def test_lynis_copy_must_be_ours(v, tmp_path):
-    elsewhere = put(tmp_path / "planted.dat", LYNIS_DAT)
-    state = Path(v.HOME, ".local/state/omarchy-vigil")
-    state.mkdir(parents=True, mode=0o700)
-    os.symlink(elsewhere, state / "lynis.dat")
-    assert v.lynis_rows() == []
+def test_old_services_list_matches_the_switch_off_script(v):
+    m = re.search(r"var OLD_SERVICES = \[(.*?)\]", (REPO / "Model.js").read_text(), re.S)
+    assert tuple(re.findall(r'"([a-z.-]+)"', m.group(1))) == v.OLD_SERVICES
+
+
+def test_password_check_is_a_source_on_the_overview(v):
+    assert [s for s in v.source_status() if s["id"] == "password-check"][0]["state"] == "never"
+    put(Path(v.HOME, ".local/state/omarchy-vigil/no-password.txt"), "", 0o600)
+    src = [s for s in v.source_status() if s["id"] == "password-check"][0]
+    assert src["state"] == "ok" and src["label"] == "Full scan (password check)"
 
 
 def test_update_sources_skips_the_virus_scan(v, monkeypatch):

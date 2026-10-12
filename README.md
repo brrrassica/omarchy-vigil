@@ -26,7 +26,7 @@ root runs in a terminal you can watch.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.12.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.13.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -72,21 +72,19 @@ fix first.
 | Virus scan of `~/Downloads` (ClamAV, as you) | once a week |
 | ClamAV virus signatures | continuously, by ClamAV's own update service |
 | Bumblebee's catalog and scan | by the Bumblebee plugin |
-| Password checks (Lynis: accounts, insecure servers, hidden history) | only in a **Full scan**, since they need your password |
+| Accounts without a password | only in a **Full scan**, the one check that needs your password |
 | Cleaning (Care) | only when you ask; Vigil only measures sizes by itself |
 
 The Overview has two buttons:
 
 - **Full scan** (or `S`) checks everything: it updates every source, scans
-  `~/Downloads` for viruses, and runs the few checks that need your password
-  (other accounts with root powers or no password, old insecure network
-  servers, hidden shell history) in one terminal, so sudo asks once. It
-  installs Lynis for those checks the first time. Every tab then shows the
-  results, and you fix what you choose from there.
+  `~/Downloads` for viruses, and checks for accounts without a password, the
+  one check that needs your password, in a terminal where sudo asks once.
+  Every tab then shows the results, and you fix what you choose from there.
 - **Update sources** (or `U`) only refreshes the lists Vigil checks against
   (known vulnerabilities, malicious packages, AUR status), with no password
-  and no scan. ClamAV's signatures update by themselves, and Lynis updates
-  with your system updates, so neither needs a button.
+  and no scan. ClamAV's signatures update by themselves, so they need no
+  button.
 
 Below them, one line per source you have set up (virus signatures, the virus
 scan, known vulnerabilities, malicious packages, AUR status, the last Full
@@ -101,14 +99,14 @@ or two), **How to fix**, and **Details**. Below that are its buttons:
 
 - **Fix** (named for what it does) when Vigil can do it, or **Learn more** /
   **Show …** when it can't: a guide in your browser (the Arch Wiki, a
-  plugin's page, Lynis's own page for its test) or a read-only command in a
+  plugin's page) or a read-only command in a
   terminal.
 - **Undo Vigil's change** once Vigil has changed something for it.
 - **Mark as reviewed** on anything that is not passing, when you don't want
   that fix: a port you opened on purpose, an unencrypted desktop that never
-  leaves home, a Lynis suggestion meant for servers. It stays in its tab,
-  dimmed, no longer lowers the score or notifies, and stays reviewed through
-  every later check and Lynis run. **Show again** undoes it.
+  leaves home. It stays in its tab, dimmed, no longer lowers the score or
+  notifies, and stays reviewed through every later check and scan. **Show
+  again** undoes it.
 
 For findings that report evidence rather than a setting (open ports, startup
 files, file changes, exposed secrets, infected files, known-malicious or
@@ -176,7 +174,6 @@ lower it. A warning you mark as reviewed stops counting.
 | System updates | No full update in 14 days (warning) or 30 days (failure) | `omarchy-update` (terminal) |
 | Open network ports | Programs listen on the network with no firewall in front | **Show listeners** runs `sudo ss -tulpn` (read-only) |
 | Exposed secrets | API keys and tokens in the formats their providers publish (AWS, GitHub, GitLab, Slack, Stripe, Anthropic, OpenAI, Google, private keys) in your shell histories, or credential files such as `~/.aws/credentials`, `~/.netrc` and `~/.git-credentials` readable by other accounts. Shows the file and line, never the secret. | Makes credential files private (no root); revoke leaked keys with their provider |
-| Password checks | From a Full scan (see [Lynis](#lynis)) | |
 
 ### Detect
 
@@ -228,27 +225,19 @@ trash and unused caches right away, then the package cache and the journal
 in one terminal, so sudo asks once. Orphaned packages are left out on purpose: removing packages
 can take away something you use, so that stays a separate, reviewed step.
 
-### Lynis
+### Accounts, history and old services
 
-Lynis runs hundreds of checks, most written for servers or already covered
-by Vigil in a way a newcomer can act on. A Full scan runs only three of its
-test groups (accounts, insecure network services, home folders), which
-takes seconds, and Vigil shows only the results that matter on a personal
-computer, each in plain words with how to fix it:
+Checks a newcomer benefits from that need no extra tools:
 
-| Lynis test | Shown as |
-|---|---|
-| AUTH-9204 | Another account with root powers |
-| AUTH-9208 | Accounts sharing one ID |
-| AUTH-9283 | Accounts without a password |
-| HOME-9310 | Hidden shell history (Detect) |
-| INSE-8116, 8316, 8320, 8322 | Old network services in xinetd, NIS, TFTP or a telnet server installed |
+| Check | Finding when | Fix |
+|---|---|---|
+| User accounts | Another account has root's powers, accounts share one ID (both from `/etc/passwd`), or an account has no password (from the last Full scan, which reads `/etc/shadow` with sudo and keeps only the account names) | How to fix and the Arch Wiki guide; Vigil does not change accounts itself, since a mistake can lock you out |
+| Shell history | A history file (`~/.bash_history`, `~/.zsh_history`, `~/.histfile`, fish) is a link or not a normal file, a way attackers hide what they typed | Guide (MITRE ATT&CK); mark as reviewed if you did it yourself |
+| Old network services | A telnet, rsh, rlogin, FTP, TFTP, NIS or xinetd service is switched on | **Switch them off**: `sudo systemctl disable --now` on each one that is on (terminal) |
 
-The terminal copies just the warning and suggestion lines of
-`/var/log/lynis-report.dat`, which only root can read, into Vigil's state
-folder. Each finding has **Learn more** (Lynis's page for the test) and
-**Mark as reviewed**; a review lasts through later Full scans unless Lynis
-reports something new.
+Earlier versions ran Lynis for these. Vigil now does them itself: Lynis
+looks for Debian package names that never match on Arch, and most of its
+hundreds of other tests are written for servers.
 
 ## How actions run
 
@@ -269,9 +258,8 @@ The panel always says which kind an action is:
 4. **Open an app or a guide**: **Open ClamUI** starts ClamUI directly, and
    **Learn more** opens a page with `xdg-open`, each with a fixed command and
    no shell. Pages come only from a fixed list in `Model.js` (Arch Wiki,
-   Bumblebee, Black Ops) or are Lynis's page for a test ID matching
-   `[A-Z]{3,6}-[0-9]{4}`; nothing else in the report becomes a URL. They
-   change nothing, so they do not ask first.
+   MITRE ATT&CK, Bumblebee, Black Ops); nothing in the report becomes a URL.
+   They change nothing, so they do not ask first.
 5. **Mark as reviewed** and **Show again** only change Vigil's own state
    file, so they do not ask first either.
 
@@ -311,11 +299,10 @@ week Vigil also:
   and paru do on every update.
 
 Each happens only once the tool is installed, and turning `autoUpdate` off
-limits it to when you press **Check now**. Actions you start yourself also use
+limits it to when you press **Update sources** or **Full scan**. Actions you start yourself also use
 the network and say so first: installing ClamUI (Arch mirrors, dl.flathub.org,
 ClamAV's servers), installing a tool (Arch mirrors), ClamAV's signature
-service (ClamAV's servers), and `omarchy-update`. Lynis, in a Full scan,
-works offline.
+service (ClamAV's servers), and `omarchy-update`.
 
 ## Files Vigil writes
 
@@ -327,7 +314,7 @@ works offline.
 | `~/.local/state/omarchy-vigil/osv.json` | the helper, mode 0600 | weekly and on Check now: known-malicious packages found, if any, and which folders were checked |
 | `~/.local/state/omarchy-vigil/aur.json` | the helper, mode 0600 | weekly and on Check now: names of AUR packages that left the AUR or have no maintainer |
 | `~/.local/state/omarchy-vigil/virus-scan.json` | the helper, mode 0600 | weekly and on Scan now: names of infected files found in Downloads, if any |
-| `~/.local/state/omarchy-vigil/lynis.dat` | the Lynis terminal action, mode 0600 | when you run Lynis from Vigil: the score, warning and suggestion lines of its report |
+| `~/.local/state/omarchy-vigil/no-password.txt` | the Full scan terminal step, mode 0600 | each Full scan: names of accounts with an empty password, usually none |
 | `~/.local/state/omarchy-vigil/last-run.json` | the helper, mode 0600 | after each weekly or button update: its date, time and whether every source updated |
 | `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` | the helper | only when you set the opt-out variables |
 | `/etc/sysctl.d/90-omarchy-vigil.conf` | terminal action | only when you apply the kernel settings |
@@ -366,8 +353,8 @@ nothing keeps running. These stay behind until you remove them:
   Easier: use **Undo** on each finding before you remove Vigil.
 - Apps and scanners you installed through Vigil. Remove ClamUI with
   `flatpak uninstall --user io.github.linx_systems.ClamUI`, and `clamav`,
-  `lynis`, `arch-audit` or `osv-scanner` with `omarchy pkg drop <name>` (and
-  `rkhunter`, if an earlier Vigil installed it).
+  `arch-audit` or `osv-scanner` with `omarchy pkg drop <name>` (and `lynis`
+  or `rkhunter`, if an earlier Vigil installed them).
   ClamAV's update service stops with `sudo systemctl disable --now clamav-freshclam.service`.
 
 ## Requirements

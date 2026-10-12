@@ -184,6 +184,10 @@ var PKG_DU = "$(/usr/bin/du -sh /var/cache/pacman/pkg 2>/dev/null | /usr/bin/cut
 var PACCACHE_RUN = "before=" + PKG_DU + "; sudo /usr/bin/paccache -rk2; sudo /usr/bin/paccache -ruk0; "
   + "echo \"Package cache: $before before, " + PKG_DU + " now.\""
 
+// Must match OLD_SERVICES in bin/vigil (a test checks).
+var OLD_SERVICES = ["telnet.socket", "rsh.socket", "rlogin.socket", "ftpd.service", "tftpd.socket",
+                    "tftpd.service", "xinetd.service", "ypserv.service", "ypbind.service"]
+
 var TERMINAL_ACTIONS = {
   "firewall-on": {
     title: "Turn the firewall on",
@@ -341,23 +345,25 @@ var TERMINAL_ACTIONS = {
     what: ["Runs: clamscan --recursive --infected ~/Downloads", "Only infected files are listed. Nothing is deleted."],
     run: "/usr/bin/clamscan --recursive --infected -- \"$HOME/Downloads\""
   },
-  "lynis-scan": {
-    title: "Full scan: password-protected checks",
-    what: ["Runs Lynis for the checks that need your password: accounts with root powers or no password,",
-           "old insecure network servers and hidden shell history. Only those three Lynis groups run,",
-           "so it takes seconds. Installs Lynis with omarchy pkg add first if it is missing.",
-           "Then copies the warning and suggestion lines of its report to ~/.local/state/omarchy-vigil/lynis.dat."],
-    tool: "omarchy-pkg-add",
-    run: "umask 077; d=\"$HOME/.local/state/omarchy-vigil\"; "
-      + "if [ ! -x /usr/bin/lynis ]; then echo 'Installing Lynis first.'; @TOOL@ lynis; fi; "
-      + "echo 'Checking accounts and network services. This takes a few seconds.'; "
-      + "sudo /usr/bin/lynis audit system --quick --quiet --no-colors "
-      + "--tests-from-group 'authentication insecure_services homedirs' >/dev/null; "
-      + "/usr/bin/mkdir -p \"$d\"; "
-      + "sudo /usr/bin/grep -E '^(report_datetime_end|warning\\[\\]|suggestion\\[\\])=' "
-      + "/var/log/lynis-report.dat > \"$d/lynis.dat.new\"; "
-      + "/usr/bin/mv -f \"$d/lynis.dat.new\" \"$d/lynis.dat\"; "
+  "password-check": {
+    title: "Full scan: check for accounts without a password",
+    what: ["Only root can read where passwords are kept (/etc/shadow), so this part needs sudo.",
+           "It lists the names of accounts whose password is empty, nothing else, into",
+           "~/.local/state/omarchy-vigil/no-password.txt for Vigil to read."],
+    run: "umask 077; d=\"$HOME/.local/state/omarchy-vigil\"; /usr/bin/mkdir -p \"$d\"; "
+      + "echo 'Checking for accounts without a password.'; "
+      + "sudo /usr/bin/awk -F: '$2 == \"\" { print $1 }' /etc/shadow > \"$d/no-password.txt.new\"; "
+      + "/usr/bin/mv -f \"$d/no-password.txt.new\" \"$d/no-password.txt\"; "
       + "echo 'Done. The rest of the Full scan finishes in the background; open Vigil to see the results.'"
+  },
+  "old-services-off": {
+    title: "Switch off old network services",
+    what: ["For telnet, rsh, rlogin, FTP, TFTP, NIS and xinetd: runs sudo systemctl disable --now",
+           "on each one that is switched on. Nothing is uninstalled.",
+           "To turn one back on later: sudo systemctl enable --now <name>"],
+    run: "for u in " + OLD_SERVICES.join(" ") + "; do "
+      + "if /usr/bin/systemctl is-enabled --quiet \"$u\" 2>/dev/null || /usr/bin/systemctl is-active --quiet \"$u\"; "
+      + "then echo \"Switching off $u\"; sudo /usr/bin/systemctl disable --now \"$u\"; fi; done"
   },
   "restart": {
     title: "Restart the computer",
@@ -486,9 +492,8 @@ var TERMINAL_ACTIONS = {
 
 // App actions open another program you installed, with a fixed argv and no
 // shell. The helper reports how the app is installed; anything else is "".
-// "Learn more" pages, opened in the browser. Only these, and Lynis's own page
-// for a test ID (action "lynis-<id>"), can be opened; nothing else from the
-// report ever becomes a URL.
+// "Learn more" pages, opened in the browser. Only these can be opened;
+// nothing from the report ever becomes a URL.
 var DOCS = {
   "arch-ssh-keys": "https://wiki.archlinux.org/title/SSH_keys",
   "arch-gnupg": "https://wiki.archlinux.org/title/GnuPG",
@@ -497,15 +502,14 @@ var DOCS = {
   "arch-autostart": "https://wiki.archlinux.org/title/Autostarting",
   "arch-aur": "https://wiki.archlinux.org/title/Arch_User_Repository",
   "bumblebee": "https://github.com/duketopceo/omarchy-bumblebee",
-  "black-ops": "https://github.com/brightwalker25/omarchy-black-ops"
+  "black-ops": "https://github.com/brightwalker25/omarchy-black-ops",
+  "arch-users": "https://wiki.archlinux.org/title/Users_and_groups",
+  "attack-history": "https://attack.mitre.org/techniques/T1070/003/"
 }
-var LYNIS_DOC_RE = /^lynis-([a-z]{3,6}-[0-9]{4})$/
 
 function docsUrl(id) {
   if (typeof id !== "string") return ""
-  if (Object.prototype.hasOwnProperty.call(DOCS, id)) return DOCS[id]
-  var m = LYNIS_DOC_RE.exec(id)
-  return m ? "https://cisofy.com/lynis/controls/" + m[1].toUpperCase() + "/" : ""
+  return Object.prototype.hasOwnProperty.call(DOCS, id) ? DOCS[id] : ""
 }
 
 function docsCommand(id, tools) {
@@ -549,11 +553,7 @@ function terminalScript(id, tools) {
   var a = terminalAction(id)
   if (!a) return ""
   var body = ""
-  if (a.tool && a.run) {
-    var tdir = toolDir(tools, a.tool)
-    if (tdir === "") return ""
-    body = a.run.split("@TOOL@").join(tdir + "/" + a.tool)
-  } else if (a.tool) {
+  if (a.tool) {
     var dir = toolDir(tools, a.tool)
     if (dir === "") return ""
     body = dir + "/" + a.tool + a.args
@@ -673,7 +673,7 @@ function validCheck(c) {
   }
 }
 
-var SOURCE_IDS = ["signatures", "virus-scan", "arch-audit", "osv", "aur", "lynis", "bumblebee"]
+var SOURCE_IDS = ["signatures", "virus-scan", "arch-audit", "osv", "aur", "password-check", "bumblebee"]
 var SOURCE_STATES = ["ok", "stale", "never", "failed"]
 var DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
@@ -712,7 +712,7 @@ function relativeDay(date, now) {
 
 function sourceLine(src, now) {
   // Scans "ran"; databases and signatures are "updated".
-  var scan = src.id === "virus-scan" || src.id === "bumblebee" || src.id === "lynis"
+  var scan = src.id === "virus-scan" || src.id === "bumblebee" || src.id === "password-check"
   if (src.state === "never") return scan ? "not run yet" : "not updated yet"
   if (src.state === "failed")
     return (scan ? "last run failed" : "last update failed") + (src.date !== "" ? "; last good " + relativeDay(src.date, now) : "")
@@ -732,13 +732,11 @@ function fullScanConfirmation(report) {
   if (!report) return null
   var lines = ["Updates every source, as Update sources does.",
                "Scans your Downloads folder for viruses, if ClamAV is installed (Detect tab).",
-               "Runs Lynis for the few checks that need your password: other accounts with root powers or "
-               + "no password, old insecure network servers and hidden shell history. Installs Lynis first "
-               + "if needed.",
-               "A terminal opens for that part; sudo asks for your password once.",
+               "Checks for accounts without a password, the one check that needs your password. A terminal "
+               + "opens for it and sudo asks once; it only lists account names.",
                "Then every tab is checked again."]
-  if (launcherPath(report.tools) === "" || terminalScript("lynis-scan", report.tools) === "")
-    lines.splice(2, 2, "The password checks need the Omarchy terminal tools, which were not found; the rest still runs.")
+  if (launcherPath(report.tools) === "" || terminalScript("password-check", report.tools) === "")
+    lines.splice(2, 1, "The password check needs the Omarchy terminal tools, which were not found; the rest still runs.")
   return { title: "Full scan", lines: lines }
 }
 

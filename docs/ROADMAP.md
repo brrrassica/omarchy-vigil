@@ -107,7 +107,17 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.12 (this release): Full scan, and only what helps a newcomer
+## 0.13 (this release): Lynis retired
+
+- [x] Vigil does the checks Lynis was kept for: other root accounts and
+      shared IDs (from `/etc/passwd`), accounts without a password (Full
+      scan's one sudo step, a single `awk` over `/etc/shadow`), hidden shell
+      history, and old network services (telnet, rsh, rlogin, FTP, TFTP,
+      NIS, xinetd) as systemd units, with **Switch them off**. Lynis's
+      versions looked for Debian package names and never matched on Arch.
+- [x] One helper fewer: nothing to install for a Full scan.
+
+## 0.12: Full scan, and only what helps a newcomer
 
 - [x] Two buttons instead of one: **Full scan** (`S`) checks everything,
       including the checks that need a password, with one sudo prompt in a

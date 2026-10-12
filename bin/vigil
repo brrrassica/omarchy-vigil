@@ -43,7 +43,7 @@ import sys
 import time
 from base64 import b64decode
 
-VERSION = "0.12.0"
+VERSION = "0.13.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -559,7 +559,7 @@ def _resolved_config():
 
 
 def _modprobe_text():
-    """Text of /etc/modprobe.conf and /etc/modprobe.d/*, the files Lynis reads too."""
+    """Text of /etc/modprobe.conf and /etc/modprobe.d/*."""
     parts = []
     try:
         data = read_file(sys_path("/etc/modprobe.conf"), SMALL_FILE_MAX)
@@ -611,7 +611,7 @@ def _has_firewire_port():
 def check_firewire():
     cid, cat, title = "firewire", "harden", "FireWire"
     why = ("A FireWire port lets a plugged-in device read memory directly, which can be used to "
-           "steal data from a locked laptop. Few machines still have one (Lynis test STRG-1846).")
+           "steal data from a locked laptop. Few machines still have one.")
     text = _modprobe_text()
     if re.search(r"(?m)^[ \t]*(blacklist|install)[ \t]+(ohci1394|firewire[-_]ohci|firewire-core)\b", text):
         return result(cid, cat, title, "pass", "Turned off.", why, weight=0)
@@ -1337,103 +1337,137 @@ def _scanner_check(sid, binary, cat, title, why, run_action, install_action):
     return result(cid, cat, title, "info", summary, why, fix=fix("terminal", run_action, "Run"), weight=0)
 
 
-# Full scan runs Lynis for the few checks that need root and matter on a
-# personal computer. It runs only three Lynis test groups (LYNIS_GROUPS, in
-# Model.js's lynis-scan script) and Vigil shows only the tests in LYNIS_TESTS;
-# the rest of Lynis is written for servers, or Vigil already checks it its own
-# way. The terminal action copies just the warning and suggestion lines of
-# /var/log/lynis-report.dat (root-only) into the state folder as LYNIS_NAME.
-LYNIS_NAME = "lynis.dat"
-LYNIS_STALE_DAYS = 30
-LYNIS_ROW_PREFIX = "lynis-"
-_LYNIS_ID = re.compile(r"^[A-Z]{3,6}(-[0-9]{4})?$")
+# --- Accounts, shell history and old network services -----------------------
+# What a newcomer gains from a full audit tool, done Vigil's own way. Only the
+# empty-password check needs root (/etc/shadow): Full scan's terminal step
+# writes just the names of such accounts to NO_PASSWORD_NAME in the state
+# folder, and the date of that file is when the check last ran.
 
-# id: (pillar, title, why, how to fix)
-LYNIS_TESTS = {
-    "AUTH-9204": ("harden", "Another account with root powers",
-                  "An account other than root has root's user ID, so it can do anything on this computer. "
-                  "Attackers add one to keep a way back in.",
-                  "Unless you created it on purpose, do not delete anything yourself: get help from someone "
-                  "you trust, because it can mean someone broke in."),
-    "AUTH-9208": ("harden", "Accounts sharing one ID",
-                  "Two accounts have the same user ID, so each can read and change the other's files.",
-                  "Get help to give each account its own ID; changing IDs by hand can lock you out."),
-    "AUTH-9283": ("harden", "Accounts without a password",
-                  "An account with an empty password can be used by anyone, with no password at all.",
-                  "Lock accounts you do not use with sudo passwd -l <name>, or give them a password with "
-                  "sudo passwd <name>. Lynis lists the accounts (Learn more)."),
-    "HOME-9310": ("detect", "Hidden shell history",
-                  "A shell history file is not a normal file, for example a link to /dev/null. Attackers "
-                  "do this to hide the commands they typed.",
-                  "If you did not set this up yourself, get help before changing anything."),
-    "INSE-8116": ("harden", "Old network services in xinetd",
-                  "xinetd runs old network services that send passwords unencrypted.",
-                  "Remove xinetd unless you know you need it: omarchy pkg drop xinetd."),
-    "INSE-8316": ("harden", "NIS installed",
-                  "NIS shares accounts across a network with weak protection; home computers never need it.",
-                  "Remove it unless you are on a network that uses it: omarchy pkg drop <package>."),
-    "INSE-8320": ("harden", "TFTP installed",
-                  "TFTP transfers files with no password at all; home computers rarely need it.",
-                  "Remove it unless you set it up on purpose: omarchy pkg drop <package>."),
-    "INSE-8322": ("harden", "Telnet server installed",
-                  "A telnet server lets people log in over the network with the password sent unencrypted.",
-                  "Remove the telnet server package and use SSH instead: omarchy pkg drop <package>."),
-}
+NO_PASSWORD_NAME = "no-password.txt"
+FULL_SCAN_STALE_DAYS = 30
+_USER_NAME = re.compile(r"^[a-z_][a-z0-9_-]{0,31}\$?$")
 
 
-def _lynis_field(parts, i, limit):
-    v = parts[i].strip() if len(parts) > i else ""
-    return "" if v in ("", "-") else clean(v, limit)
-
-
-def parse_lynis(text):
-    """{date, items: [{id, kind, text, detail}]} from the copied Lynis report lines, or None."""
-    out = {"date": "", "items": []}
-    seen = set()
+def _passwd_entries():
+    """[(name, uid)] from /etc/passwd, which every account can read; None if unreadable."""
+    try:
+        text = read_text(sys_path("/etc/passwd"))
+    except Refused:
+        return None
+    if text is None:
+        return None
+    out = []
     for line in text.splitlines()[:5000]:
-        key, sep, val = line.partition("=")
-        if not sep:
+        f = line.split(":")
+        if len(f) >= 7 and _USER_NAME.match(f[0]) and f[2].isdigit():
+            out.append((f[0], int(f[2])))
+    return out
+
+
+def no_password_scan():
+    """(date, names) from the last Full scan's password check, or ("", None) if it never ran."""
+    try:
+        dirfd = _open_home_dir(list(STATE_DIR))
+    except (OSError, Refused):
+        return "", None
+    try:
+        try:
+            raw = _read_state_bytes(dirfd, NO_PASSWORD_NAME, 64 * 1024)
+            st = os.stat(NO_PASSWORD_NAME, dir_fd=dirfd, follow_symlinks=False) if raw is not None else None
+        except (Refused, OSError):
+            return "", None
+    finally:
+        os.close(dirfd)
+    if raw is None:
+        return "", None
+    names = [n for n in raw.decode("utf-8", "replace").split() if _USER_NAME.match(n)][:50]
+    return time.strftime("%Y-%m-%d", time.localtime(st.st_mtime)), names
+
+
+@check
+def check_accounts():
+    cid, cat, title = "accounts", "harden", "User accounts"
+    why = ("Attackers who get in often add an account with root's powers, or one without a password, so they "
+           "can come back. A normal Omarchy computer has neither.")
+    entries = _passwd_entries()
+    if entries is None:
+        return result(cid, cat, title, "unknown", "Could not read /etc/passwd.", why, weight=3)
+    known = {n for n, _ in entries}
+    roots = [n for n, u in entries if u == 0 and n != "root"]
+    by_uid = {}
+    for n, u in entries:
+        by_uid.setdefault(u, []).append(n)
+    shared = [", ".join(v) for u, v in sorted(by_uid.items()) if len(v) > 1 and u != 0]
+    date, nopw = no_password_scan()
+    nopw = [n for n in (nopw or []) if n in known]
+    problems, lines, howto = [], [], []
+    if roots:
+        problems.append("another account has root's powers")
+        lines.append("Root powers: " + ", ".join(roots))
+        howto.append("Unless you made it on purpose, do not delete it yourself: get help, because it can mean "
+                     "someone broke in.")
+    if nopw:
+        problems.append("%s no password" % ("1 account has" if len(nopw) == 1 else "%d accounts have" % len(nopw)))
+        lines.append("No password: " + ", ".join(nopw))
+        howto.append("Lock an account you do not use with sudo passwd -l <name>, or give it a password with "
+                     "sudo passwd <name>.")
+    if shared:
+        problems.append("some accounts share one ID")
+        lines += ["Same ID: " + x for x in shared]
+        howto.append("Accounts sharing an ID can use each other's files; get help to give each its own.")
+    if not problems:
+        return result(cid, cat, title, "pass",
+                      "No extra root accounts, shared IDs or accounts without a password." if date else
+                      "No extra root accounts or shared IDs. A Full scan also checks for accounts without a "
+                      "password.", why, weight=3)
+    return result(cid, cat, title, "fail" if roots or nopw else "warn", _and(problems)[:1].upper() + _and(problems)[1:] + ".", why,
+                  clean_block(lines), weight=3, howto=" ".join(howto))
+
+
+SHELL_HISTORIES = ((".bash_history",), (".zsh_history",), (".histfile",), (".local", "share", "fish", "fish_history"))
+
+
+@check
+def check_shell_history():
+    cid, cat, title = "shell-history", "detect", "Shell history"
+    why = ("Your shell keeps the commands you type in a history file. Attackers replace it with a link, often "
+           "to /dev/null, to hide what they typed.")
+    odd = []
+    for parts in SHELL_HISTORIES:
+        try:
+            st = os.lstat(home_path(*parts))
+        except OSError:
             continue
-        if key == "report_datetime_end":
-            if _DATE.match(val[:10]):
-                out["date"] = val[:10]
-        elif key in ("warning[]", "suggestion[]"):
-            parts = val.split("|")
-            tid, text_ = parts[0].strip(), _lynis_field(parts, 1, 160)
-            detail = _lynis_field(parts, 2, 100)
-            if not _LYNIS_ID.match(tid) or not text_ or (tid, text_, detail) in seen or len(out["items"]) >= 400:
-                continue
-            seen.add((tid, text_, detail))
-            out["items"].append({"id": tid, "kind": key[:-2], "text": text_, "detail": detail})
-    return out if out["date"] or out["items"] else None
+        if not stat.S_ISREG(st.st_mode):
+            kind = "a link" if stat.S_ISLNK(st.st_mode) else "not a normal file"
+            odd.append("~/%s is %s" % ("/".join(parts), kind))
+    if not odd:
+        return result(cid, cat, title, "pass", "History files are normal files.", why, weight=1)
+    return result(cid, cat, title, "warn", "%s hidden or redirected." % (
+        "A history file is" if len(odd) == 1 else "%d history files are" % len(odd)), why, clean_block(odd),
+        weight=1, howto="If you did not set this up yourself, get help before changing anything. If you did, "
+                        "mark it as reviewed.")
 
 
-def _plural(n, word):
-    return "%d %s%s" % (n, word, "" if n == 1 else "s")
+# Units of old network services that send passwords unencrypted or need none:
+# telnet, rsh, rlogin and FTP (inetutils), TFTP (tftp-hpa), NIS and xinetd.
+OLD_SERVICES = ("telnet.socket", "rsh.socket", "rlogin.socket", "ftpd.service", "tftpd.socket", "tftpd.service",
+                "xinetd.service", "ypserv.service", "ypbind.service")
 
 
-def lynis_rows():
-    """One row per Lynis test in LYNIS_TESTS that reported something in the last Full scan."""
-    data = parse_lynis(_state_text(LYNIS_NAME))
-    if data is None:
-        return []
-    rows = []
-    for tid, (pillar, title, why, howto) in LYNIS_TESTS.items():
-        items = [it for it in data["items"] if it["id"] == tid]
-        if not items:
-            continue
-        lines = ["Lynis %s: %s%s" % (it["kind"], it["text"], " \u2014 " + it["detail"] if it["detail"] else "")
-                 for it in items[:12]]
-        lines.append("Lynis test %s, from the last Full scan." % tid)   # no date: reviews must survive rescans
-        rows.append(result(LYNIS_ROW_PREFIX + tid.lower(), pillar, title, "warn", items[0]["text"], why,
-                           "\n".join(lines), fix("docs", "lynis-" + tid.lower(), "Learn more"), weight=1,
-                           howto=howto))
-    return rows
-
-
-def lynis_date():
-    data = parse_lynis(_state_text(LYNIS_NAME))
-    return data["date"] if data else ""
+@check
+def check_old_services():
+    cid, cat, title = "old-services", "harden", "Old network services"
+    why = ("Telnet, rsh, FTP, TFTP and NIS come from before networks were dangerous: they send passwords "
+           "unencrypted, or need none. A personal computer should never run them.")
+    on = [u for u in OLD_SERVICES
+          if systemctl("is-enabled", u) == "enabled" or systemctl("is-active", u) == "active"]
+    if not on:
+        return result(cid, cat, title, "pass", "None are switched on.", why, weight=2)
+    return result(cid, cat, title, "warn", "%s switched on." % _and(on), why, "\n".join(on),
+                  fix("terminal", "old-services-off", "Switch them off"), weight=2,
+                  howto="Switch them off (below). If you need one again later: sudo systemctl enable --now "
+                        "<name>.")
 
 
 SEVERITIES = ["Critical", "High", "Medium", "Low", "Unknown"]
@@ -1617,11 +1651,10 @@ def source_status():
             age = _days_since(at)
             state = "ok" if age is not None and age <= FEED_DAYS + FEED_RETRY_DAYS else "stale"
         add(name, label, at, state, tried if state == "failed" else "")
-    d = lynis_date()
-    if d or is_trusted_executable(sys_path("/usr/bin/lynis")):
-        age = _days_since(d)
-        add("lynis", "Full scan (password checks)", d,
-            "never" if not d else ("ok" if age is not None and age <= LYNIS_STALE_DAYS else "stale"))
+    d, _ = no_password_scan()
+    age = _days_since(d)
+    add("password-check", "Full scan (password check)", d,
+        "never" if not d else ("ok" if age is not None and age <= FULL_SCAN_STALE_DAYS else "stale"))
     if exists(home_path(".config", "omarchy", "plugins", BUMBLEBEE_ID)):
         d = _mtime_date([home_path(".local", "state", "omarchy", "bumblebee", "last-scan.json")])
         age = _days_since(d)
@@ -2902,7 +2935,7 @@ def undo_available(action):
 # something new turns up, the finding comes back.
 EVIDENCE_CHECKS = {"open-ports", "persistence", "file-changes", "exposed-secrets", "malicious-packages",
                    "virus-scan", "ld-preload", "bumblebee", "scanner-arch-audit", "aur-status",
-                   "omarchy-plugins", "aur-packages"} | {LYNIS_ROW_PREFIX + t.lower() for t in LYNIS_TESTS}
+                   "omarchy-plugins", "aur-packages", "accounts", "shell-history", "old-services"}
 
 
 def dismissible(c):
@@ -3140,6 +3173,10 @@ CHECK_HELP = {
     "exposed-secrets": ("Treat each key as leaked: revoke or rotate it with the service that issued it, then "
                         "delete the line from your shell history (Edit history).",
                         ("terminal", "edit-shell-history", "Edit history")),
+    "accounts": ("Get help before changing accounts; a mistake can lock you out.",
+                 ("docs", "arch-users", "Learn more")),
+    "shell-history": ("If you did not set this up yourself, get help before changing anything.",
+                      ("docs", "attack-history", "Learn more")),
     "black-ops": ("Optional. Install Black Ops from the Omarchy plugin catalog to block telemetry.",
                   ("docs", "black-ops", "Learn more")),
 }
@@ -3181,10 +3218,6 @@ def audit(peek=False):
             c = result(fn.__name__.replace("check_", "").replace("_", "-"), "harden", fn.__name__,
                        "unknown", "This check failed to run (%s)." % type(e).__name__)
         checks.append(tidy(c))
-    try:
-        checks.extend(tidy(r) for r in lynis_rows())
-    except Exception:  # a broken copy of the Lynis report must not stop the audit
-        pass
     state = load_state()
     dismissed = state_dismissed(state)
     for c in checks:
