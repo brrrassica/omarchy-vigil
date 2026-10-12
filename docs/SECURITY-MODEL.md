@@ -321,6 +321,15 @@ say where they connect before they run.
   else re-hashes, and a different hash, a missing file or a link in its
   place counts the detection again. The panel asks first. The helper verbs
   are `vigil ignore|unignore <16 hex digits>`.
+- The daily Downloads scan lists files changed since the last one (an hour
+  of overlap, never a gap) in your Downloads folder (`XDG_DOWNLOAD_DIR` only
+  when it is a plain `$HOME/...` path), without following links, at most
+  5,000 files and 10 seconds of walking, and hands the list to clamscan with
+  `--file-list` from Vigil's private folder. Names with a line break are
+  left to the weekly scan, which reports them.
+- Open Wi-Fi: `nmcli` as you, read-only, for saved networks (UUIDs checked
+  against a strict pattern). Stop auto-joining and its Undo are constant
+  user-level scripts; Undo only touches the UUIDs the first one recorded.
 - For the Last run list Vigil reads ClamUI's log index
   (`clamui/logs/log_index.json` in its data folder, Flatpak or not) with
   the no-follow reader and a 2 MiB cap, and keeps only the newest

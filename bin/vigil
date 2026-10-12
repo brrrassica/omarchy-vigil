@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta, timezone
 
-VERSION = "0.23.0"
+VERSION = "0.24.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1703,6 +1703,7 @@ FEED_FILES = {"arch-audit": "arch-audit.json", "osv": "osv.json", "aur": "aur.js
               "full-scan": "full-scan.json", "signatures": "signatures.json",
               "bumblebee-list": "bumblebee-list.json", "bumblebee": "bumblebee.json",
               "pending-updates": "pending-updates.json", "firmware": "firmware.json", "flatpak": "flatpak.json",
+              "downloads-scan": "downloads-scan.json",
               "bumblebee-release": "bumblebee-release.json"}
 # Two weekly timers: the sources (Update sources), and the automatic part of
 # a Full scan (the virus scan of the home folder and a Bumblebee rescan).
@@ -1742,7 +1743,7 @@ def feed_available(name):
         return is_trusted_executable(sys_path("/usr/bin/osv-scanner")) and bool(osv_targets())
     if name == "aur":
         return is_trusted_executable(sys_path("/usr/bin/curl")) and is_trusted_executable(sys_path("/usr/bin/pacman"))
-    if name == "virus-scan":
+    if name in ("virus-scan", "downloads-scan"):
         return is_trusted_executable(sys_path("/usr/bin/clamscan"))
     if name == "pending-updates":
         return is_trusted_executable(sys_path(CHECKUPDATES)) and is_trusted_executable(sys_path("/usr/bin/pacman"))
@@ -1753,7 +1754,14 @@ def feed_available(name):
     return False
 
 
-def _due_at(meta):
+# The daily check: light work, no password, seconds (a scan of what is new in
+# Downloads, the update and Flatpak checks, Bumblebee over your packages).
+# Everything else is weekly: the lists, the whole home folder, firmware.
+DAILY_FEEDS = ("downloads-scan", "pending-updates", "flatpak", "bumblebee")
+FEED_INTERVAL = {n: 1 for n in DAILY_FEEDS}
+
+
+def _due_at(meta, days=FEED_DAYS):
     """When a feed next falls due, in local time: a week after it last completed
     (to the minute), or a day after a failed attempt; None if it is due now."""
     done, tm, tried = meta.get("at"), meta.get("time"), meta.get("attempted")
@@ -1761,7 +1769,7 @@ def _due_at(meta):
     try:
         if isinstance(done, str) and _DATE.match(done):
             hm = tm if isinstance(tm, str) and re.fullmatch(r"\d{2}:\d{2}", tm) else "00:00"
-            due = datetime.strptime(done + " " + hm, "%Y-%m-%d %H:%M") + timedelta(days=FEED_DAYS)
+            due = datetime.strptime(done + " " + hm, "%Y-%m-%d %H:%M") + timedelta(days=days)
             if due > now:
                 return due
         if isinstance(tried, str) and _DATE.match(tried) and tried != done:
@@ -1779,12 +1787,17 @@ def _due_at(meta):
 def feed_due(name):
     if not feed_available(name):
         return False
-    return _due_at(_state_json(FEED_FILES[name]) or {}) is None
+    return _due_at(_state_json(FEED_FILES[name]) or {}, FEED_INTERVAL.get(name, FEED_DAYS)) is None
 
 
 def next_update():
-    """When the next weekly update falls due: the earliest of the available sources."""
-    return _next_due(SOURCE_FEEDS)
+    """When the next weekly update falls due: the earliest of the available weekly sources."""
+    return _next_due([n for n in SOURCE_FEEDS if n not in DAILY_FEEDS])
+
+
+def next_daily():
+    """When the next daily check falls due."""
+    return _next_due(DAILY_FEEDS)
 
 
 def next_full_scan():
@@ -1798,7 +1811,7 @@ def _next_due(names):
     for name in names:
         if not feed_available(name):
             continue
-        due = _due_at(_state_json(FEED_FILES[name]) or {})
+        due = _due_at(_state_json(FEED_FILES[name]) or {}, FEED_INTERVAL.get(name, FEED_DAYS))
         if due is None:
             return "now"
         nxt = due if nxt is None else min(nxt, due)
@@ -1906,7 +1919,7 @@ def source_status():
         elif tried and tried > at:
             state = "failed"
         else:
-            state = fresh(at, FEED_DAYS + FEED_RETRY_DAYS)
+            state = fresh(at, FEED_INTERVAL.get(name, FEED_DAYS) + FEED_RETRY_DAYS)
         add(name, label, at, tm if at else "", state, tried if state == "failed" else "")
 
     if feed_available("virus-scan"):
@@ -1916,6 +1929,8 @@ def source_status():
         if ext[0] and _newer(ext, (mine["date"], mine["time"])) == ext and ext != (mine["date"], mine["time"]):
             out[-1] = dict(mine, date=ext[0], time=ext[1], state=fresh(ext[0], FEED_DAYS + FEED_RETRY_DAYS),
                            tried="", by="ClamUI")
+    if feed_available("downloads-scan"):
+        feed("downloads-scan", "Daily scan of new downloads")
     if feed_available("bumblebee"):
         feed("bumblebee", "Bumblebee scan")
     if feed_available("firmware"):
@@ -2277,6 +2292,84 @@ def count_home_files(deadline_s=20.0, odd=None):
 
 
 VIRUS_SCAN_SECONDS = 3 * 3600
+DOWNLOADS_MAX_FILES = 5000
+
+
+def downloads_dir():
+    """Your Downloads folder: XDG_DOWNLOAD_DIR from user-dirs.dirs when it is a
+    plain "$HOME/..." path inside the home folder, else ~/Downloads."""
+    try:
+        text = read_text(home_path(".config", "user-dirs.dirs")) or ""
+    except Refused:
+        text = ""
+    m = re.search(r'^XDG_DOWNLOAD_DIR="\$HOME/([^"\n]{1,200})"\s*$', text, re.M)
+    rel = m.group(1) if m and ".." not in m.group(1).split("/") else "Downloads"
+    return os.path.normpath(home_path(rel))
+
+
+def new_downloads(since):
+    """Regular files in Downloads changed since `since` (a timestamp), without
+    following links, at most DOWNLOADS_MAX_FILES; names with a line break are
+    left to the weekly scan, which reports them."""
+    base = downloads_dir()
+    out, stack, deadline = [], [(base, 0)], time.monotonic() + 10
+    while stack and len(out) < DOWNLOADS_MAX_FILES and time.monotonic() < deadline:
+        cur, depth = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                for e in it:
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            if depth < 8:
+                                stack.append((e.path, depth + 1))
+                        elif e.is_file(follow_symlinks=False):
+                            st = e.stat(follow_symlinks=False)
+                            if max(st.st_mtime, st.st_ctime) >= since and "\n" not in e.path and "\r" not in e.path:
+                                out.append(e.path)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return out[:DOWNLOADS_MAX_FILES]
+
+
+def refresh_downloads_scan(on_progress=None):
+    """The daily scan: only what changed in Downloads since the last one (or the
+    last day), at the lowest priority. The weekly scan covers the whole home."""
+    meta = _state_json(FEED_FILES["downloads-scan"]) or {}
+    try:
+        last = datetime.strptime("%s %s" % (meta.get("at"), meta.get("time")), "%Y-%m-%d %H:%M").timestamp()
+    except (TypeError, ValueError):
+        last = time.time() - 86400
+    files = new_downloads(min(last, time.time() - 3600) - 3600)      # an hour of overlap, never a gap
+    if not files:
+        save_feed("downloads-scan", {"found": [], "files": 0})
+        return "No new downloads to scan."
+    dirfd = _state_dir()
+    try:
+        write_atomic(dirfd, "downloads-scan.list", ("\n".join(files) + "\n").encode("utf-8", "surrogateescape"))
+    finally:
+        os.close(dirfd)
+    seen, kept = [0], [0]
+
+    def on_line(line):
+        if line.endswith(" FOUND"):
+            kept[0] += 1
+            return kept[0] <= 500
+        seen[0] += 1
+        if on_progress and seen[0] % 50 == 0:
+            on_progress(seen[0], len(files))
+        return False
+
+    rc, out = run(["/usr/bin/nice", "-n", "19", "/usr/bin/clamscan", "--no-summary", "--stdout",
+                   "--follow-file-symlinks=0", "--file-list=" + home_path(*STATE_DIR, "downloads-scan.list")],
+                  timeout=1800, limit=4 * 1024 * 1024, on_line=on_line)
+    if rc not in (0, 1):
+        save_feed("downloads-scan", {}, ok=False)
+        raise Refused("the scan of new downloads did not finish (missing signatures?)")
+    found = confirm_detections(parse_clamscan(out)) if rc == 1 else []
+    save_feed("downloads-scan", {"found": found, "files": len(files)})
+    return "Scanned %d new download%s." % (len(files), "" if len(files) == 1 else "s")
 
 
 def confirm_detections(found):
@@ -2348,14 +2441,15 @@ def refresh_virus_scan(on_progress=None):
 def check_virus_scan():
     cid, cat, title = "virus-scan", "detect", "Virus scan"
     why = ("Every week, and in each Full scan, ClamAV scans your home folder for known malware, as you and "
-           "in the background. Caches, game libraries, node_modules and .git folders are skipped.")
+           "in the background; every day it scans what is new in Downloads. Caches, game libraries, "
+           "node_modules and .git folders are skipped.")
     if not is_trusted_executable(sys_path("/usr/bin/clamscan")):
         return result(cid, cat, title, "info", "Needs ClamAV. Install ClamUI (below) to set it up.", why, weight=0)
     cache = feed_cache("virus-scan")
     now = fix("helper", "virus-scan-now", "Scan now")
     if cache is None:
         return result(cid, cat, title, "info", "The first scan runs within a day.", why, fix=now, weight=0)
-    found = [f for f in cache.get("found", []) if isinstance(f, dict)][:500] if isinstance(cache.get("found"), list) else []
+    found = current_detections()
     ignored = ignored_detections()
     items, live = [], []
     for f in found:
@@ -2387,8 +2481,11 @@ def check_virus_scan():
                   "on purpose, get them again from the official site. Only if you are sure a file is safe "
                   "(for example a game file ClamAV mistakes for malware), press False positive next to it.")
     else:
-        out = result(cid, cat, title, "pass", "No infected files in %s (%s).%s" % (
-            _scanned_where(cache), feed_when(cache).replace("checked", "scanned"), note), why, fix=now, weight=3)
+        daily = feed_cache("downloads-scan")
+        daily_note = " New downloads scanned %s." % feed_when(daily).replace("checked ", "") if daily else ""
+        out = result(cid, cat, title, "pass", "No infected files in %s (%s).%s%s" % (
+            _scanned_where(cache), feed_when(cache).replace("checked", "scanned"), note, daily_note), why,
+            fix=now, weight=3)
     out["items"] = items
     return out
 
@@ -2401,6 +2498,26 @@ def check_virus_scan():
 IGNORED_FILE = "ignored-detections.json"
 IGNORED_MAX = 200
 HASH_MAX = 2 * 1024 * 1024 * 1024
+
+
+def current_detections():
+    """Detections from the weekly home scan and the daily Downloads scan, once
+    each. A detected file that is no longer there (deleted, or moved to
+    ClamUI's quarantine) no longer counts."""
+    out, seen = [], set()
+    for name in ("downloads-scan", "virus-scan"):
+        cache = feed_cache(name) or {}
+        for f in cache.get("found", []) if isinstance(cache.get("found"), list) else []:
+            if not isinstance(f, dict):
+                continue
+            key = (f.get("file") or f.get("path"), f.get("signature"))
+            if key in seen:
+                continue
+            seen.add(key)
+            if isinstance(f.get("file"), str) and not _lexists(f["file"]):
+                continue                                 # gone: deleted, or in quarantine
+            out.append(f)
+    return out[:500]
 
 
 def detection_file(f):
@@ -2490,9 +2607,8 @@ def detection_ignored(f, ignored):
 
 
 def _current_detection(did):
-    cache = feed_cache("virus-scan") or {}
-    for f in cache.get("found", []) if isinstance(cache.get("found"), list) else []:
-        if isinstance(f, dict) and detection_id(f) == did:
+    for f in current_detections():
+        if detection_id(f) == did:
             return f
     return None
 
@@ -2720,6 +2836,7 @@ def check_firmware():
 FEED_REFRESH = {"arch-audit": refresh_arch_audit, "osv": refresh_osv, "aur": refresh_aur}
 FEED_REFRESH["pending-updates"] = refresh_pending_updates
 FEED_LABELS = {"pending-updates": "the list of waiting updates", "firmware": "the firmware check",
+               "downloads-scan": "the scan of new downloads",
                "flatpak": "the Flatpak app check", "flatpak-update": "your Flatpak apps",
                "bumblebee-release": "the Bumblebee release check",
                "arch-audit": "the Arch vulnerability database", "osv": "the OSV malicious-package database",
@@ -2744,9 +2861,9 @@ def feed_findings():
         n = len(o["malicious"])
         out.append("%d known-malicious package%s" % (n, "" if n == 1 else "s"))
     v = feed_cache("virus-scan") if feed_available("virus-scan") else None
-    if v and isinstance(v.get("found"), list) and v["found"]:
+    if v:
         ignored = ignored_detections()
-        n = sum(1 for f in v["found"] if isinstance(f, dict) and not detection_ignored(f, ignored))
+        n = sum(1 for f in current_detections() if not detection_ignored(f, ignored))
         if n:
             out.append("%d infected file%s in %s" % (n, "" if n == 1 else "s", _scanned_where(v)))
     return out
@@ -3011,7 +3128,7 @@ def refresh_bumblebee():
     return "Bumblebee scanned."
 
 
-STEP_WEIGHT = {"virus-scan": 30, "osv": 2, "bumblebee": 2, "firmware": 2, "signatures": 2, "flatpak": 4}
+STEP_WEIGHT = {"virus-scan": 30, "downloads-scan": 3, "osv": 2, "bumblebee": 2, "firmware": 2, "signatures": 2, "flatpak": 4}
 
 STEP_TEXT = {"arch-audit": "Updating the Arch vulnerability database",
              "osv": "Updating the OSV malicious-package database",
@@ -3026,6 +3143,7 @@ STEP_TEXT = {"arch-audit": "Updating the Arch vulnerability database",
              "bumblebee-update": "Updating Bumblebee (Omarchy asks for your password)",
              "signatures-and-bumblebee": "Updating ClamAV virus signatures and Bumblebee (Omarchy asks for your password)",
              "firmware": "Checking for firmware updates",
+             "downloads-scan": "Scanning new downloads for viruses",
              "password-check": "Checking for accounts without a password (Omarchy asks for your password)",
              "signatures": "Updating ClamAV virus signatures (Omarchy asks for your password)"}
 
@@ -3052,6 +3170,11 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
         + ([root_step] if root_step else []) + list(sources)
     if run_full and bumblebee_ok():
         steps.append("bumblebee")
+    daily = not sources_only and not scan_only and not run_full
+    if daily and bumblebee_ok() and feed_due("bumblebee") and exists(home_path(*STATE_DIR, BUMBLEBEE_CATALOG)):
+        steps.append("bumblebee")
+    if daily and feed_due("downloads-scan"):
+        steps.append("downloads-scan")
     if run_full and feed_available("firmware"):
         steps.append("firmware")
     if (run_full or scan_only) and feed_available("virus-scan"):
@@ -3084,6 +3207,8 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
                 refresh_bumblebee()
             elif name == "firmware":
                 refresh_firmware()
+            elif name == "downloads-scan":
+                refresh_downloads_scan(lambda n, of, i=i: progress(i, len(steps), STEP_TEXT["downloads-scan"], n, of))
             elif name == "password-check":
                 refresh_no_password()
             elif name == "flatpak" and sources_only and "user" in flatpak_installations():
@@ -3121,6 +3246,8 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
                 save_feed(name, {}, ok=False)
     if sources:
         save_last_run(not stopped and not [n for n in failed if n in SOURCE_FEEDS], force or full or sources_only)
+    if run_full and "virus-scan" in done and feed_available("downloads-scan"):
+        save_feed("downloads-scan", {"found": [], "files": 0, "byFullScan": True})
     if run_full:
         save_feed("full-scan", {}, ok=not stopped and not [n for n in failed if n in ("virus-scan", "bumblebee")],
                   retry_days=FEED_DAYS if timed_out else None)
@@ -4593,12 +4720,14 @@ def audit(peek=False):
         "score": score_of(checks), "level": level, "counts": counts,
         "checks": checks, "tools": tools, "apps": {"clamui": clamui_install()},
         "new": [], "stateSaved": False, "history": state_history(state),
-        "feedsDue": running is None and (any(feed_due(n) for n in SOURCE_FEEDS) or feed_due("full-scan")),
+        "feedsDue": running is None and (any(feed_due(n) for n in SOURCE_FEEDS + DAILY_FEEDS)
+                                         or feed_due("full-scan")),
         "feedsUpdated": feeds_updated(),
         "sources": source_status(),
         "lastRun": last_run(),
         "nextUpdate": next_update(),
         "nextFullScan": next_full_scan(),
+        "nextDaily": next_daily(),
         "missing": missing_helpers(),
         "running": running,
     }

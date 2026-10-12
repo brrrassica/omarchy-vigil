@@ -29,7 +29,7 @@ the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.23.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.24.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -78,9 +78,10 @@ reviewed) are dimmed.
 | What | When |
 |---|---|
 | Every check in every pillar (reading local settings) | every 30 minutes, and whenever you open the panel; offline, under a second |
-| **Update sources**: known vulnerabilities, malicious packages, AUR status | once a week, and when you press **Update sources** or **Full scan** |
+| **Daily check**: a virus scan of what is new in Downloads, the check for waiting system, Omarchy and Flatpak updates, a Bumblebee scan of your packages | once a day, in the background, at low priority; the Overview shows the next time |
+| **Update sources**: known vulnerabilities, malicious packages, AUR status, Bumblebee's list and release | once a week, and when you press **Update sources** or **Full scan** |
 | ClamAV virus signatures, on demand | when you press **Update sources** (asks for your password) |
-| **Full scan**, background part: a Bumblebee scan, then a virus scan of your home folder | once a week, and when you press **Full scan** |
+| **Full scan**, background part: a Bumblebee scan, the firmware check, then a virus scan of your whole home folder | once a week, and when you press **Full scan** |
 | Password check (accounts without a password) | only when you press **Full scan**, since it needs your password |
 | ClamAV virus signatures | continuously, by ClamAV's own update service |
 | Cleaning (Care) | only when you ask; Vigil only measures sizes by itself |
@@ -213,6 +214,8 @@ lower it. A warning you mark as reviewed stops counting.
 | Docker group | You are in the docker group, which equals root | `omarchy-remove-security-sudoless-docker` (terminal) |
 | Security key or fingerprint | sudo takes only a password (information). On a computer with a fingerprint reader (found by Omarchy's own `omarchy-hw-fingerprint`, which only reads `/sys`), it offers fingerprint instead | `omarchy-setup-security-fingerprint` or `omarchy-setup-security-fido2` (terminal); once set up, **Stop using…** runs Omarchy's `omarchy-remove-security-fingerprint` or `-fido2` |
 | System updates | A newer Omarchy is out (warning; found by `checkupdates`, the same check Omarchy's own update indicator uses, in each Update sources and Full scan), or no full update in 14 days (warning) or 30 days (failure). Also says how many updates are waiting | `omarchy-update` (terminal) |
+| App updates (Flatpak) | Omarchy's updater does not update Flatpak apps. Vigil checks them each day; waiting updates are a warning. **Update sources** installs updates for your own apps without a password | `flatpak update` (no terminal) |
+| Open Wi-Fi that joins by itself | Saved networks without a password (or with old WEP) that your laptop joins by itself, so anyone can imitate them. WPA, WPA3 and Enhanced Open never count (warning) | **Stop auto-joining**: `nmcli` sets them to join only when you choose; Undo puts back exactly those |
 | Firmware updates | The Full scan asks fwupd, which gets firmware from LVFS where hardware makers publish it. A waiting update that fixes a known security hole (a CVE, or marked high or critical) is a warning; other firmware updates are information | `omarchy-update-firmware` (terminal) |
 | Open network ports | Programs listen on the network with no firewall in front | **Show listeners** runs `ss -tulpn` as root and shows the result in the panel (read-only) |
 | Exposed secrets | API keys and tokens in the formats their providers publish (AWS, GitHub, GitLab, Slack, Stripe, Anthropic, OpenAI, Google, private keys) in your shell histories, or credential files such as `~/.aws/credentials`, `~/.netrc` and `~/.git-credentials` readable by other accounts. Shows the file and line, never the secret. | Makes credential files private (no root); revoke leaked keys with their provider |
@@ -224,7 +227,7 @@ lower it. A warning you mark as reviewed stops counting.
 | Startup files | Reads shell startup files, autostart entries, user services and timers, uwsm and environment.d files, Hyprland config and your crontab, and flags lines that download and run code, decode hidden code, or open reverse shells. These are leads to read, not proof. |
 | System-wide preload | Fails if `/etc/ld.so.preload` loads anything; rootkits use it to hide. |
 | Changes to important files | Records a fingerprint of accounts, PAM, SSH settings, `~/.ssh/authorized_keys`, system and user services, autostart entries and your startup files, and lists anything changed, added or removed since. Changes that match exactly what a package update shipped (from pacman's own records) are not reported, nor are system users that packages add. Changes to who can log in or what runs at start are warnings; changes to your own shell files are information. **Accept these changes** records the current state as the new normal. |
-| Virus scan | ClamAV scans your home folder once a week and in every Full scan, as you, with signatures ClamAV keeps current. Infected files are listed with **Open ClamUI** to quarantine them. If ClamAV is wrong about a file you know is safe (a game's DLL, say), press **False positive** next to it: Vigil records that exact file's SHA-256 and stops counting it, and reports it again if the file ever changes. **Not a false positive** counts it again. Only ClamAV's published signatures count; its guess-based "potentially unwanted" rules stay off. |
+| Virus scan | ClamAV scans your home folder once a week and in every Full scan, and every day what is new in Downloads, as you, with signatures ClamAV keeps current. Infected files are listed with **Open ClamUI** to quarantine them. If ClamAV is wrong about a file you know is safe (a game's DLL, say), press **False positive** next to it: Vigil records that exact file's SHA-256 and stops counting it, and reports it again if the file ever changes. **Not a false positive** counts it again. Only ClamAV's published signatures count; its guess-based "potentially unwanted" rules stay off. |
 | Scans scheduled twice | Finds other apps that repeat what Vigil already runs every week: a scheduled scan in ClamUI whose folders are all inside your home folder, and the older Bumblebee plugin (once Vigil runs Bumblebee itself). **Let Vigil run them** turns those off the way you would in each app: ClamUI's timer and its own Scheduled scans setting, and `omarchy plugin disable` for the plugin. Undo turns back on exactly what it turned off. A ClamUI schedule that also covers folders outside your home folder, and the Security Scan plugin (it runs AUR-Malware, which Vigil does not), are listed but left on. Nothing is offered when Vigil's own weekly run is off. |
 | ClamUI | Vigil hands virus scanning to [ClamUI](https://github.com/linx-systems/clamui): file and folder scans, scheduled scans, USB drive scans and quarantine. When it is installed, **Open ClamUI** starts it; otherwise Vigil installs it from the Arch repositories (`clamui`), so the Omarchy update keeps it current, and it uses the system's ClamAV. A ClamUI you installed from Flathub keeps working. |
 | ClamAV virus engine | Whether ClamAV is installed and its signatures keep themselves up to date. Vigil turns on ClamAV's own update service (`clamav-freshclam`) when it installs ClamAV or ClamUI, and offers to if it is off. |
@@ -393,6 +396,9 @@ service (ClamAV's servers), and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/pending-updates.json` | the helper, mode 0600 | each Update sources and Full scan: how many updates are waiting, and the Omarchy version if one is |
 | `~/.local/state/omarchy-vigil/firmware.json` | the helper, mode 0600 | each Full scan: device names and firmware versions with an update waiting |
 | `~/.local/state/omarchy-vigil/bumblebee-release.json` | the helper, mode 0600 | each weekly run and Update sources: the newest Bumblebee release that has been out for a week |
+| `~/.local/state/omarchy-vigil/downloads-scan.json`, `downloads-scan.list` | the helper, mode 0600 | each daily check: the new files in Downloads it scanned, and any it found infected |
+| `~/.local/state/omarchy-vigil/flatpak.json` | the helper, mode 0600 | each daily check: Flatpak apps with updates waiting |
+| `~/.local/state/omarchy-vigil/wifi-autojoin-off` | the Stop auto-joining action | the networks it changed, so Undo puts back exactly those |
 | `~/.local/state/omarchy-vigil/checkup-db/` | `checkupdates`, as you | each update check: its private copy of the package databases (a few MB) |
 | `~/.local/state/omarchy-vigil/ignored-detections.json` | the helper, mode 0600 | when you mark a virus detection as a false positive: the file's path, the signature name and the file's SHA-256 |
 | `~/.local/state/omarchy-vigil/busy/` | the helper, mode 0700, empty | once: the folder Vigil locks so only one scan or update runs at a time |

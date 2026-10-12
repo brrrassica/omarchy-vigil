@@ -111,7 +111,20 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.23 (this release): a lighthouse
+## 0.24 (this release): daily and weekly
+
+- [x] A daily check: what is new in Downloads (virus scan), waiting
+      system, Omarchy and Flatpak updates, and Bumblebee over your
+      packages. Weekly stays for the lists, the whole home folder and
+      firmware. The Overview shows the next time of each.
+- [x] App updates (Flatpak): checked daily, installed by Update sources
+      (your own apps, no password).
+- [x] Open Wi-Fi that joins by itself, with Stop auto-joining and Undo.
+- [x] ClamUI from the Arch repositories, so Omarchy's updater keeps it
+      current.
+- [x] A detected file that is gone (deleted, quarantined) stops counting.
+
+## 0.23: a lighthouse
 
 - [x] The bar icon is a lighthouse instead of a shield (so many plugins use
       one); its beams show while a scan or update runs.

@@ -10,7 +10,7 @@
 // Must match manifest.json and VERSION in bin/vigil (a test checks). The
 // helper runs from disk every time, but this file stays loaded until the
 // shell restarts, so after an update the two can differ for a while.
-var VERSION = "0.23.0"
+var VERSION = "0.24.0"
 var MAX_REPORT_CHARS = 512 * 1024
 var MAX_CHECKS = 160
 var MAX_STR = 400
@@ -968,7 +968,7 @@ function validCheck(c) {
 }
 
 var SOURCE_IDS = ["signatures", "virus-scan", "arch-audit", "osv", "aur", "password-check", "bumblebee", "firmware",
-                  "pending-updates", "bumblebee-release", "flatpak",
+                  "pending-updates", "bumblebee-release", "flatpak", "downloads-scan",
                   "bumblebee-list"]
 var SOURCE_STATES = ["ok", "stale", "never", "failed"]
 var DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -1029,7 +1029,7 @@ function lastRunLine(run, now) {
     + (run.ok ? ". Every source refreshed." : ". Some sources did not refresh; Vigil tries again tomorrow.")
 }
 
-var SCAN_SOURCES = ["virus-scan", "bumblebee", "firmware", "password-check"]
+var SCAN_SOURCES = ["virus-scan", "downloads-scan", "bumblebee", "firmware", "password-check"]
 
 // The Overview's LAST RUN list: every scan (with the settings checks first),
 // then every source update, each with when it last ran or updated.
@@ -1087,10 +1087,12 @@ function scheduleLines(report, autoUpdate, now, refreshMinutes) {
   var checked = localDate(report.generatedAt)
   var nextCheck = checked ? new Date(checked.getTime() + (refreshMinutes || 30) * 60000) : null
   var out = []
+  var d = countdown(report.nextDaily, now, nextCheck)
+  if (d !== "") out.push("Next daily check: " + d + " (new downloads, waiting updates, Bumblebee)")
   var u = countdown(report.nextUpdate, now, nextCheck)
-  if (u !== "") out.push("Next automatic update: " + u)
+  if (u !== "") out.push("Next weekly update: " + u + " (the lists Vigil checks against)")
   var f = countdown(report.nextFullScan, now, nextCheck)
-  if (f !== "") out.push("Next automatic full scan: " + f + " (everything except the password check)")
+  if (f !== "") out.push("Next weekly full scan: " + f + " (whole home folder and firmware)")
   if (report.lastRun && report.lastRun.at !== "" && !report.lastRun.ok)
     out.push("The last update could not reach every source; Vigil tries again tomorrow.")
   return out
@@ -1330,6 +1332,7 @@ function parseReport(text) {
   }
   var nextUpdate = optionalDate(d.nextUpdate)
   var nextFullScan = optionalDate(d.nextFullScan)
+  var nextDaily = optionalDate(d.nextDaily)
   var missing = []
   if (d.missing !== undefined) {
     if (!Array.isArray(d.missing) || d.missing.length > 20) return null
@@ -1341,7 +1344,7 @@ function parseReport(text) {
       missing.push(d.missing[mi])
     }
   }
-  if (nextUpdate === null || nextFullScan === null) return null
+  if (nextUpdate === null || nextFullScan === null || nextDaily === null) return null
   var running = parseRunningValue(d.running)
   if (running === undefined) return null
   return {
@@ -1350,6 +1353,7 @@ function parseReport(text) {
     lastRun: lastRun,
     nextUpdate: nextUpdate,
     nextFullScan: nextFullScan,
+    nextDaily: nextDaily,
     missing: missing,
     feedsDue: d.feedsDue === true,
     feedsUpdated: feedsUpdated,

@@ -1464,6 +1464,7 @@ def test_last_run_list_scans_then_updates_with_times(v):
     v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan", v.ROOT + "/usr/bin/arch-audit"}
     got = [(s["id"], s["label"], s["state"]) for s in v.source_status()]
     assert got == [("virus-scan", "Virus scan (home folder)", "never"),
+                   ("downloads-scan", "Daily scan of new downloads", "never"),
                    ("password-check", "Password check (Full scan button only)", "never"),
                    ("signatures", "ClamAV virus signatures", "never"),
                    ("arch-audit", "Arch vulnerability database", "never")]
@@ -2594,3 +2595,79 @@ def test_open_wifi_that_joins_by_itself(v):
     mark.write_text(U(1) + "\n")
     c = next(x for x in v.audit(peek=True)["checks"] if x["id"] == "open-wifi")
     assert c["undo"]["action"] == "undo-wifi-autojoin"
+
+
+# --------------------------------------------------------------------------
+# The daily check
+
+def downloads_argv(v):
+    return ("/usr/bin/nice", "-n", "19", "/usr/bin/clamscan", "--no-summary", "--stdout",
+            "--follow-file-symlinks=0", "--file-list=" + v.HOME + "/.local/state/omarchy-vigil/downloads-scan.list")
+
+
+def test_the_daily_scan_reads_only_what_is_new_in_downloads(v):
+    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
+    d = Path(v.HOME, "Downloads")
+    (d / "old").mkdir(parents=True)
+    old = d / "old" / "setup.exe"
+    old.write_bytes(b"MZ old")
+    os.utime(old, (time.time() - 5 * 86400, time.time() - 5 * 86400))
+    new = d / "game.zip"
+    new.write_bytes(b"PK new")
+    (d / "link.exe").symlink_to("/etc/hostname")
+    files = v.new_downloads(time.time() - 86400)
+    # ctime cannot be set back in a test, so "old" may count by ctime; the link never does.
+    assert str(new) in files and str(d / "link.exe") not in files
+    v.COMMANDS[downloads_argv(v)] = (1, "%s: Win.Trojan.X-1 FOUND\n" % new)
+    v.COMMANDS[confirm_argv([str(new)])] = (1, "%s: Win.Trojan.X-1 FOUND\n" % new)
+    v.save_feed("virus-scan", {"found": [], "scanned": "~", "files": 10})
+    v.refresh_downloads_scan()
+    listed = Path(v.HOME, ".local/state/omarchy-vigil/downloads-scan.list").read_text().splitlines()
+    assert str(new) in listed
+    c = v.check_virus_scan()
+    assert c["status"] == "fail" and "~/Downloads/game.zip" in c["detail"]
+    new.unlink()                                                           # deleted (or quarantined in ClamUI)
+    assert v.check_virus_scan()["status"] == "pass"
+
+
+def test_xdg_download_dir_is_used_only_inside_home(v):
+    put(Path(v.HOME, ".config/user-dirs.dirs"), 'XDG_DOWNLOAD_DIR="$HOME/Telechargements"\n')
+    assert v.downloads_dir() == v.HOME + "/Telechargements"
+    put(Path(v.HOME, ".config/user-dirs.dirs"), 'XDG_DOWNLOAD_DIR="$HOME/../../etc"\n')
+    assert v.downloads_dir() == v.HOME + "/Downloads"
+    put(Path(v.HOME, ".config/user-dirs.dirs"), 'XDG_DOWNLOAD_DIR="/etc"\n')
+    assert v.downloads_dir() == v.HOME + "/Downloads"
+
+
+def test_the_daily_run_is_light_and_the_weekly_items_stay_weekly(v, capsys, monkeypatch):
+    v.PROGRESS["on"] = True
+    clamscan_ok(v)
+    bee_installed(v)
+    put(Path(v.HOME, ".local/state/omarchy-vigil", v.BUMBLEBEE_CATALOG), "{}")
+    updates_tools(v)
+    v.COMMANDS[("/usr/bin/checkupdates", "--nocolor")] = (2, "")
+    ran = []
+    monkeypatch.setattr(v, "refresh_bumblebee", lambda: (ran.append("bumblebee"), v.save_feed("bumblebee", {})))
+    monkeypatch.setattr(v, "refresh_downloads_scan",
+                        lambda cb: (ran.append("downloads"), v.save_feed("downloads-scan", {"found": []})))
+    monkeypatch.setattr(v, "refresh_virus_scan", lambda cb: ran.append("home-scan"))
+    # Everything weekly done today; the daily items due.
+    for n in ("full-scan", "virus-scan", "arch-audit", "osv", "aur", "bumblebee-list", "bumblebee-release"):
+        v.save_feed(n, {})
+    two_days = time.strftime("%Y-%m-%d", time.localtime(time.time() - 2 * 86400))
+    put(Path(v.HOME, ".local/state/omarchy-vigil/bumblebee.json"),
+        json.dumps({"at": two_days, "time": "08:00", "attempted": two_days, "findings": [], "status": "complete"}))
+    v.refresh_due_feeds()
+    assert ran == ["bumblebee", "downloads"] and "home-scan" not in ran
+    nxt = v.next_daily()
+    assert nxt != "now" and nxt                                             # done: due again in a day
+    assert v.next_update() not in ("", "now")
+    v.PROGRESS["on"] = False
+
+
+def test_a_full_scan_covers_the_daily_downloads_scan(v, monkeypatch):
+    clamscan_ok(v)
+    monkeypatch.setattr(v, "count_home_files", lambda **kw: 1)
+    v.refresh_due_feeds(full=True)
+    meta = json.loads(Path(v.HOME, ".local/state/omarchy-vigil/downloads-scan.json").read_text())
+    assert meta["byFullScan"] is True and v.feed_due("downloads-scan") is False
