@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta
 
-VERSION = "0.17.1"
+VERSION = "0.17.2"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1074,30 +1074,6 @@ def check_docker_group():
                 return result(cid, cat, title, "warn", "You are in the docker group (sudoless Docker).", why,
                               fix=fix("terminal", "docker-group-off", "Leave the docker group"), weight=2)
     return result(cid, cat, title, "pass", "You are not in the docker group.", why, weight=2)
-
-
-@check
-def check_usb_authorization():
-    cid, cat, title = "usb-authorization", "harden", "USB authorization"
-    why = ("A malicious USB stick can pretend to be a keyboard and type commands in seconds (BadUSB). "
-           "Omarchy can ask you before any new USB device is allowed to talk to the system.")
-    if systemctl("is-active", "usbguard.service") == "active":
-        return result(cid, cat, title, "pass", "New USB devices need your approval.", why, weight=0)
-    return result(cid, cat, title, "info", "New USB devices are trusted automatically.", why,
-                  fix=fix("terminal", "usb-auth", "Set up USB authorization"), weight=0)
-
-
-@check
-def check_thunderbolt():
-    cid, cat, title = "thunderbolt-authorization", "harden", "Thunderbolt authorization"
-    why = ("Thunderbolt accessories get direct memory access. Omarchy can require approval before a new "
-           "one is connected, which blocks drive-by attacks through the port.")
-    if not list_dir(sys_path("/sys/bus/thunderbolt/devices"), 4):
-        return result(cid, cat, title, "na", "This machine has no Thunderbolt ports.", why, weight=0)
-    if exists(sys_path("/etc/omarchy/thunderbolt-authorization.enabled")):
-        return result(cid, cat, title, "pass", "New Thunderbolt accessories need approval.", why, weight=0)
-    return result(cid, cat, title, "info", "Thunderbolt accessories are trusted automatically.", why,
-                  fix=fix("terminal", "thunderbolt-auth", "Set up Thunderbolt authorization"), weight=0)
 
 
 @check
@@ -3674,8 +3650,7 @@ def audit(peek=False):
     level = "fail" if any(c["status"] == "fail" for c in scored) else (
         "warn" if any(c["status"] == "warn" for c in scored) else "ok")
     tools = {}
-    for name in ("omarchy-launch-floating-terminal-with-presentation", "omarchy-setup-security-usb-authorization",
-                 "omarchy-setup-security-thunderbolt-authorization", "omarchy-setup-security-fido2",
+    for name in ("omarchy-launch-floating-terminal-with-presentation", "omarchy-setup-security-fido2",
                  "omarchy-sudo-passwordless", "omarchy-remove-security-sudoless-docker", "omarchy-update",
                  "omarchy-pkg-add", "omarchy-update-orphan-pkgs", "omarchy-toggle-idle", "omarchy-shell-config",
                  "omarchy-plugin-list", "xdg-open", "pkexec"):

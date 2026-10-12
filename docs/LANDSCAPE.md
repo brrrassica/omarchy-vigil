@@ -35,7 +35,7 @@ detects it under Detect, opens it, and offers to install it from Flathub.
 | [OmaSecurity](https://github.com/ucmz851/omasecurity) (`ucmz851.omasecurity`, unverified) | Posture audit (sysctl, sudoers, firewall, ports, SSH, key permissions, lock) plus a scan of other plugins' code. Fixes are copyable shell commands. | No scanners, no privacy or cleanup, and fixes are commands to paste. Vigil runs fixes for you after confirmation. |
 | [Security Posture](https://github.com/omarkamal/omarchy-security-posture) (`io.github.omarkamal.security-posture`, unverified) | Careful, read-only, evidence-based monitor: updates, arch-audit, AUR changes, units, sockets, Docker, SSH, encryption, Secure Boot. Deliberately never changes anything. | Read-only by design. Vigil adds guided fixes, scanners, privacy and cleanup. |
 | [Security Hub](https://github.com/btey/omarchy-security-hub-plugin) (`security-hub`, verified, manual setup) | Front-end for `omarchy-securityd`, a Rust daemon with a root helper: threat alerts, USBGuard, security keys, firewall with per-app rules, vaults, sandbox launcher, hardening audit. | Powerful but heavy: a daemon, root services and a downloaded or source-built backend. Vigil needs nothing beyond Omarchy and Python. |
-| [Security Sentinel](https://github.com/ozdil/omarchy-security-sentinel) (`ozdil.security-sentinel`, verified) | Rust engine you build with cargo: socket radar, BadUSB guard, CVE radar, auth watch, canary files, DoT toggle, MAC randomiser, EXIF scrubber. | Requires a Rust toolchain and a local build. Vigil uses Omarchy's own USB and Thunderbolt authorization instead of its own. |
+| [Security Sentinel](https://github.com/ozdil/omarchy-security-sentinel) (`ozdil.security-sentinel`, verified) | Rust engine you build with cargo: socket radar, BadUSB guard, CVE radar, auth watch, canary files, DoT toggle, MAC randomiser, EXIF scrubber. | Requires a Rust toolchain and a local build. Vigil does not guard USB ports: Omarchy tried approval for new USB and Thunderbolt devices and removed it again. |
 | [Compliantish](https://github.com/kenhara/omarchy-compliantish) (`kenhara.compliantish`, verified) | Five Vanta/Drata-style workstation checks: disk encryption, screen lock, antivirus, password manager, auto-updates. | Narrow by design. Vigil covers all five except the password manager (roadmap). |
 
 ## Specialised plugins Vigil does not replace
@@ -45,7 +45,7 @@ rather than rebuilding them:
 
 - **Firewall rules**: [omarchy-firewall](https://github.com/illegalstudio/omarchy-firewall) (verified), [Omawall](https://github.com/sahzudin/omawall) (verified), [ufw](https://github.com/srozen/omarchy-ufw).
 - **Outbound firewall / per-app connections**: [Omasnatch](https://github.com/weedwhitesandwine/omasnatch) (OpenSnitch), [Citadel](https://github.com/NeatOuk/citadel), [Snitch](https://github.com/ccdwyer/omarchy-snitch).
-- **USB**: [Omaguard](https://github.com/fcsonline/omaguard) and [USBGuard](https://github.com/Skymebr/omarchy-usbguard). Omarchy now ships `omarchy-setup-security-usb-authorization`, which Vigil uses.
+- **USB**: [Omaguard](https://github.com/fcsonline/omaguard) and [USBGuard](https://github.com/Skymebr/omarchy-usbguard). Omarchy shipped approval for new USB and Thunderbolt devices briefly (edge and dev, #11874) and then removed it, uninstalling the USBGuard it had set up. Vigil leaves USB alone: a wrong USB policy can lock a beginner out of their own keyboard.
 - **Vulnerabilities**: [Cyber Sentry](https://github.com/SiWestworth/omarchy-cyber-sentry) (CISA KEV), [depaudit](https://github.com/thomasvez/omarchy-depaudit) (project dependencies), [CVE Watcher](https://github.com/Bottelet/omarchy-cve-watcher).
 - **Plugin auditing**: [Omavet](https://github.com/vonsensey/omavet) and [Plugin Guard](https://github.com/kmpeeduwee/omarchy-plugin-guard) scan your other plugins' code.
 - **ClamAV on-access**: [ClamAV Monitor](https://github.com/szentesg/omarchy-clamav-monitor).
@@ -67,8 +67,7 @@ rather than rebuilding them:
 ## What Omarchy already ships
 
 Recent Omarchy has its own security commands, which Vigil surfaces rather
-than duplicates: `omarchy-setup-security-usb-authorization`,
-`-thunderbolt-authorization`, `-fido2`, `-fingerprint`, `-sshd`,
+than duplicates: `omarchy-setup-security-fido2`, `-fingerprint`, `-sshd`,
 `-ssh-agent`, `omarchy-sudo-passwordless` and
 `omarchy-remove-security-sudoless-docker`. Omarchy also configures ufw
 (deny incoming, LocalSend allowed) and a 10-attempt login lockout at install.

@@ -12,8 +12,6 @@ const M = require(path.join(here, "..", "Model.js"))
 
 const TOOLS = {
   "omarchy-launch-floating-terminal-with-presentation": "/usr/bin",
-  "omarchy-setup-security-usb-authorization": "/usr/bin",
-  "omarchy-setup-security-thunderbolt-authorization": "/usr/bin",
   "omarchy-setup-security-fido2": "/usr/bin",
   "omarchy-sudo-passwordless": "/usr/bin",
   "omarchy-remove-security-sudoless-docker": "/usr/bin",

@@ -195,7 +195,7 @@ function undoDropIn(name, path, afterText, after) {
 // what they printed. Only tools that ask you questions as they go (Omarchy's
 // updater and setup wizards, the orphan review, choosing an SSH passphrase)
 // keep a terminal.
-var TERMINAL_ONLY = ["update", "usb-auth", "thunderbolt-auth", "fido2", "sudo-passwordless-off",
+var TERMINAL_ONLY = ["update", "fido2", "sudo-passwordless-off",
                      "docker-group-off", "clean-orphans", "ssh-passphrase"]
 var USER_MODE = ["allow-idle", "restart", "run-arch-audit", "show-ld-preload", "show-plugins", "screen-lock-default"]
 var PKEXEC = "/usr/bin/pkexec"
@@ -383,19 +383,6 @@ var TERMINAL_ACTIONS = {
            "Docker commands then need sudo.",
            "Technical: runs the Omarchy command omarchy-remove-security-sudoless-docker"],
     tool: "omarchy-remove-security-sudoless-docker", args: ""
-  },
-  "usb-auth": {
-    title: "Ask before new USB devices work",
-    what: ["New USB devices, such as a stick that pretends to be a keyboard, work only after you allow them.",
-           "Devices plugged in now are trusted. Omarchy walks you through it.",
-           "Technical: runs omarchy-setup-security-usb-authorization, which installs USBGuard"],
-    tool: "omarchy-setup-security-usb-authorization", args: ""
-  },
-  "thunderbolt-auth": {
-    title: "Ask before new Thunderbolt devices work",
-    what: ["New Thunderbolt devices connect only after you allow them. Omarchy walks you through it.",
-           "Technical: runs omarchy-setup-security-thunderbolt-authorization"],
-    tool: "omarchy-setup-security-thunderbolt-authorization", args: ""
   },
   "fido2": {
     title: "Use a security key for sudo",

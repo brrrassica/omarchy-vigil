@@ -5,7 +5,7 @@ one panel, five pillars.
 
 | Pillar | The question it answers |
 |---|---|
-| **Harden** | Can someone get in? Firewall, SSH, kernel protections, disk encryption, screen lock, sudo, USB and Thunderbolt authorization, updates, open ports. |
+| **Harden** | Can someone get in? Firewall, SSH, kernel protections, disk encryption, screen lock, sudo, security keys, updates, open ports. |
 | **Detect** | Is something bad already here? Malware hiding places, virus scanning through [ClamUI](https://github.com/linx-systems/clamui), rootkit checks. |
 | **Supply** | Can I trust what I installed? Known-compromised packages through Perplexity's [Bumblebee](https://github.com/perplexityai/bumblebee), known vulnerabilities, AUR packages, your other Omarchy plugins. |
 | **Privacy** | What does this machine tell the networks it joins? DNS fallback, hardware address, connectivity pings, announcements, telemetry opt-outs. |
@@ -27,7 +27,7 @@ the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.17.1.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.17.2.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -198,8 +198,6 @@ lower it. A warning you mark as reviewed stops counting.
 | FireWire | The machine has a FireWire port and its driver can load (information; shown only on machines with the port) | `/etc/modprobe.d/90-omarchy-vigil-firewire.conf` (asks for your password) |
 | Passwordless sudo | Omarchy's passwordless sudo is on | `omarchy-sudo-passwordless --disable` (terminal) |
 | Docker group | You are in the docker group, which equals root | `omarchy-remove-security-sudoless-docker` (terminal) |
-| USB authorization | New USB devices are trusted automatically (information) | `omarchy-setup-security-usb-authorization` (terminal) |
-| Thunderbolt authorization | Thunderbolt accessories are trusted automatically (information) | `omarchy-setup-security-thunderbolt-authorization` (terminal) |
 | Security key or fingerprint | sudo takes only a password (information) | `omarchy-setup-security-fido2` (terminal) |
 | System updates | No full update in 14 days (warning) or 30 days (failure) | `omarchy-update` (terminal) |
 | Open network ports | Programs listen on the network with no firewall in front | **Show listeners** runs `ss -tulpn` as root and shows the result in the panel (read-only) |
@@ -284,8 +282,8 @@ The panel always says which kind an action is:
    **Run**. Scripts that need root run through `pkexec`, so Omarchy's own
    password dialog asks; cancelling it changes nothing. The panel then shows
    what the script printed. Only tools that ask you questions as they go
-   still open a terminal: Omarchy's updater, its USB, Thunderbolt and FIDO2
-   setups, passwordless sudo, the docker group, the orphan review, and
+   still open a terminal: Omarchy's updater, its FIDO2 key
+   setup, passwordless sudo, the docker group, the orphan review, and
    choosing an SSH passphrase. Packages Vigil installs come straight from
    the Arch repositories with `pacman --needed --noconfirm`.
 4. **Open an app or a guide**: **Open ClamUI** starts ClamUI directly, and

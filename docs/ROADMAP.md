@@ -131,6 +131,10 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       its progress.
 - [x] Installs, fixes and Clean all show a progress bar while they run;
       the install says which of its four steps it is on.
+- [x] 0.17.2: USB and Thunderbolt authorization dropped. Omarchy shipped
+      approval for new devices briefly (edge and dev) and removed it again,
+      commands included, so the buttons pointed at commands that no longer
+      exist.
 
 ## 0.16: no terminal pop-ups
 
