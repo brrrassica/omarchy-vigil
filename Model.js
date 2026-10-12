@@ -52,7 +52,7 @@ function inList(v, list) {
 // the report only names an action id, and an unknown id does nothing.
 
 var HELPER_ACTIONS = ["ssh-perms", "gnupg-perms", "optout-on", "optout-off", "clean-thumbnails", "empty-trash",
-                      "credential-perms", "integrity-accept", "arch-audit-refresh"]
+                      "credential-perms", "integrity-accept", "arch-audit-refresh", "osv-refresh", "aur-refresh"]
 
 // What the confirmation card says before a helper action runs.
 var HELPER_INFO = {
@@ -74,9 +74,16 @@ var HELPER_INFO = {
   "integrity-accept": { title: "Accept the file changes",
                         what: ["Records the watched files as they are now as the new normal.",
                                "Only do this once you recognise every change in the list."] },
-  "arch-audit-refresh": { title: "Check for known vulnerabilities",
-                          what: ["Runs arch-audit, which downloads the Arch security tracker from security.archlinux.org,",
-                                 "and saves the result in ~/.local/state/omarchy-vigil/arch-audit.json."] }
+  "arch-audit-refresh": { title: "Check for known vulnerabilities now",
+                          what: ["Runs arch-audit, which downloads the Arch security tracker from security.archlinux.org.",
+                                 "Vigil also does this once a week by itself."] },
+  "osv-refresh": { title: "Check for known-malicious packages now",
+                   what: ["Runs osv-scanner on your AUR build folders and global npm and Bun installs.",
+                          "It sends package names and versions (never your files) to OSV.dev, run by Google.",
+                          "Vigil also does this once a week by itself."] },
+  "aur-refresh": { title: "Check your AUR packages now",
+                   what: ["Asks aur.archlinux.org about the AUR packages you have installed, the same lookup",
+                          "yay and paru make on every update. Vigil also does this once a week by itself."] }
 }
 
 function isHelperAction(id) {
@@ -269,7 +276,19 @@ var TERMINAL_ACTIONS = {
   "install-clamav": {
     title: "Install ClamAV",
     what: ["Installs clamav with omarchy pkg add, then downloads the virus database with freshclam."],
-    tool: "omarchy-pkg-add", args: " clamav && sudo /usr/bin/freshclam"
+    tool: "omarchy-pkg-add", args: " clamav && sudo /usr/bin/freshclam && sudo /usr/bin/systemctl enable --now clamav-freshclam.service"
+  },
+  "freshclam-service": {
+    title: "Keep virus signatures updated automatically",
+    what: ["Turns on the ClamAV update service (clamav-freshclam), which downloads new signatures",
+           "from the ClamAV servers several times a day, and fetches them once now."],
+    run: "sudo /usr/bin/systemctl enable --now clamav-freshclam.service"
+  },
+  "install-osv-scanner": {
+    title: "Install osv-scanner",
+    what: ["Installs osv-scanner, the Google tool for checking packages against OSV.dev, with omarchy pkg add.",
+           "Vigil then checks your npm and Bun packages for known malware once a week."],
+    tool: "omarchy-pkg-add", args: " osv-scanner"
   },
   "freshclam": {
     title: "Update the ClamAV database",
@@ -279,11 +298,13 @@ var TERMINAL_ACTIONS = {
   "install-clamui": {
     title: "Install ClamUI",
     what: ["Installs flatpak and clamav with omarchy pkg add, adds the Flathub remote for your account,",
-           "installs ClamUI from Flathub (io.github.linx_systems.ClamUI), then downloads virus signatures.",
+           "installs ClamUI from Flathub (io.github.linx_systems.ClamUI), downloads virus signatures,",
+           "and turns on the ClamAV service that keeps them updated.",
            "Contacts the Arch mirrors, dl.flathub.org and the ClamAV servers."],
     tool: "omarchy-pkg-add", args: " flatpak clamav && "
       + "/usr/bin/flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo && "
-      + "/usr/bin/flatpak install --user flathub io.github.linx_systems.ClamUI && sudo /usr/bin/freshclam"
+      + "/usr/bin/flatpak install --user flathub io.github.linx_systems.ClamUI && sudo /usr/bin/freshclam && "
+      + "sudo /usr/bin/systemctl enable --now clamav-freshclam.service"
   },
   "scan-downloads": {
     title: "Scan ~/Downloads for viruses",
@@ -297,9 +318,10 @@ var TERMINAL_ACTIONS = {
   },
   "run-rkhunter": {
     title: "Check for rootkits",
-    what: ["Runs: sudo rkhunter --check --skip-keypress --report-warnings-only",
+    what: ["Updates the rkhunter data files from its maintainers, then runs",
+           "sudo rkhunter --check --skip-keypress --report-warnings-only",
            "Warnings need reading: after updates, changed system files are expected."],
-    run: "sudo /usr/bin/rkhunter --check --skip-keypress --report-warnings-only"
+    run: "sudo /usr/bin/rkhunter --update; sudo /usr/bin/rkhunter --check --skip-keypress --report-warnings-only"
   },
   "install-lynis": {
     title: "Install Lynis",
@@ -538,7 +560,9 @@ function parseReport(text) {
   }
   var history = parseHistory(d.history)
   if (!history) return null
+  if (d.feedsDue !== undefined && typeof d.feedsDue !== "boolean") return null
   return {
+    feedsDue: d.feedsDue === true,
     history: history,
     version: plain(d.version, 20), generatedAt: plain(d.generatedAt, 40),
     score: Math.round(d.score), level: d.level, checks: checks, tools: tools, apps: apps, fresh: fresh

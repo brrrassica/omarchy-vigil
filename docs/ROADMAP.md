@@ -19,6 +19,14 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 - **Hand off rather than rebuild.** Where a maintained tool already does the
   job well (ClamUI, Bumblebee, Black Ops, Omarchy's own commands), Vigil
   shows its status and opens it. It does not copy it.
+- **Maintained sources only.** Vigil keeps no threat lists of its own. It
+  checks against what the Arch security team, OSV.dev and the OpenSSF,
+  ClamAV, Bumblebee and the AUR publish, refreshed once a week, or by the
+  source's own updater (ClamAV's `freshclam` service).
+- **No false alarms.** Vigil is for people who want to set it and forget it.
+  Only confirmed problems lower the score; anything merely worth knowing is
+  information. A check that cannot be made precise is shown as information or
+  left out.
 - **No scheduling outside the shell.** Background checks are timers inside
   the bar widget; Vigil installs no systemd units or cron jobs, so removing
   the plugin leaves nothing running.
@@ -56,15 +64,14 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       with a hover readout and a one-line summary in words.
 - [ ] `preview.png` and the marketplace submission (checklist below).
 
-## Phase 4 (0.4, this release): deeper supply chain and detection
+## Phase 4 (0.4): deeper supply chain and detection
 
 - [x] **Exposed secrets**: keys and tokens in shell histories, and credential
       files readable by others (fixable without root). Reports file and
       line, never the secret. Project `.env` files are left out on purpose:
       they are normal in development and would drown the real findings.
-- [x] Known malicious AUR packages, from a reviewed list shipped in
-      `data/known-bad.json` with a public source per entry; version- and
-      install-date-aware. Plus known malware process names.
+- [x] ~~Known malicious AUR packages from a hand-kept list, and malware
+      process names.~~ Replaced in 0.5 by maintained sources.
 - [x] arch-audit results in the panel (severity per package, fix available
       or not), refreshed only when you press Check now.
 - [x] ClamUI quarantine count, from the number of files in its quarantine
@@ -73,6 +80,32 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       system and user services, autostart and startup files, with Accept.
       `/etc/sudoers.d` is root-only, so it cannot be watched without root.
 - [x] Read-only capability audit of other Omarchy plugins.
+
+## Phase 4.5 (0.5, this release): maintained sources, no false alarms
+
+- [x] Removed the hand-kept list (`data/known-bad.json`) and the malware
+      process-name check, which had no maintained source.
+- [x] Known-malicious npm, Bun and other packages from OSV.dev (OpenSSF
+      Malicious Packages) through osv-scanner, over AUR build folders and
+      global npm, Bun, mise and pnpm installs. Catches the 2026 Atomic Arch
+      AUR attack (`bun install js-digest`) and the Bun-based npm worms. Only
+      `MAL-` entries count.
+- [x] arch-audit limited to problems an update fixes (`--upgradable`), shown
+      as a warning rather than a failure.
+- [x] AUR package status from the AUR itself: packages that left the AUR,
+      moved to the official repositories, or have no maintainer.
+      Information only. There is no maintained feed of malicious AUR packages.
+- [x] Weekly refresh of all three (`autoUpdate`, on by default), with a
+      retry after a day on failure; ClamAV signatures through ClamAV's own
+      `clamav-freshclam` service, turned on when Vigil installs ClamAV or
+      ClamUI; rkhunter data updated before each run.
+- [x] False-alarm pass: file changes that match what a package shipped
+      (pacman's mtree records) and system users added by packages are not
+      reported; `/etc/hosts` is no longer watched; only changes to who can log
+      in or what runs at start are warnings. Secret detection uses provider
+      formats only. Bumblebee staleness, plugin capabilities and AUR status
+      are information. Disk encryption, unfixable without a reinstall, is a
+      warning that can be marked as reviewed.
 
 ## Phase 5: privacy and recovery
 

@@ -108,10 +108,19 @@ def test_no_shared_tmp_or_shell_in_python():
     assert src.startswith("#!/usr/bin/python3 -I -S\n")
 
 
-def test_no_network_tools_invoked_by_helper():
+def test_helper_network_is_bounded_and_fixed():
+    """The helper's only direct network use is one curl call to the AUR,
+    with curl -q first, HTTPS only (also on redirects), a time and size
+    limit, no blind redirect following, and a fixed host."""
     src = (REPO / "bin" / "vigil").read_text()
-    for argv0 in re.findall(r'run\(\[\s*"?([^",\]]+)', src):
-        assert "curl" not in argv0 and "wget" not in argv0, argv0
+    calls = re.findall(r'run\(\[\s*"(/usr/bin/(?:curl|wget)[^"]*)"(.*?)\]', src, re.S)
+    assert len(calls) == 1 and calls[0][0] == "/usr/bin/curl"
+    args = calls[0][1]
+    assert args.lstrip(", ").startswith('"-q"')
+    for flag in ('"--proto", "=https"', '"--proto-redir", "=https"', '"--max-time"', '"--max-filesize"', '"--", url'):
+        assert flag in args, flag
+    assert '"-L"' not in args and "--location" not in args
+    assert src.count("https://aur.archlinux.org/rpc/v5/info?") == 1
 
 
 def test_readme_documents_removal_and_files():

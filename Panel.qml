@@ -36,6 +36,10 @@ Panel {
     return isFinite(n) ? Math.max(5, Math.min(1440, Math.round(n))) : 30
   }
   readonly property bool notifyOnNew: setting("notifyOnNew", true) === true
+  // Weekly refresh of the maintained sources (arch-audit, OSV, the AUR).
+  readonly property bool autoUpdate: setting("autoUpdate", true) === true
+  property string feedBuffer: ""
+  property bool feedOverflow: false
   // One bar per monitor means one copy of this widget per monitor. Only the
   // first screen's copy schedules audits, records findings and notifies.
   readonly property bool isPrimary: root.QsWindow.window !== null
@@ -104,6 +108,18 @@ Panel {
     if (statusIsError) setStatus("", false)
     if (rowIndex >= visibleChecks.length) rowIndex = Math.max(0, visibleChecks.length - 1)
     if (root.isPrimary && root.notifyOnNew && parsed.fresh.length > 0) notifyNew(parsed.fresh.length)
+    if (root.isPrimary && root.autoUpdate && parsed.feedsDue) refreshFeeds()
+  }
+
+  // Runs `bin/vigil refresh-feeds` in the background; the helper refreshes
+  // only the sources that are due and retries failures the next day.
+  function refreshFeeds() {
+    if (feedProc.running) return
+    feedBuffer = ""
+    feedOverflow = false
+    feedProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, "refresh-feeds"]
+    feedProc.running = true
+    feedDeadline.restart()
   }
 
   function notifyNew(count) {
@@ -249,6 +265,7 @@ Panel {
   Component.onDestruction: {
     if (auditProc.running) auditProc.signal(15)
     if (fixProc.running) fixProc.signal(15)
+    if (feedProc.running) feedProc.signal(15)
   }
 
   // ---- processes
@@ -301,11 +318,39 @@ Panel {
     }
   }
 
+  Process {
+    id: feedProc
+    clearEnvironment: true
+    environment: root.helperEnv
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(data) {
+        if (root.feedOverflow) return
+        if (root.feedBuffer.length + data.length > root.maxFixChars) {
+          root.feedOverflow = true
+          root.feedBuffer = ""
+          feedProc.signal(15)
+          feedKill.restart()
+          return
+        }
+        root.feedBuffer += data
+      }
+    }
+    onExited: function(exitCode, exitStatus) {
+      feedKill.stop()
+      feedDeadline.stop()
+      root.feedBuffer = ""
+      root.runAudit()
+    }
+  }
+
   // The helper bounds its own children; these are the outer backstops.
   Timer { id: auditDeadline; interval: 90000; onTriggered: if (auditProc.running) { auditProc.signal(15); auditKill.restart() } }
   Timer { id: auditKill; interval: 2000; onTriggered: if (auditProc.running) auditProc.signal(9) }
   Timer { id: fixDeadline; interval: 120000; onTriggered: if (fixProc.running) { fixProc.signal(15); fixKill.restart() } }
   Timer { id: fixKill; interval: 2000; onTriggered: if (fixProc.running) fixProc.signal(9) }
+  Timer { id: feedDeadline; interval: 1200000; onTriggered: if (feedProc.running) { feedProc.signal(15); feedKill.restart() } }
+  Timer { id: feedKill; interval: 2000; onTriggered: if (feedProc.running) feedProc.signal(9) }
 
   // First check shortly after login, then every refreshMinutes on the
   // primary monitor's copy. Secondary copies check when their panel opens.

@@ -28,6 +28,7 @@ Standard library only. No network access of any kind.
 """
 import errno
 import fcntl
+import zlib
 import hashlib
 import json
 import os
@@ -42,7 +43,7 @@ import sys
 import time
 from base64 import b64decode
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -64,7 +65,6 @@ except KeyError:
 STATE_DIR = (".local", "state", "omarchy-vigil")
 STATE_NAME = "state.json"
 BASELINE_NAME = "baseline.json"
-ARCH_AUDIT_NAME = "arch-audit.json"
 STATE_FILE_MAX = 256 * 1024
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 OPT_OUT_DIR = (".config", "uwsm", "env.d")
@@ -881,7 +881,8 @@ def check_disk_encryption():
         return result(cid, cat, title, "unknown", "Could not tell how the system disk is set up.", why, weight=3)
     if enc:
         return result(cid, cat, title, "pass", "The system disk is encrypted (LUKS).", why, weight=3)
-    return result(cid, cat, title, "fail", "The system disk is not encrypted.", why, weight=3)
+    return result(cid, cat, title, "warn", "The system disk is not encrypted. Only a reinstall can change this, "
+                  "so mark it as reviewed if you accept that.", why, weight=3)
 
 
 @check
@@ -1116,7 +1117,6 @@ PERSISTENCE_PATTERNS = [
     (re.compile(r"/dev/(tcp|udp)/\d", re.I), "opens a raw network connection (reverse shell pattern)"),
     (re.compile(r"\bnc(at)?\b[^\n]*\s-(e|c)\s", re.I), "netcat with command execution"),
     (re.compile(r"\bpython[0-9.]*\s+-c\s+[\"'][^\"']*(socket|urllib|exec\()", re.I), "inline Python that connects or executes"),
-    (re.compile(r"\bLD_PRELOAD\s*=", re.I), "forces a library into every program (LD_PRELOAD)"),
 ]
 
 STARTUP_FILES = [(".bashrc",), (".bash_profile",), (".bash_login",), (".profile",), (".zshrc",),
@@ -1221,9 +1221,9 @@ SCANNERS = [
      "Lynis runs hundreds of hardening checks and gives a hardening index with concrete suggestions.",
      "run-lynis", "install-lynis"),
     ("arch-audit", "arch-audit", "supply", "Known vulnerabilities (arch-audit)",
-     "arch-audit compares installed packages with the Arch security tracker and lists the ones with "
-     "published vulnerabilities. Checking contacts security.archlinux.org, so Vigil only does it when you "
-     "press Check now.", "run-arch-audit", "install-arch-audit"),
+     "arch-audit checks your installed packages against the Arch security team's tracker and lists the "
+     "ones where an update fixes a published vulnerability. Vigil refreshes it once a week (it contacts "
+     "security.archlinux.org); Check now does it straight away.", "run-arch-audit", "install-arch-audit"),
 ]
 
 
@@ -1243,15 +1243,19 @@ def _scanner_check(sid, binary, cat, title, why, run_action, install_action):
                 newest = max(newest, os.stat(sys_path("/var/lib/clamav/" + name)).st_mtime)
             except OSError:
                 pass
-        if not newest:
-            return result(cid, cat, title, "warn", "Installed, but the virus database is missing.",
-                          why, fix=fix("terminal", "freshclam", "Download the database"), weight=0)
-        days = int((time.time() - newest) // 86400)
-        if days > 7:
-            return result(cid, cat, title, "warn",
-                          "Installed, but the virus database is %d days old." % days, why,
-                          fix=fix("terminal", "freshclam", "Update the database"), weight=0)
-        summary = "Installed; database updated %s." % (
+        auto = systemctl("is-enabled", "clamav-freshclam.service") == "enabled"
+        days = int((time.time() - newest) // 86400) if newest else None
+        if not auto:
+            return result(cid, cat, title, "warn" if days is None or days > 7 else "info",
+                          ("The virus signatures are missing" if days is None else
+                           "The virus signatures are %d day%s old" % (days, "" if days == 1 else "s"))
+                          + " and do not update by themselves.", why,
+                          fix=fix("terminal", "freshclam-service", "Update them automatically"), weight=0)
+        if days is None or days > 7:
+            return result(cid, cat, title, "warn", "Automatic updates are on, but the signatures are %s." % (
+                "missing" if days is None else "%d days old" % days) + " Check your internet connection.",
+                why, fix=fix("terminal", "freshclam", "Update now"), weight=0)
+        summary = "Signatures update automatically (last %s)." % (
             "today" if days == 0 else "%d day%s ago" % (days, "" if days == 1 else "s"))
     return result(cid, cat, title, "info", summary, why, fix=fix("terminal", run_action, "Run"), weight=0)
 
@@ -1289,35 +1293,23 @@ def parse_arch_audit(text):
 
 
 def _arch_audit_check(cid, cat, title, why):
-    cached = _state_json(ARCH_AUDIT_NAME)
-    pkgs = cached.get("packages") if isinstance(cached, dict) else None
-    at = cached.get("at") if isinstance(cached, dict) and isinstance(cached.get("at"), str) else ""
+    cache = feed_cache("arch-audit")
     refresh = fix("helper", "arch-audit-refresh", "Check now")
-    if not isinstance(pkgs, list) or not _DATE.match(at):
-        return result(cid, cat, title, "info", "Installed. Not checked yet.", why, fix=refresh, weight=0)
+    if cache is None:
+        return result(cid, cat, title, "info", "Installed. The first check runs within a day.", why,
+                      fix=refresh, weight=0)
+    pkgs = cache.get("packages") if isinstance(cache.get("packages"), list) else []
     good = [p for p in pkgs if isinstance(p, dict) and isinstance(p.get("name"), str) and _PKG_NAME.match(p["name"])
-            and p.get("severity") in SEVERITIES and isinstance(p.get("fixed"), bool)]
-    fixable = [p for p in good if p["fixed"]]
-    serious = [p for p in fixable if p["severity"] in ("Critical", "High")]
-    lines = ["%s: %s%s" % (p["name"], p["severity"].lower(), ", fixed version available" if p["fixed"] else ", no fix yet")
-             for p in good]
-    try:
-        age = int((time.time() - time.mktime(time.strptime(at, "%Y-%m-%d"))) // 86400)
-    except ValueError:
-        age = 0
-    when = "checked today" if age <= 0 else "checked %d day%s ago" % (age, "" if age == 1 else "s")
+            and p.get("severity") in SEVERITIES][:500]
+    when = feed_when(cache)
     if not good:
-        return result(cid, cat, title, "pass", "No known vulnerabilities in installed packages (%s)." % when, why,
+        return result(cid, cat, title, "pass", "No updates waiting that fix known vulnerabilities (%s)." % when, why,
                       fix=refresh, weight=2)
-    summary = "%d vulnerable package%s, %d with a fix available (%s)." % (
-        len(good), "" if len(good) == 1 else "s", len(fixable), when)
-    if serious:
-        return result(cid, cat, title, "fail" if age <= 14 else "warn", summary + " Update to get the fixes.", why,
-                      clean_block(lines), fix("terminal", "update", "Update now"), weight=2)
-    if fixable:
-        return result(cid, cat, title, "warn", summary + " Update to get the fixes.", why, clean_block(lines),
-                      fix("terminal", "update", "Update now"), weight=2)
-    return result(cid, cat, title, "info", summary + " None has a fix yet.", why, clean_block(lines), fix=refresh, weight=0)
+    serious = [p for p in good if p["severity"] in ("Critical", "High")]
+    lines = ["%s: %s" % (p["name"], p["severity"].lower()) for p in good]
+    return result(cid, cat, title, "warn", "Updating fixes %d known vulnerabilit%s%s (%s)." % (
+        len(good), "y" if len(good) == 1 else "ies", (", %d serious" % len(serious)) if serious else "", when),
+        why, clean_block(lines), fix("terminal", "update", "Update now"), weight=2)
 
 
 def _make_scanner(spec):
@@ -1329,6 +1321,305 @@ def _make_scanner(spec):
 
 for _spec in SCANNERS:
     check(_make_scanner(_spec))
+
+
+# ---------------------------------------------------------------------------
+# Maintained sources ("feeds"). Vigil keeps no threat lists of its own. Each
+# feed is refreshed from the people who maintain it: once a week in the
+# background (the panel's autoUpdate setting, on by default) or when you
+# press Check now. A failed refresh is retried after a day. Results are
+# cached in the state folder; checks read only the cache.
+
+FEED_FILES = {"arch-audit": "arch-audit.json", "osv": "osv.json", "aur": "aur.json"}
+FEED_DAYS = 7
+FEED_RETRY_DAYS = 1
+
+
+def _days_since(date):
+    try:
+        return int((time.time() - time.mktime(time.strptime(date, "%Y-%m-%d"))) // 86400)
+    except (TypeError, ValueError):
+        return None
+
+
+def feed_cache(name):
+    """The cached result of a feed, or None if it never completed."""
+    data = _state_json(FEED_FILES[name])
+    if not isinstance(data, dict) or not isinstance(data.get("at"), str) or not _DATE.match(data["at"]):
+        return None
+    return data
+
+
+def feed_when(cache):
+    d = _days_since(cache.get("at"))
+    return "checked today" if not d else "checked %d day%s ago" % (d, "" if d == 1 else "s")
+
+
+def feed_available(name):
+    if name == "arch-audit":
+        return is_trusted_executable(sys_path("/usr/bin/arch-audit"))
+    if name == "osv":
+        return is_trusted_executable(sys_path("/usr/bin/osv-scanner")) and bool(osv_targets())
+    if name == "aur":
+        return is_trusted_executable(sys_path("/usr/bin/curl")) and is_trusted_executable(sys_path("/usr/bin/pacman"))
+    return False
+
+
+def feed_due(name):
+    if not feed_available(name):
+        return False
+    meta = _state_json(FEED_FILES[name]) or {}
+    done = _days_since(meta.get("at"))
+    tried = _days_since(meta.get("attempted"))
+    if done is not None and done < FEED_DAYS:
+        return False
+    return tried is None or tried >= FEED_RETRY_DAYS
+
+
+def save_feed(name, body, ok=True):
+    """Write a feed's cache. On failure, keep the last good result and record the attempt."""
+    dirfd = _state_dir()
+    try:
+        _lock(dirfd)
+        try:
+            old = _read_json_file(dirfd, FEED_FILES[name]) or {}
+        except Refused:
+            old = {}
+        today = time.strftime("%Y-%m-%d")
+        out = dict(body, schema=SCHEMA, at=today, attempted=today) if ok else dict(old, attempted=today)
+        write_atomic(dirfd, FEED_FILES[name], json.dumps(out, separators=(",", ":")).encode())
+    finally:
+        os.close(dirfd)
+
+
+def refresh_arch_audit():
+    rc, out = run(["/usr/bin/arch-audit", "--json", "--upgradable"], timeout=120, limit=8 * 1024 * 1024)
+    pkgs = parse_arch_audit(out) if rc is not None else None
+    if pkgs is None:
+        save_feed("arch-audit", {}, ok=False)
+        raise Refused("arch-audit did not finish (no network, or it took too long)")
+    save_feed("arch-audit", {"packages": pkgs})
+    return "%d vulnerabilit%s fixed by updating." % (len(pkgs), "y" if len(pkgs) == 1 else "ies")
+
+
+# OSV: osv-scanner checks lockfiles against OSV.dev, which includes the OpenSSF
+# Malicious Packages project. Only confirmed malware (MAL- ids) becomes a
+# finding; ordinary vulnerabilities in development dependencies are left out
+# so they cannot raise false alarms. It sends package names and versions,
+# never file contents. Git checkouts are not sent (osv-scanner's default).
+
+OSV_HOME_TARGETS = [(".cache", "yay"), (".cache", "paru"), (".bun", "install", "global"),
+                    (".local", "share", "mise", "installs"), (".npm-global",), (".local", "share", "pnpm")]
+OSV_SYSTEM_TARGETS = ["/usr/lib/node_modules"]
+
+
+def osv_targets():
+    out = []
+    for parts in OSV_HOME_TARGETS:
+        p = home_path(*parts)
+        try:
+            if stat.S_ISDIR(os.lstat(p).st_mode):
+                out.append(p)
+        except OSError:
+            pass
+    for p in OSV_SYSTEM_TARGETS:
+        try:
+            if stat.S_ISDIR(os.lstat(sys_path(p)).st_mode):
+                out.append(sys_path(p))
+        except OSError:
+            pass
+    return out
+
+
+def _shown(path):
+    return "~" + path[len(HOME):] if path.startswith(HOME + "/") else path[len(ROOT):] if ROOT and path.startswith(ROOT) else path
+
+
+def parse_osv(text):
+    """Malicious packages from osv-scanner JSON: [{name, version, ecosystem, id, where}] or None."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("results", []), list):
+        return None
+    found = {}
+    for res in (data.get("results") or [])[:5000]:
+        if not isinstance(res, dict):
+            continue
+        src = res.get("source") if isinstance(res.get("source"), dict) else {}
+        where = clean(_shown(str(src.get("path", ""))), 160)
+        for pk in (res.get("packages") or [])[:5000] if isinstance(res.get("packages"), list) else []:
+            if not isinstance(pk, dict) or not isinstance(pk.get("package"), dict):
+                continue
+            info = pk["package"]
+            name, ver, eco = info.get("name"), info.get("version"), info.get("ecosystem")
+            if not all(isinstance(x, str) and 0 < len(x) <= 214 for x in (name, ver, eco)):
+                continue
+            for v in (pk.get("vulnerabilities") or [])[:500] if isinstance(pk.get("vulnerabilities"), list) else []:
+                if not isinstance(v, dict):
+                    continue
+                ids = [v.get("id")] + (v.get("aliases") if isinstance(v.get("aliases"), list) else [])
+                mal = [i for i in ids if isinstance(i, str) and re.fullmatch(r"MAL-\d{4}-\d{1,9}", i)]
+                if mal:
+                    key = (eco, name, ver)
+                    found.setdefault(key, {"name": clean(name, 120), "version": clean(ver, 60),
+                                           "ecosystem": clean(eco, 30), "id": mal[0], "where": where})
+    return list(found.values())[:500]
+
+
+def refresh_osv():
+    targets = osv_targets()
+    if not targets:
+        save_feed("osv", {"malicious": [], "scanned": []})
+        return "No npm or Bun packages to check."
+    argv = ["/usr/bin/osv-scanner", "--format", "json", "--no-resolve", "--recursive"] + ["--"] + targets
+    rc, out = run(argv, timeout=600, limit=32 * 1024 * 1024)
+    if rc == 128:
+        found = []
+    elif rc in (0, 1):
+        found = parse_osv(out)
+    else:
+        found = None
+    if found is None:
+        save_feed("osv", {}, ok=False)
+        raise Refused("osv-scanner did not finish (no network, or it took too long)")
+    save_feed("osv", {"malicious": found, "scanned": [_shown(t) for t in targets]})
+    return "%d known-malicious package%s found." % (len(found), "" if len(found) == 1 else "s")
+
+
+@check
+def check_osv():
+    cid, cat, title = "malicious-packages", "supply", "Known-malicious npm and Bun packages"
+    why = ("Attackers publish poisoned versions of npm packages that steal passwords and keys; in 2026 many "
+           "ran through Bun, and the Atomic Arch attack pulled one into AUR builds. Vigil asks OSV.dev, which "
+           "collects confirmed malware reports from the OpenSSF Malicious Packages project, about the packages "
+           "in your AUR build folders and global npm and Bun installs. It sends package names and versions, "
+           "never your files, once a week and when you press Check now.")
+    if not is_trusted_executable(sys_path("/usr/bin/osv-scanner")):
+        return result(cid, cat, title, "info", "Not set up. Install osv-scanner to check against OSV.dev.", why,
+                      fix=fix("terminal", "install-osv-scanner", "Install osv-scanner"), weight=0)
+    if not osv_targets():
+        return result(cid, cat, title, "pass", "No AUR build folders or global npm and Bun installs to check.",
+                      why, weight=0)
+    cache = feed_cache("osv")
+    refresh = fix("helper", "osv-refresh", "Check now")
+    if cache is None:
+        return result(cid, cat, title, "info", "The first check runs within a day.", why, fix=refresh, weight=0)
+    mal = [m for m in cache.get("malicious", []) if isinstance(m, dict)][:500] \
+        if isinstance(cache.get("malicious"), list) else []
+    if mal:
+        lines = ["%s %s (%s, %s) in %s" % (clean(m.get("name"), 120), clean(m.get("version"), 60),
+                 clean(m.get("ecosystem"), 30), clean(m.get("id"), 20), clean(m.get("where"), 160)) for m in mal]
+        return result(cid, cat, title, "fail", "%d known-malicious package%s found (%s)." % (
+            len(mal), "" if len(mal) == 1 else "s", feed_when(cache)), why + (
+            " Remove the AUR package or project that pulled it in, then change the passwords and keys used on "
+            "this machine from another device."), clean_block(lines), fix=refresh, weight=3)
+    return result(cid, cat, title, "pass", "No known-malicious packages (%s)." % feed_when(cache), why,
+                  fix=refresh, weight=3)
+
+
+# AUR: there is no maintained feed of malicious AUR packages, so Vigil asks
+# the AUR itself about your packages, the same lookup yay and paru make on
+# every update. The answers are information, never alarms: a package can
+# leave the AUR or lose its maintainer for ordinary reasons.
+
+_AUR_SAFE = set("abcdefghijklmnopqrstuvwxyz0123456789._-")
+
+
+def _pct(name):
+    return "".join(c if c in _AUR_SAFE else "%%%02X" % ord(c) for c in name)
+
+
+def refresh_aur():
+    rc, out = run(["/usr/bin/pacman", "-Qmq"], timeout=8, limit=CMD_MAX)
+    if rc is None:
+        save_feed("aur", {}, ok=False)
+        raise Refused("could not list AUR packages")
+    names = [n for n in out.split() if _PKG_NAME.match(n)][:2000]
+    known, orphans = {}, []
+    for i in range(0, len(names), 100):
+        batch = names[i:i + 100]
+        url = "https://aur.archlinux.org/rpc/v5/info?" + "&".join("arg%5B%5D=" + _pct(n) for n in batch)
+        rc, body = run(["/usr/bin/curl", "-q", "-sS", "--fail", "--proto", "=https", "--proto-redir", "=https",
+                        "--max-time", "30", "--max-filesize", str(4 * 1024 * 1024), "--", url],
+                       timeout=40, limit=4 * 1024 * 1024)
+        try:
+            data = json.loads(body) if rc == 0 else None
+        except ValueError:
+            data = None
+        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+            save_feed("aur", {}, ok=False)
+            raise Refused("the AUR did not answer")
+        for r in data["results"][:200]:
+            if isinstance(r, dict) and isinstance(r.get("Name"), str) and r["Name"] in batch:
+                known[r["Name"]] = True
+                if r.get("Maintainer") is None:
+                    orphans.append(r["Name"])
+    gone = [n for n in names if n not in known]
+    official = set()
+    if gone:
+        rc, sync = run(["/usr/bin/pacman", "-Slq"], timeout=15, limit=4 * 1024 * 1024)
+        official = set(sync.split()) if rc == 0 else set()
+    save_feed("aur", {"checked": len(names), "gone": [n for n in gone if n not in official][:500],
+                      "official": [n for n in gone if n in official][:500], "orphans": orphans[:500]})
+    return "Checked %d AUR package%s." % (len(names), "" if len(names) == 1 else "s")
+
+
+@check
+def check_aur_status():
+    cid, cat, title = "aur-status", "supply", "AUR package status"
+    why = ("Most 2026 AUR attacks took over packages whose maintainers had left them (orphans), and Arch "
+           "deleted the poisoned ones. Vigil asks the AUR about your AUR packages once a week. A package that "
+           "has left the AUR or has no maintainer is not necessarily harmful, but it no longer gets reviewed "
+           "fixes, so replace it if you can.")
+    if not feed_available("aur"):
+        return result(cid, cat, title, "na", "pacman or curl is not available.", why, weight=0)
+    cache = feed_cache("aur")
+    refresh = fix("helper", "aur-refresh", "Check now")
+    if cache is None:
+        return result(cid, cat, title, "info", "The first check runs within a day.", why, fix=refresh, weight=0)
+
+    def names(key):
+        v = cache.get(key)
+        return [clean(n, 100) for n in v if isinstance(n, str) and _PKG_NAME.match(n)][:500] if isinstance(v, list) else []
+    gone, official, orphans = names("gone"), names("official"), names("orphans")
+    lines = (["no longer in the AUR: " + n for n in gone] + ["now in the official repositories: " + n for n in official]
+             + ["no maintainer (orphaned): " + n for n in orphans])
+    if not lines:
+        return result(cid, cat, title, "pass", "All your AUR packages are still maintained in the AUR (%s)." %
+                      feed_when(cache), why, fix=refresh, weight=0)
+    bits = []
+    if official:
+        bits.append("%d now in the official repositories (reinstall them from there)" % len(official))
+    if gone:
+        bits.append("%d no longer in the AUR" % len(gone))
+    if orphans:
+        bits.append("%d without a maintainer" % len(orphans))
+    return result(cid, cat, title, "info", "; ".join(bits).capitalize() + " (%s)." % feed_when(cache), why,
+                  clean_block(lines), fix=refresh, weight=0)
+
+
+FEED_REFRESH = {"arch-audit": refresh_arch_audit, "osv": refresh_osv, "aur": refresh_aur}
+
+
+def refresh_due_feeds():
+    """Refresh every feed that is due. Used by the weekly background update."""
+    done, failed = [], []
+    for name, fn in FEED_REFRESH.items():
+        if not feed_due(name):
+            continue
+        try:
+            fn()
+            done.append(name)
+        except (Refused, OSError):
+            failed.append(name)
+    if not done and not failed:
+        return {"ok": True, "action": "", "message": "Everything is up to date."}
+    msg = "Updated: %s." % (", ".join(done) or "nothing")
+    if failed:
+        msg += " Will retry tomorrow: %s." % ", ".join(failed)
+    return {"ok": not failed, "action": "", "message": clean(msg)}
 
 
 CLAMUI_APP_ID = "io.github.linx_systems.ClamUI"
@@ -1411,7 +1702,8 @@ def check_bumblebee():
         return result(cid, cat, title, "fail", "Bumblebee found %d known-compromised component%s. Open Bumblebee "
                       "for the list." % (count, "" if count == 1 else "s"), why, weight=3)
     if age_days > 7:
-        return result(cid, cat, title, "warn", "Bumblebee's last scan is %d days old." % age_days, why, weight=1)
+        return result(cid, cat, title, "info", "Bumblebee found nothing, but its last scan is %d days old." % age_days,
+                      why, weight=0)
     return result(cid, cat, title, "pass", "Bumblebee found no known-compromised components.", why, weight=3)
 
 
@@ -1452,9 +1744,9 @@ def check_plugins():
         return result(cid, cat, title, "pass", "No other third-party plugins are installed.", why, weight=0)
     summary = "%d third-party plugin%s installed." % (len(lines), "" if len(lines) == 1 else "s")
     if risky:
-        return result(cid, cat, title, "warn", summary + " %d download%s and run%s code or ship%s binaries." % (
+        return result(cid, cat, title, "info", summary + " %d download%s and run%s code or ship%s binaries." % (
             risky, "s" if risky == 1 else "", "s" if risky == 1 else "", "s" if risky == 1 else ""),
-            why, clean_block(lines), weight=1)
+            why, clean_block(lines), weight=0)
     return result(cid, cat, title, "info", summary, why, clean_block(lines), weight=0)
 
 
@@ -1468,12 +1760,9 @@ SECRET_PATTERNS = [
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "Slack token"),
     (re.compile(r"\bsk_live_[A-Za-z0-9]{20,}\b"), "Stripe live key"),
     (re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b"), "Anthropic API key"),
-    (re.compile(r"\bsk-(proj-)?[A-Za-z0-9_-]{32,}\b"), "OpenAI-style API key"),
+    (re.compile(r"\bsk-(proj-|svcacct-|admin-)?(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{40,}\b"), "OpenAI-style API key"),
     (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "Google API key"),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "private key"),
-    (re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*", re.I), "bearer token"),
-    (re.compile(r"\bexport\s+[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY)[A-Z0-9_]*=['\"]?[^\s$'\"]{8,}"),
-     "secret in an exported variable"),
 ]
 
 HISTORY_FILES = [(".bash_history",), (".zsh_history",), (".histfile",), (".local", "share", "fish", "fish_history"),
@@ -1532,114 +1821,19 @@ _PKG_NAME = re.compile(r"^[a-z0-9@._+-]{1,100}$")
 _PKG_VER = re.compile(r"^[A-Za-z0-9._+:~-]{1,60}$")
 
 
-def known_bad():
-    """The reviewed list in data/known-bad.json, validated; empty on any problem."""
-    try:
-        raw = read_file(os.path.join(PLUGIN_DIR, "data", "known-bad.json"), SMALL_FILE_MAX)
-        data = json.loads(raw.decode("utf-8")) if raw else {}
-    except (Refused, ValueError, OSError):
-        return [], []
-    pkgs, procs = [], []
-    for e in data.get("packages", [])[:500] if isinstance(data, dict) else []:
-        if not isinstance(e, dict) or not isinstance(e.get("name"), str) or not _PKG_NAME.match(e["name"]):
-            continue
-        vers = [x for x in e.get("versions", []) if isinstance(x, str) and _PKG_VER.match(x)]
-        win = e.get("installedBetween")
-        if not (isinstance(win, list) and len(win) == 2 and all(isinstance(x, str) and _DATE.match(x) for x in win)):
-            win = None
-        pkgs.append({"name": e["name"], "versions": vers, "window": win,
-                     "incident": clean(e.get("incident", ""), 160)})
-    for e in data.get("processes", [])[:100] if isinstance(data, dict) else []:
-        if isinstance(e, dict) and isinstance(e.get("name"), str) and re.fullmatch(r"[A-Za-z0-9._-]{1,15}", e["name"]):
-            procs.append({"name": e["name"], "incident": clean(e.get("incident", ""), 160)})
-    return pkgs, procs
-
-
-def _install_date(name, version):
-    """YYYY-MM-DD from pacman's local database, or ''."""
-    if not _PKG_NAME.match(name) or not _PKG_VER.match(version) or ".." in name + version:
-        return ""
-    try:
-        text = read_text(sys_path("/var/lib/pacman/local/%s-%s/desc" % (name, version)), SMALL_FILE_MAX)
-    except Refused:
-        return ""
-    m = re.search(r"%INSTALLDATE%\n(\d{1,12})\n", text or "")
-    return time.strftime("%Y-%m-%d", time.gmtime(int(m.group(1)))) if m else ""
-
-
-@check
-def check_known_bad_packages():
-    cid, cat, title = "known-bad-packages", "supply", "Known malicious AUR packages"
-    why = ("A few AUR packages have shipped malware: hijacked orphans in 2018, and fake browser and font "
-           "packages carrying remote-access trojans in 2025. Vigil compares your AUR packages with a reviewed "
-           "list that ships with it; nothing is downloaded.")
-    pkgs, _ = known_bad()
-    tool = "/usr/bin/pacman"
-    if not pkgs:
-        return result(cid, cat, title, "unknown", "Vigil's list of known malicious packages could not be read.", why, weight=3)
-    if not is_trusted_executable(sys_path(tool)):
-        return result(cid, cat, title, "na", "pacman is not available.", why, weight=3)
-    rc, out = run([tool, "-Qm"], timeout=8, limit=CMD_MAX)
-    if rc is None:
-        return result(cid, cat, title, "unknown", "Could not list AUR packages.", why, weight=3)
-    installed = {}
-    for line in out.splitlines()[:5000]:
-        parts = line.split()
-        if len(parts) == 2:
-            installed[parts[0]] = parts[1]
-    hits = []
-    for e in pkgs:
-        ver = installed.get(e["name"])
-        if ver is None:
-            continue
-        if e["versions"] and ver not in e["versions"]:
-            continue
-        if e["window"]:
-            day = _install_date(e["name"], ver)
-            if not day or not (e["window"][0] <= day <= e["window"][1]):
-                continue
-        hits.append("%s %s: %s" % (e["name"], ver, e["incident"]))
-    if hits:
-        return result(cid, cat, title, "fail", "%d installed package%s match%s a known malware incident." % (
-            len(hits), "" if len(hits) == 1 else "s", "es" if len(hits) == 1 else ""), why + (
-            " Remove the package, check the Detect tab for malware processes, and treat the machine as "
-            "compromised until you are sure: change passwords from another device."), clean_block(hits), weight=3)
-    return result(cid, cat, title, "pass", "None of your %d AUR packages are on the list (%d entries)." % (
-        len(installed), len(pkgs)), why, weight=3)
-
-
-@check
-def check_malware_processes():
-    cid, cat, title = "malware-processes", "detect", "Known malware processes"
-    why = ("Some malware runs under a recognisable process name. Vigil looks for the names on its reviewed "
-           "list among everything running right now.")
-    _, procs = known_bad()
-    if not procs:
-        return result(cid, cat, title, "unknown", "Vigil's list of known malware could not be read.", why, weight=3)
-    wanted = {p["name"]: p["incident"] for p in procs}
-    found = []
-    for pid in list_dir(sys_path("/proc"), 20000):
-        if not pid.isdigit():
-            continue
-        try:
-            comm = (read_text(sys_path("/proc/%s/comm" % pid), 64) or "").strip()
-        except Refused:
-            continue
-        if comm in wanted:
-            found.append("PID %s: %s (%s)" % (pid, comm, wanted[comm]))
-    if found:
-        return result(cid, cat, title, "fail", "A process with a known malware name is running.", why + (
-            " Disconnect from the network, then follow the advice for the matching incident."),
-            clean_block(found), weight=3)
-    return result(cid, cat, title, "pass", "No known malware process names are running.", why, weight=3)
-
-
 # File-change alerts: a baseline of digests for high-value files, kept in the
 # state folder. Symlinks are recorded by their target, never followed.
 
 INTEGRITY_SYSTEM_FILES = ["/etc/passwd", "/etc/group", "/etc/shells", "/etc/environment", "/etc/profile",
-                          "/etc/ld.so.preload", "/etc/hosts", "/etc/ssh/sshd_config", "/etc/sudo.conf",
+                          "/etc/ld.so.preload", "/etc/ssh/sshd_config", "/etc/sudo.conf",
                           "/etc/security/faillock.conf"]
+
+# Changes here can hand someone else access, so they are warnings. Changes
+# anywhere else in the watched set (your own shell files, environment) are
+# shown as information only.
+INTEGRITY_HIGH_RISK = ("~/.ssh/authorized_keys", "/etc/ld.so.preload", "/etc/pam.d/", "/etc/sudo.conf",
+                       "/etc/passwd", "/etc/group", "/etc/ssh/", "/etc/systemd/system/", "/etc/xdg/autostart/",
+                       "~/.config/systemd/user/", "~/.config/autostart/")
 INTEGRITY_SYSTEM_DIRS = [("/etc/pam.d", ""), ("/etc/profile.d", ""), ("/etc/ssh/sshd_config.d", ".conf"),
                          ("/etc/systemd/system", ".service"), ("/etc/systemd/system", ".timer"),
                          ("/etc/xdg/autostart", ".desktop")]
@@ -1650,7 +1844,24 @@ INTEGRITY_HOME_DIRS = [((".config", "autostart"), ".desktop"), ((".config", "sys
 INTEGRITY_MAX = 600
 
 
-def _digest(path):
+def _accounts_view(shown, data):
+    """For /etc/passwd and /etc/group, keep only what matters for access, so
+    packages adding their own system users and groups are not reported:
+    root and human accounts (UID 0 or 1000+), and groups that have members."""
+    keep = []
+    for line in data.decode("utf-8", "replace").splitlines():
+        f = line.split(":")
+        if len(f) < 4 or not f[2].isdigit():
+            continue
+        num = int(f[2])
+        if shown == "/etc/passwd" and (num == 0 or 1000 <= num < 65534):
+            keep.append(line)
+        elif shown == "/etc/group" and (f[3].strip() or 1000 <= num < 65534):
+            keep.append(line)
+    return "\n".join(sorted(keep)).encode()
+
+
+def _digest(path, shown=""):
     """'link:<target>' for a symlink, 'sha256:<hex>' for a regular file, None if absent or unreadable."""
     try:
         st = os.lstat(path)
@@ -1667,7 +1878,11 @@ def _digest(path):
         data = read_file(path, FILE_MAX)
     except Refused:
         return None
-    return None if data is None else "sha256:" + hashlib.sha256(data).hexdigest()[:32]
+    if data is None:
+        return None
+    if shown in ("/etc/passwd", "/etc/group"):
+        data = _accounts_view(shown, data)
+    return "sha256:" + hashlib.sha256(data).hexdigest()[:32]
 
 
 def integrity_snapshot():
@@ -1681,7 +1896,9 @@ def integrity_snapshot():
         paths += [("~/" + "/".join(parts) + "/" + n, base + "/" + n) for n in list_dir(base, 300) if n.endswith(suffix)]
     snap = {}
     for shown, real in paths[:INTEGRITY_MAX]:
-        dg = _digest(real)
+        if "omarchy-vigil" in shown:
+            continue                                   # Vigil's own files
+        dg = _digest(real, shown)
         if dg is not None:
             snap[shown] = dg
     return snap
@@ -1746,6 +1963,46 @@ def _last_upgrade_date():
     return last
 
 
+def package_verified(paths):
+    """The subset of /etc paths whose current content is exactly what an
+    installed package shipped, according to pacman's own mtree records.
+    Those changes came from an update, so they are not reported."""
+    wanted = {p: None for p in paths if p.startswith("/etc/")}
+    if not wanted:
+        return set()
+    for p in list(wanted):
+        try:
+            data = read_file(sys_path(p), FILE_MAX)
+        except Refused:
+            data = None
+        if data is not None:
+            wanted[p] = hashlib.sha256(data).hexdigest()
+    keys = {"./" + p[1:]: p for p, h in wanted.items() if h}
+    verified = set()
+    deadline = time.monotonic() + 5.0
+    for pkg in list_dir(sys_path("/var/lib/pacman/local"), 5000):
+        if not keys or time.monotonic() > deadline:
+            break
+        try:
+            raw = read_file(sys_path("/var/lib/pacman/local/%s/mtree" % pkg), 2 * 1024 * 1024)
+        except Refused:
+            continue
+        if not raw:
+            continue
+        try:
+            text = zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(raw, 32 * 1024 * 1024).decode("utf-8", "replace")
+        except zlib.error:
+            continue
+        for line in text.splitlines():
+            name = line.split(" ", 1)[0]
+            if name in keys:
+                m = re.search(r"\bsha256digest=([0-9a-f]{64})\b", line)
+                if m and m.group(1) == wanted[keys[name]]:
+                    verified.add(keys[name])
+                    del keys[name]
+    return verified
+
+
 INTEGRITY_PEEK = {"value": False}
 
 
@@ -1773,17 +2030,24 @@ def check_file_changes():
     changed = sorted(k for k in snap if k in old and old[k] != snap[k])
     added = sorted(k for k in snap if k not in old)
     removed = sorted(k for k in old if k not in snap)
+    from_packages = package_verified(changed + added)
+    changed = [k for k in changed if k not in from_packages]
+    added = [k for k in added if k not in from_packages]
     lines = ["changed: " + k for k in changed] + ["new: " + k for k in added] + ["removed: " + k for k in removed]
+    note = (" %d other change%s came from package updates and match what the package shipped." % (
+        len(from_packages), "" if len(from_packages) == 1 else "s")) if from_packages else ""
     if not lines:
-        return result(cid, cat, title, "pass", "None of %d watched files changed since %s." % (len(snap), since),
-                      why, weight=2)
+        return result(cid, cat, title, "pass", "No unexpected changes to %d watched files since %s.%s" % (
+            len(snap), since, note), why, weight=2)
+    risky = [k for k in changed + added + removed if k.startswith(INTEGRITY_HIGH_RISK)]
     n = len(lines)
-    summary = "%d file%s changed since %s." % (n, "" if n == 1 else "s", since)
-    upgraded = _last_upgrade_date()
-    if upgraded and since != "the baseline" and upgraded >= since:
-        summary += " A system update ran since then, which explains most changes in /etc."
-    return result(cid, cat, title, "warn", summary, why, clean_block(lines),
-                  fix("helper", "integrity-accept", "Accept these changes"), weight=2)
+    summary = "%d file%s changed since %s%s.%s" % (
+        n, "" if n == 1 else "s", since, (", %d of them affecting who can log in or what runs at start" % len(risky))
+        if risky else "", note)
+    accept = fix("helper", "integrity-accept", "Accept these changes")
+    if risky:
+        return result(cid, cat, title, "warn", summary, why, clean_block(lines), accept, weight=2)
+    return result(cid, cat, title, "info", summary, why, clean_block(lines), accept, weight=0)
 
 
 # Read-only scan of other plugins' code: what each can do. Nothing is loaded
@@ -2364,6 +2628,7 @@ def audit(peek=False):
         "score": score_of(checks), "level": level, "counts": counts,
         "checks": checks, "tools": tools, "apps": {"clamui": clamui_install()},
         "new": [], "stateSaved": False, "history": state_history(state),
+        "feedsDue": any(feed_due(n) for n in FEED_FILES),
     }
     if not peek:
         report["new"], report["stateSaved"] = update_state(report)
@@ -2546,36 +2811,22 @@ def fix_credential_perms():
     return "Made %d credential file%s private." % (changed, "" if changed == 1 else "s")
 
 
+def _missing(what):
+    raise Refused("%s is not installed" % what)
+
+
 def fix_integrity_accept():
     snap = integrity_snapshot()
     save_baseline(snap)
     return "Recorded %d files as the new normal." % len(snap)
 
 
-def fix_arch_audit_refresh():
-    tool = "/usr/bin/arch-audit"
-    if not is_trusted_executable(sys_path(tool)):
-        raise Refused("arch-audit is not installed")
-    rc, out = run([tool, "--json"], timeout=90, limit=8 * 1024 * 1024)
-    if rc is None:
-        raise Refused("arch-audit did not finish (no network, or it took too long)")
-    pkgs = parse_arch_audit(out)
-    if pkgs is None:
-        raise Refused("arch-audit returned something Vigil could not read")
-    dirfd = _state_dir()
-    try:
-        _lock(dirfd)
-        body = {"schema": SCHEMA, "at": time.strftime("%Y-%m-%d"), "packages": pkgs}
-        write_atomic(dirfd, ARCH_AUDIT_NAME, json.dumps(body, separators=(",", ":")).encode())
-    finally:
-        os.close(dirfd)
-    return "Checked: %d vulnerable package%s." % (len(pkgs), "" if len(pkgs) == 1 else "s")
-
-
 FIXES = {
     "credential-perms": fix_credential_perms,
     "integrity-accept": fix_integrity_accept,
-    "arch-audit-refresh": fix_arch_audit_refresh,
+    "arch-audit-refresh": lambda: refresh_arch_audit() if feed_available("arch-audit") else _missing("arch-audit"),
+    "osv-refresh": lambda: refresh_osv() if feed_available("osv") else _missing("osv-scanner"),
+    "aur-refresh": lambda: refresh_aur() if feed_available("aur") else _missing("pacman or curl"),
     "ssh-perms": fix_ssh_perms,
     "gnupg-perms": fix_gnupg_perms,
     "optout-on": fix_optout_on,
@@ -2621,10 +2872,13 @@ def main(argv):
     if len(argv) == 3 and argv[1] in ("dismiss", "undismiss") and re.fullmatch(r"[a-z0-9-]{1,40}", argv[2]):
         emit(set_dismissed(argv[2], argv[1] == "dismiss"))
         return 0
+    if len(argv) == 2 and argv[1] == "refresh-feeds":
+        emit(refresh_due_feeds())
+        return 0
     if len(argv) == 2 and argv[1] == "version":
         emit({"version": VERSION})
         return 0
-    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil version\n")
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil refresh-feeds | vigil version\n")
     return 2
 
 

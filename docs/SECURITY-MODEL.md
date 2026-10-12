@@ -24,9 +24,11 @@ These hold for every pillar, now and in later phases:
 4. **Hand off, don't absorb.** ClamUI keeps quarantine, Bumblebee keeps its
    catalog, Black Ops keeps telemetry blocking. Vigil reads their results and
    opens them; it does not run their code or write their files.
-5. **No code or data fetched at run time.** Catalogs ship as reviewed data in
-   this repository. Network access happens only in actions you start, and
-   their confirmation says where they connect.
+5. **Maintained sources, never executed.** Vigil keeps no threat lists. Data
+   comes from the tools of the people who maintain it (arch-audit,
+   osv-scanner, ClamAV's freshclam) and one fixed AUR lookup, once a week
+   (the `autoUpdate` setting) or when you press Check now. Nothing fetched is
+   ever run; results are size-capped and validated like any other input.
 6. **Nothing automatic.** Every change is confirmed; notifications carry
    counts only; IPC methods take no parameters.
 7. **Removal leaves nothing running.** No units, cron jobs or daemons;
@@ -126,19 +128,31 @@ no polkit policy, no service, no timer and no daemon.
 
 ## Network
 
-The helper and panel make no network connections of their own. Actions that
-do (package installs, `freshclam`, `omarchy-update`, and **Check now**, which
-runs `arch-audit --json`) are started by you and say so on their
-confirmation. arch-audit's output is parsed with a byte cap, package names and
-versions are checked against a strict pattern, and only names, severities and
-counts are kept.
+The weekly refresh (and **Check now**) is the only network use Vigil starts
+by itself, and only once the relevant tool is installed:
+
+- `arch-audit --json --upgradable` and `osv-scanner --format json
+  --no-resolve --recursive -- <folders>` are root-owned system binaries, run
+  with the helper's usual absolute path, empty environment, deadline and
+  output cap. osv-scanner sends package names and versions, not files; git
+  checkouts are not sent (its default).
+- The AUR lookup is one `curl -q -sS --fail --proto =https --proto-redir
+  =https --max-time 30 --max-filesize 4194304 -- <url>` to a fixed host,
+  with package names checked against a strict pattern and percent-encoded.
+  `tests/test_marketplace_rules.py` fails if any other network call appears.
+- Results are parsed with byte caps and strict patterns, and only names,
+  severities, IDs and counts are kept. A failed refresh keeps the last good
+  result and retries after a day, so an offline machine is not hammered.
+
+Actions you start yourself (package installs, ClamUI, `omarchy-update`)
+say where they connect before they run.
 
 ## Reading other software
 
-- The known-bad list is data in this repository (`data/known-bad.json`),
-  read with the same bounded reader as any file and validated entry by
-  entry. Install dates come from pacman's local database, with package names
-  and versions checked against a strict pattern before they form a path.
+- File changes are checked against pacman's own records: each package's
+  `mtree` in `/var/lib/pacman/local` is decompressed with a 32 MiB output
+  cap, within a five-second budget, and a changed `/etc` file whose SHA-256
+  matches what a package shipped is not reported.
 - The plugin capability scan reads other plugins' files as text, at most 300
   files per plugin, 512 KiB per file, 8 MiB and three seconds in total,
   without following symlinks. It never loads, imports or runs them.

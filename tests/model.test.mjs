@@ -286,3 +286,9 @@ test("every pillar and tab label is one word", () => {
     assert.match(M.categoryLabel(cat), /^[A-Z][a-z]+$/, cat)
   }
 })
+
+test("feedsDue is a strict boolean", () => {
+  assert.equal(parse(report()).feedsDue, false)
+  assert.equal(parse(report({ feedsDue: true })).feedsDue, true)
+  assert.equal(parse(report({ feedsDue: "yes" })), null)
+})
