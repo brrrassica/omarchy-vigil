@@ -43,7 +43,7 @@ import sys
 import time
 from base64 import b64decode
 
-VERSION = "0.7.1"
+VERSION = "0.8.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1425,9 +1425,9 @@ def source_status():
     if is_trusted_executable(sys_path("/usr/bin/clamscan")):
         d = _mtime_date([sys_path("/var/lib/clamav/" + n) for n in ("daily.cld", "daily.cvd")])
         age = _days_since(d)
-        add("signatures", "Virus signatures", d, "never" if not d else ("ok" if age is not None and age <= FEED_DAYS else "stale"))
-    for name, label in (("virus-scan", "Virus scan of Downloads"), ("arch-audit", "Known vulnerabilities"),
-                        ("osv", "Malicious packages"), ("aur", "AUR status")):
+        add("signatures", "ClamAV virus signatures", d, "never" if not d else ("ok" if age is not None and age <= FEED_DAYS else "stale"))
+    for name, label in (("virus-scan", "Downloads virus scan"), ("arch-audit", "Arch vulnerability database"),
+                        ("osv", "OSV malicious-package database"), ("aur", "AUR package status")):
         if not feed_available(name):
             continue
         meta = _state_json(FEED_FILES[name]) or {}
@@ -1444,7 +1444,7 @@ def source_status():
     if exists(home_path(".config", "omarchy", "plugins", BUMBLEBEE_ID)):
         d = _mtime_date([home_path(".local", "state", "omarchy", "bumblebee", "last-scan.json")])
         age = _days_since(d)
-        add("bumblebee", "Bumblebee", d, "never" if not d else ("ok" if age is not None and age <= FEED_DAYS else "stale"))
+        add("bumblebee", "Bumblebee scan", d, "never" if not d else ("ok" if age is not None and age <= FEED_DAYS else "stale"))
     return out
 
 
@@ -1483,7 +1483,9 @@ def refresh_arch_audit():
         save_feed("arch-audit", {}, ok=False)
         raise Refused("arch-audit did not finish (no network, or it took too long)")
     save_feed("arch-audit", {"packages": pkgs})
-    return "%d vulnerabilit%s fixed by updating." % (len(pkgs), "y" if len(pkgs) == 1 else "ies")
+    return "Vulnerability database refreshed. " + (
+        "Updating would fix %d known vulnerabilit%s on this machine." % (len(pkgs), "y" if len(pkgs) == 1 else "ies")
+        if pkgs else "No updates are waiting that fix a known vulnerability on this machine.")
 
 
 # OSV: osv-scanner checks lockfiles against OSV.dev, which includes the OpenSSF
@@ -1556,7 +1558,7 @@ def refresh_osv():
     targets = osv_targets()
     if not targets:
         save_feed("osv", {"malicious": [], "scanned": []})
-        return "No npm or Bun packages to check."
+        return "Checked against OSV.dev: there are no npm or Bun packages on this machine to check."
     argv = ["/usr/bin/osv-scanner", "--format", "json", "--no-resolve", "--recursive"] + ["--"] + targets
     rc, out = run(argv, timeout=600, limit=32 * 1024 * 1024)
     if rc == 128:
@@ -1569,7 +1571,9 @@ def refresh_osv():
         save_feed("osv", {}, ok=False)
         raise Refused("osv-scanner did not finish (no network, or it took too long)")
     save_feed("osv", {"malicious": found, "scanned": [_shown(t) for t in targets]})
-    return "%d known-malicious package%s found." % (len(found), "" if len(found) == 1 else "s")
+    return "Checked against OSV.dev. " + (
+        "Found %d known-malicious package%s on this machine." % (len(found), "" if len(found) == 1 else "s")
+        if found else "No known-malicious packages on this machine.")
 
 
 @check
@@ -1647,7 +1651,7 @@ def refresh_aur():
         official = set(sync.split()) if rc == 0 else set()
     save_feed("aur", {"checked": len(names), "gone": [n for n in gone if n not in official][:500],
                       "official": [n for n in gone if n in official][:500], "orphans": orphans[:500]})
-    return "Checked %d AUR package%s." % (len(names), "" if len(names) == 1 else "s")
+    return "Asked the AUR about your %d AUR package%s." % (len(names), "" if len(names) == 1 else "s")
 
 
 @check
@@ -1723,7 +1727,8 @@ def refresh_virus_scan():
         raise Refused("the virus scan did not finish (missing signatures, or it took too long)")
     found = parse_clamscan(out) if rc == 1 else []
     save_feed("virus-scan", {"found": found, "scanned": _shown(target)})
-    return "%d infected file%s found." % (len(found), "" if len(found) == 1 else "s")
+    return "Downloads scanned. " + ("Found %d infected file%s." % (len(found), "" if len(found) == 1 else "s")
+                                     if found else "No infected files.")
 
 
 @check
@@ -1753,8 +1758,30 @@ def check_virus_scan():
 
 FEED_REFRESH = {"arch-audit": refresh_arch_audit, "osv": refresh_osv, "aur": refresh_aur,
                 "virus-scan": refresh_virus_scan}
-FEED_LABELS = {"arch-audit": "known vulnerabilities", "osv": "malicious packages", "aur": "AUR status",
-               "virus-scan": "virus scan"}
+FEED_LABELS = {"arch-audit": "the Arch vulnerability database", "osv": "the OSV malicious-package database",
+               "aur": "your AUR package status", "virus-scan": "the Downloads virus scan"}
+
+
+def _and(items):
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def feed_findings():
+    """Problems on this machine according to the cached results, in words."""
+    out = []
+    a = feed_cache("arch-audit") if feed_available("arch-audit") else None
+    if a and isinstance(a.get("packages"), list) and a["packages"]:
+        n = len(a["packages"])
+        out.append("updating would fix %d known vulnerabilit%s" % (n, "y" if n == 1 else "ies"))
+    o = feed_cache("osv") if feed_available("osv") else None
+    if o and isinstance(o.get("malicious"), list) and o["malicious"]:
+        n = len(o["malicious"])
+        out.append("%d known-malicious package%s" % (n, "" if n == 1 else "s"))
+    v = feed_cache("virus-scan") if feed_available("virus-scan") else None
+    if v and isinstance(v.get("found"), list) and v["found"]:
+        n = len(v["found"])
+        out.append("%d infected file%s in Downloads" % (n, "" if n == 1 else "s"))
+    return out
 
 
 def refresh_due_feeds(force=False):
@@ -1776,9 +1803,18 @@ def refresh_due_feeds(force=False):
             return {"ok": True, "action": "", "message": "Nothing to update yet. Install the tools offered in the "
                     "Detect and Supply tabs (ClamUI, arch-audit, osv-scanner) to add them to the weekly check."}
         return {"ok": True, "action": "", "message": "Everything is up to date."}
-    msg = "Updated: %s." % (", ".join(FEED_LABELS[n] for n in done) or "nothing")
+    refreshed = [FEED_LABELS[n] for n in done if n != "virus-scan"]
+    parts = []
+    if refreshed:
+        parts.append("refreshed " + _and(refreshed))
+    if "virus-scan" in done:
+        parts.append("scanned Downloads")
+    msg = (_and(parts)[0].upper() + _and(parts)[1:] + ".") if parts else ""
     if failed:
-        msg += " Could not update: %s; Vigil retries tomorrow." % ", ".join(FEED_LABELS[n] for n in failed)
+        msg += " Could not update %s; Vigil tries again tomorrow." % _and([FEED_LABELS[n] for n in failed])
+    found = feed_findings()
+    msg += (" On this machine: %s. See the tabs for details." % "; ".join(found)) if found \
+        else " Nothing on this machine needs attention."
     return {"ok": not failed, "action": "", "message": clean(msg)}
 
 
@@ -2737,7 +2773,7 @@ def score_of(checks):
         if c["status"] == "fail":
             score -= 10 * w
         elif c["status"] == "warn":
-            score -= 4 * w
+            score -= 2 * w
     return max(0, min(100, score))
 
 

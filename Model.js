@@ -542,18 +542,20 @@ function relativeDay(date, now) {
 }
 
 function sourceLine(src, now) {
-  if (src.state === "never") return "not updated yet"
+  // Scans "ran"; databases and signatures are "updated".
+  var scan = src.id === "virus-scan" || src.id === "bumblebee"
+  if (src.state === "never") return scan ? "not run yet" : "not updated yet"
   if (src.state === "failed")
-    return "last update failed" + (src.date !== "" ? "; last good " + relativeDay(src.date, now) : "")
+    return (scan ? "last run failed" : "last update failed") + (src.date !== "" ? "; last good " + relativeDay(src.date, now) : "")
   var when = relativeDay(src.date, now)
-  return src.state === "stale" ? "out of date (" + when + ")" : "updated " + when
+  return src.state === "stale" ? "out of date (" + when + ")" : (scan ? "ran " : "updated ") + when
 }
 
 function lastRunLine(run, now) {
   if (!run || run.at === "") return "No full update yet. It runs within a day, or press the button."
   var time = run.at.substring(11, 16)
   return "Last full update " + relativeDay(run.at, now) + " at " + time
-    + (run.ok ? ". Everything updated." : ". Some sources did not update; Vigil retries tomorrow.")
+    + (run.ok ? ". Every source refreshed." : ". Some sources did not refresh; Vigil tries again tomorrow.")
 }
 
 function parseHistory(h) {

@@ -107,7 +107,22 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.7 (this release): source dates on the Overview
+## 0.8 (this release): first real-machine test
+
+Tested on Omarchy: the widget loads, every check ran with no false alarms,
+and osv-scanner is in Arch's `extra` repository.
+
+- [x] Fixed: the widget did not load (`ShellIpc` is internal to Omarchy;
+      now `IpcHandler`), with a test that every QML type is one plugins can use.
+- [x] Update messages separate what was refreshed ("the Arch vulnerability
+      database") from what was found on this machine, so a refresh never
+      reads as a finding. Source names on the Overview name the database or
+      scan.
+- [x] Warnings cost 2 points per weight instead of 4; failures unchanged. A
+      typical Omarchy machine with only privacy improvements left no longer
+      scores in the 50s.
+
+## 0.7: source dates on the Overview
 
 - [x] The Overview lists when the last full update ran and whether every
       source updated, and each set-up source with its last successful update;

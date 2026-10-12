@@ -26,7 +26,7 @@ root runs in a terminal you can watch.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.7.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.8.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -127,8 +127,10 @@ settings:
 
 ## What Vigil checks
 
-Each check has a weight. Failures and warnings on weighted checks lower the
-score; checks with weight 0 are information and never lower it.
+Each check has a weight from 0 to 3. A failure costs 10 points per weight
+point and a warning 2, so a confirmed problem moves the score a lot and an
+improvement only a little; checks with weight 0 are information and never
+lower it. A warning you mark as reviewed stops counting.
 
 ### Harden
 

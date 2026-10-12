@@ -1051,7 +1051,7 @@ def test_feed_due_and_retry(v):
     v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
     assert v.feed_due("arch-audit") is True
     res = v.refresh_due_feeds()                           # fake run fails: (None, "")
-    assert res["ok"] is False and "retries tomorrow" in res["message"]
+    assert res["ok"] is False and "tries again tomorrow" in res["message"]
     assert v.feed_due("arch-audit") is False              # tried today, waits a day
     p = Path(v.HOME, ".local/state/omarchy-vigil/arch-audit.json")
     meta = json.loads(p.read_text())
@@ -1207,7 +1207,8 @@ def test_force_refresh_runs_everything_available(v):
     assert v.refresh_due_feeds()["ok"]                                    # first run: both due
     assert v.refresh_due_feeds()["message"] == "Everything is up to date."
     res = v.refresh_due_feeds(force=True)                                 # the button ignores "due"
-    assert res["ok"] and "known vulnerabilities" in res["message"] and "virus scan" in res["message"]
+    assert res["message"] == ("Refreshed the Arch vulnerability database and scanned Downloads. "
+                              "Nothing on this machine needs attention.")
 
 
 def test_force_refresh_with_nothing_installed_says_how_to_start(v):
@@ -1280,3 +1281,32 @@ def test_last_run_recorded(v):
     assert v.last_run()["ok"] is True
     report = v.audit(peek=True)
     assert report["lastRun"]["ok"] is True and [s["id"] for s in report["sources"]] == ["arch-audit"]
+
+
+def test_update_message_separates_refreshing_from_findings(v):
+    """Refreshing a database must never read as finding something."""
+    v.TRUSTED |= {v.ROOT + "/usr/bin/arch-audit", v.ROOT + "/usr/bin/clamscan"}
+    os.makedirs(os.path.join(v.HOME, "Downloads"))
+    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (1, ARCH_AUDIT_JSON)
+    v.COMMANDS[scan_argv(v)] = (1, os.path.join(v.HOME, "Downloads/x.exe") + ": Win.Test.EICAR_HDB-1 FOUND\n")
+    msg = v.refresh_due_feeds(force=True)["message"]
+    assert msg.startswith("Refreshed the Arch vulnerability database and scanned Downloads.")
+    assert "On this machine: updating would fix 2 known vulnerabilities; 1 infected file in Downloads." in msg
+    assert v.run_fix("arch-audit-refresh")["message"] == (
+        "Vulnerability database refreshed. Updating would fix 2 known vulnerabilities on this machine.")
+    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
+    assert v.run_fix("arch-audit-refresh")["message"] == (
+        "Vulnerability database refreshed. No updates are waiting that fix a known vulnerability on this machine.")
+
+
+def test_source_labels_name_the_source_not_a_finding(v):
+    v.TRUSTED |= {v.ROOT + "/usr/bin/arch-audit", v.ROOT + "/usr/bin/clamscan"}
+    os.makedirs(os.path.join(v.HOME, "Downloads"))
+    labels = [s["label"] for s in v.source_status()]
+    assert labels == ["ClamAV virus signatures", "Downloads virus scan", "Arch vulnerability database"]
+
+
+def test_warnings_cost_less_than_failures(v):
+    warn = v.result("a", "harden", "A", "warn", "x", weight=3)
+    fail = v.result("b", "harden", "B", "fail", "x", weight=3)
+    assert v.score_of([warn]) == 94 and v.score_of([fail]) == 70
