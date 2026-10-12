@@ -1,6 +1,6 @@
 # Vigil
 
-A security suite for [Omarchy](https://omarchy.org): one shield in the bar,
+A security suite for [Omarchy](https://omarchy.org): one lighthouse in the bar,
 one panel, five pillars.
 
 | Pillar | The question it answers |
@@ -27,7 +27,7 @@ the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.22.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.23.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -41,7 +41,7 @@ After updating Vigil, restart the shell so the new panel loads (the panel
 offers a **Restart shell** button when it notices the update); until then
 the old panel keeps running against the new helper.
 
-The shield appears on the right of the bar. Nothing else is needed: Vigil
+The lighthouse appears on the right of the bar. Nothing else is needed: Vigil
 uses Python and commands Omarchy already ships. ClamUI, ClamAV, the
 scanners and Bumblebee are optional. When any are missing, the Overview shows
 a red **MISSING … INSTALL** button in place of **Update sources**; it lists
@@ -51,8 +51,8 @@ what it will install, asks once more, and then asks for your password.
 
 | | |
 |---|---|
-| Left-click the shield | Open or close the panel |
-| Middle-click the shield | Re-read your settings now (quick, no scans) |
+| Left-click the lighthouse | Open or close the panel |
+| Middle-click the lighthouse | Re-read your settings now (quick, no scans) |
 | `←` `→` or `1`–`6` | Switch tabs |
 | `↑` `↓`, `Enter` | Move through findings, open one |
 | `F` | Fix the selected finding (asks first) |
@@ -62,8 +62,8 @@ what it will install, asks once more, and then asks for your password.
 | `C` | On the Care tab: Clean all |
 | `Esc` | Cancel a confirmation, or close |
 
-The shield is dim until the first check finishes, about eight seconds after
-login. It takes your theme's urgent colour when something needs fixing and
+The lighthouse is dim until the first check finishes, about eight seconds after
+login, and shows its beams while a scan or update runs. It takes your theme's urgent colour when something needs fixing and
 its accent colour when only improvements are left; every colour in Vigil
 comes from your Omarchy theme. The **Overview** tab shows your score out of
 100, the **Full scan** and **Update sources** buttons, and each pillar with

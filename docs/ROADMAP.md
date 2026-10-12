@@ -111,7 +111,12 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.22 (this release): Bumblebee stays current
+## 0.23 (this release): a lighthouse
+
+- [x] The bar icon is a lighthouse instead of a shield (so many plugins use
+      one); its beams show while a scan or update runs.
+
+## 0.22: Bumblebee stays current
 
 - [x] Bumblebee follows Perplexity's releases: the newest one that has been
       out for a week, checked against Perplexity's published SHA-256. The

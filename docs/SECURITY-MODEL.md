@@ -53,7 +53,7 @@ These hold for every pillar, now and in later phases:
 
 | Part | Runs as | Does |
 |---|---|---|
-| `Panel.qml` + `Model.js` | you, inside `omarchy-shell` | Draws the shield and panel, starts the helper, validates its output, launches confirmed actions. |
+| `Panel.qml` + `Model.js` | you, inside `omarchy-shell` | Draws the lighthouse and panel, starts the helper, validates its output, launches confirmed actions. |
 | `bin/vigil` | you, as a child process | Reads local settings and returns one JSON report; performs the six helper actions. |
 | Script actions | root through `pkexec` (Omarchy's password dialog), or you | Constant scripts from `Model.js`, shown on a confirmation first; what they print is shown in the panel. |
 | Terminal actions | you, in a visible terminal | Omarchy's own interactive commands, and choosing an SSH passphrase. |

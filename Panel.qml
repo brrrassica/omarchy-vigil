@@ -7,7 +7,7 @@ import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
-// Vigil: a shield in the bar and a panel with five tabs.
+// Vigil: a lighthouse in the bar and a panel with five tabs.
 //
 // All the checking is done by bin/vigil, run as an argv array with a cleared
 // environment. Its stdout is read in raw chunks with a hard size limit and
@@ -213,7 +213,7 @@ Panel {
     Quickshell.execDetached([
       "/usr/bin/notify-send", "--app-name=Vigil", "--",
       "Vigil",
-      n + (n === 1 ? " new security finding." : " new security findings.") + " Open the shield in the bar for details."
+      n + (n === 1 ? " new security finding." : " new security findings.") + " Open the lighthouse in the bar for details."
     ])
   }
 
@@ -648,7 +648,7 @@ Panel {
       if (root.feedFull)
         Quickshell.execDetached(["/usr/bin/notify-send", "--app-name=Vigil", "--", "Vigil",
           parsed && parsed.stopped ? "The Full scan was stopped."
-            : (parsed ? "Full scan finished. Open the shield in the bar for the results." : "The Full scan did not finish.")])
+            : (parsed ? "Full scan finished. Open the lighthouse in the bar for the results." : "The Full scan did not finish.")])
       root.feedForced = false
       root.feedFull = false
       root.runAudit()
@@ -696,7 +696,9 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "󰒃"
+    // A lighthouse: it keeps watch and warns. Its beams show while a scan or
+    // update runs (Nerd Font md-lighthouse_on / md-lighthouse).
+    text: feedProc.running || root.runElsewhere ? "󰨀" : "󰧿"
     tooltipText: Model.tooltip(root.report, auditProc.running)
     dimmed: root.report === null
     active: root.report !== null && root.report.level !== "ok"
