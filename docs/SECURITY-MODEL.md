@@ -9,11 +9,12 @@ mechanical ones.
 
 These hold for every pillar, now and in later phases:
 
-1. **No root from the plugin.** Root changes are constant scripts in a
-   visible terminal, or Omarchy's own commands. No root helper, sudoers rule,
-   polkit policy, service or timer, ever. The one read-only root step (the
-   password check) uses `pkexec` with a constant command and Omarchy's own
-   password dialog; it changes nothing.
+1. **No root from the plugin.** Root steps are constant scripts from
+   `Model.js` (or two constant argvs in the helper), shown in full on a
+   confirmation in the panel, then run through `pkexec`, so Omarchy's own
+   polkit dialog asks for your password each time. Tools that ask questions
+   as they go are Omarchy's own commands in a visible terminal. No root
+   helper, sudoers rule, polkit policy, service or timer, ever.
 2. **Everything Vigil reads is untrusted**, including its own helper's output,
    other tools' result files and file names (a file name is chosen by whoever
    created the file). It is size-capped, validated and shown as plain text,
@@ -42,7 +43,8 @@ These hold for every pillar, now and in later phases:
 |---|---|---|
 | `Panel.qml` + `Model.js` | you, inside `omarchy-shell` | Draws the shield and panel, starts the helper, validates its output, launches confirmed actions. |
 | `bin/vigil` | you, as a child process | Reads local settings and returns one JSON report; performs the six helper actions. |
-| Terminal actions | you, in a visible terminal; `sudo` for root steps | Constant scripts from `Model.js`, and Omarchy's own commands. |
+| Script actions | root through `pkexec` (Omarchy's password dialog), or you | Constant scripts from `Model.js`, shown on a confirmation first; what they print is shown in the panel. |
+| Terminal actions | you, in a visible terminal | Omarchy's own interactive commands, and choosing an SSH passphrase. |
 | App actions | you | Open ClamUI with a fixed argv: `/usr/bin/clamui`, or `/usr/bin/flatpak run io.github.linx_systems.ClamUI`. |
 
 Nothing from the plugin folder ever runs as root. There is no sudoers rule,
@@ -76,6 +78,14 @@ no polkit policy, no service, no timer and no daemon.
 - The panel starts the helper as
   `/usr/bin/python3 -I -S <plugin>/bin/vigil ...` with `clearEnvironment`.
   Helper actions are a closed list of ids, checked on both sides.
+- Script actions run as `pkexec /usr/bin/env HOME=<your home> /usr/bin/bash
+  -c <script>` for root steps, or `/usr/bin/bash -c <script>` as you, with
+  a fixed, minimal environment. The script is the constant from `Model.js`
+  with its `sudo` prefixes removed; nothing from the report or a file
+  reaches it. Steps that would wait for input are not allowed (a test
+  checks), and `ufw` runs with `--force` so it never prompts.
+- Update sources updates ClamAV's signatures with `pkexec /usr/bin/freshclam`,
+  a constant argv, only when you press it; the weekly run never asks.
 - Terminal actions are constant strings in `Model.js`. The report only names
   an action id; an id that is not in the table does nothing. Omarchy tools
   are addressed by absolute path, from one of the two trusted directories.

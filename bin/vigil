@@ -44,7 +44,7 @@ import time
 from base64 import b64decode
 from datetime import date, timedelta
 
-VERSION = "0.15.0"
+VERSION = "0.16.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1406,11 +1406,33 @@ PKEXEC = "/usr/bin/pkexec"
 # The one root step: a constant, read-only awk over /etc/shadow that prints the
 # names of accounts whose password field is empty. pkexec shows Omarchy's own
 # password dialog; nothing else runs as root.
-NO_PASSWORD_ARGV = [PKEXEC, "/usr/bin/awk", "-F:", '$2 == "" { print $1 }', "/etc/shadow"]
+# /usr/bin/bash, not awk: on Arch awk is a link, which Vigil never runs as root.
+ROOT_STEP = "/usr/bin/awk -F: '$2 == \"\" { print $1 }' /etc/shadow"
+NO_PASSWORD_ARGV = [PKEXEC, "/usr/bin/bash", "-c", ROOT_STEP]
+FRESHCLAM_ARGV = [PKEXEC, "/usr/bin/freshclam"]
+
+
+def can_update_signatures():
+    return can_ask_password() and is_trusted_executable(sys_path("/usr/bin/freshclam"))
+
+
+def refresh_signatures():
+    """Update ClamAV's virus signatures now (Update sources). freshclam needs root,
+    so Omarchy's password dialog asks; it exits 1 when they were already current."""
+    rc, _ = run(FRESHCLAM_ARGV, timeout=900, limit=1024 * 1024)
+    if rc in (126, 127):
+        raise Refused("no password was given")
+    if rc not in (0, 1):
+        raise Refused("freshclam could not update the signatures")
+    return "Virus signatures updated."
+
+
+def can_ask_password():
+    return is_trusted_executable(sys_path(PKEXEC)) and is_trusted_executable(sys_path("/usr/bin/bash"))
 
 
 def refresh_no_password():
-    if not is_trusted_executable(sys_path(PKEXEC)) or not is_trusted_executable(sys_path("/usr/bin/awk")):
+    if not can_ask_password():
         raise Refused("pkexec is not available")
     rc, out = run(NO_PASSWORD_ARGV, timeout=180, limit=64 * 1024)
     if rc != 0:
@@ -1743,7 +1765,8 @@ def source_status():
     _, t = _mtime_stamp([home_path(*STATE_DIR, NO_PASSWORD_NAME)]) if d else ("", "")
     add("password-check", "Password check (Full scan button only)", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
     if is_trusted_executable(sys_path("/usr/bin/clamscan")):
-        d, t = _mtime_stamp([sys_path("/var/lib/clamav/" + n) for n in ("daily.cld", "daily.cvd")])
+        # freshclam.dat changes on every check, even when nothing new came out.
+        d, t = _mtime_stamp([sys_path("/var/lib/clamav/" + n) for n in ("daily.cld", "daily.cvd", "freshclam.dat")])
         add("signatures", "ClamAV virus signatures", d, t, fresh(d, FEED_DAYS))
     for name, label in (("arch-audit", "Arch vulnerability database"), ("osv", "OSV malicious-package database"),
                         ("aur", "AUR package status")):
@@ -2124,7 +2147,7 @@ def check_virus_scan():
 FEED_REFRESH = {"arch-audit": refresh_arch_audit, "osv": refresh_osv, "aur": refresh_aur}
 FEED_LABELS = {"arch-audit": "the Arch vulnerability database", "osv": "the OSV malicious-package database",
                "aur": "your AUR package status", "virus-scan": "the virus scan", "bumblebee": "the Bumblebee scan",
-               "password-check": "the password check"}
+               "password-check": "the password check", "signatures": "the ClamAV virus signatures"}
 
 
 def _and(items):
@@ -2192,7 +2215,8 @@ STEP_TEXT = {"arch-audit": "Updating the Arch vulnerability database",
              "aur": "Checking your AUR packages",
              "virus-scan": "Scanning your home folder for viruses",
              "bumblebee": "Asking Bumblebee to rescan your packages",
-             "password-check": "Checking for accounts without a password (Omarchy asks for your password)"}
+             "password-check": "Checking for accounts without a password (Omarchy asks for your password)",
+             "signatures": "Updating ClamAV virus signatures (Omarchy asks for your password)"}
 
 
 def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=False):
@@ -2204,8 +2228,10 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
     run_full = full or force or (not sources_only and not scan_only and feed_due("full-scan"))
     # The password step only when you press Full scan (never in the weekly run),
     # and first, while you are still at the screen.
-    can_ask = is_trusted_executable(sys_path(PKEXEC)) and is_trusted_executable(sys_path("/usr/bin/awk"))
-    steps = (["password-check"] if full and can_ask else []) + list(sources)
+    # Steps that ask for your password come first, while you are at the screen,
+    # and only when you press a button: never in the weekly background run.
+    steps = (["password-check"] if full and can_ask_password() else []) \
+        + (["signatures"] if sources_only and can_update_signatures() else []) + list(sources)
     if (run_full or scan_only) and feed_available("virus-scan"):
         steps.append("virus-scan")
     if run_full and bumblebee_scanner():
@@ -2220,6 +2246,8 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
                 refresh_bumblebee()
             elif name == "password-check":
                 refresh_no_password()
+            elif name == "signatures":
+                refresh_signatures()
             else:
                 FEED_REFRESH[name]()
             done.append(name)
@@ -2229,12 +2257,13 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
         save_last_run(not [n for n in failed if n in SOURCE_FEEDS], force or full or sources_only)
     if run_full:
         save_feed("full-scan", {}, ok=not [n for n in failed if n in ("virus-scan", "bumblebee")])
+    no_pkexec = " The password check could not run: pkexec is missing." if full and not can_ask_password() else ""
     if not done and not failed:
         if run_full:
             return {"ok": True, "action": "", "message": "Checked every setting. Install ClamUI (Detect tab) "
-                    "to add a virus scan to the Full scan."}
+                    "to add a virus scan to the Full scan." + no_pkexec}
         return {"ok": True, "action": "", "message": "Everything is up to date."}
-    refreshed = [FEED_LABELS[n] for n in done if n in SOURCE_FEEDS]
+    refreshed = [FEED_LABELS[n] for n in done if n in SOURCE_FEEDS or n == "signatures"]
     parts = []
     if refreshed:
         parts.append("refreshed " + _and(refreshed))
@@ -2245,11 +2274,14 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
     if "password-check" in done:
         parts.append("checked for accounts without a password")
     msg = (_and(parts)[0].upper() + _and(parts)[1:] + ".") if parts else ""
-    retried = [n for n in failed if n != "password-check"]
+    retried = [n for n in failed if n not in ("password-check", "signatures")]
     if retried:
         msg += " Could not finish %s; Vigil tries again tomorrow." % _and([FEED_LABELS[n] for n in retried])
     if "password-check" in failed:
         msg += " The password check was skipped: no password was given."
+    if "signatures" in failed:
+        msg += " The virus signatures were not updated (no password, or ClamAV could not reach its servers)."
+    msg += no_pkexec
     found = feed_findings()
     msg += (" On this machine: %s. See the tabs for details." % "; ".join(found)) if found \
         else " Nothing on this machine needs attention."
@@ -2444,7 +2476,10 @@ def check_secrets():
             fix("helper", "credential-perms", "Make them private"), weight=2)
     if hits:
         return result(cid, cat, title, "warn", "%d secret%s found in shell history." % (
-            len(hits), "" if len(hits) == 1 else "s"), why, clean_block(hits), weight=2)
+            len(hits), "" if len(hits) == 1 else "s"), why, clean_block(hits),
+            fix("helper", "remove-secret-lines", "Remove those lines"), weight=2,
+            howto="Remove the lines (below), then revoke or replace each key with the service that issued it: "
+                  "anything in your history may already have been read.")
     return result(cid, cat, title, "pass", "No keys or tokens found in shell history, and credential files are private.",
                   why, weight=2)
 
@@ -3390,9 +3425,6 @@ CHECK_HELP = {
                   "for the affected packages and what to do.", ("docs", "bumblebee", "Learn more")),
     "omarchy-plugins": ("Nothing to fix. Remove plugins you do not use with omarchy plugin remove <id>.",
                         ("terminal", "show-plugins", "List plugins")),
-    "exposed-secrets": ("Treat each key as leaked: revoke or rotate it with the service that issued it, then "
-                        "delete the line from your shell history (Edit history).",
-                        ("terminal", "edit-shell-history", "Edit history")),
     "accounts": ("Get help before changing accounts; a mistake can lock you out.",
                  ("docs", "arch-users", "Learn more")),
     "shell-history": ("If you did not set this up yourself, get help before changing anything.",
@@ -3460,7 +3492,7 @@ def audit(peek=False):
                  "omarchy-setup-security-thunderbolt-authorization", "omarchy-setup-security-fido2",
                  "omarchy-sudo-passwordless", "omarchy-remove-security-sudoless-docker", "omarchy-update",
                  "omarchy-pkg-add", "omarchy-update-orphan-pkgs", "omarchy-toggle-idle", "omarchy-shell-config",
-                 "omarchy-plugin-list", "xdg-open"):
+                 "omarchy-plugin-list", "xdg-open", "pkexec"):
         p = find_tool(name)
         tools[name] = p.rsplit("/", 1)[0] if p else ""
     report = {
@@ -3761,6 +3793,48 @@ def fix_clean_user():
         or "Nothing needed cleaning."
 
 
+def _secret_line(line):
+    return any(rx.search(line) for rx, _ in SECRET_PATTERNS)
+
+
+def fix_remove_secret_lines():
+    """Delete the history lines that hold a key, as you; fish entries go whole."""
+    removed = 0
+    for parts in HISTORY_FILES:
+        try:
+            dfd = _open_home_dir(list(parts[:-1]))
+        except (FileNotFoundError, Refused):
+            continue
+        try:
+            raw = _read_state_bytes(dfd, parts[-1], 64 * 1024 * 1024)
+            if raw is None:
+                continue
+            mode = stat.S_IMODE(os.stat(parts[-1], dir_fd=dfd, follow_symlinks=False).st_mode)
+            lines = raw.decode("utf-8", "surrogateescape").split("\n")
+            fish = parts[-1] == "fish_history"
+            out, skipping, n = [], False, 0
+            for line in lines:
+                if fish and skipping and line.startswith("  "):
+                    continue                   # the rest of a removed fish entry
+                skipping = False
+                if _secret_line(line):
+                    n += 1
+                    skipping = fish
+                    continue
+                out.append(line)
+            if n:
+                write_atomic(dfd, parts[-1], "\n".join(out).encode("utf-8", "surrogateescape"), mode=mode & 0o600 or 0o600)
+                removed += n
+        except Refused:
+            continue
+        finally:
+            os.close(dfd)
+    if not removed:
+        return "No lines with keys were found."
+    return ("Removed %d line%s with keys from your shell history. Revoke those keys with the services "
+            "that issued them, too." % (removed, "" if removed == 1 else "s"))
+
+
 def fix_credential_perms():
     changed = 0
     for parts in CREDENTIAL_FILES:
@@ -3810,6 +3884,7 @@ FIXES = {
     "empty-trash": fix_empty_trash,
     "clean-user": fix_clean_user,
     "clean-app-cache": fix_clean_app_cache,
+    "remove-secret-lines": fix_remove_secret_lines,
 }
 
 

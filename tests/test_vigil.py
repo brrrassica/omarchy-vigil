@@ -1633,8 +1633,9 @@ def test_bumblebee_scanner_must_be_safe_to_run(v, tmp_path):
 
 def test_password_check_uses_omarchys_password_dialog(v):
     sysfile(v, "/etc/passwd", PASSWD + "ghost:x:1001:1001::/home/g:/bin/sh\n")
-    v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/awk"}
-    assert v.NO_PASSWORD_ARGV == ["/usr/bin/pkexec", "/usr/bin/awk", "-F:", '$2 == "" { print $1 }', "/etc/shadow"]
+    v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash"}
+    assert v.NO_PASSWORD_ARGV[:3] == ["/usr/bin/pkexec", "/usr/bin/bash", "-c"]
+    assert v.NO_PASSWORD_ARGV[3] == "/usr/bin/awk -F: '$2 == \"\" { print $1 }' /etc/shadow"
     v.COMMANDS[tuple(v.NO_PASSWORD_ARGV)] = (0, "ghost\n../evil\n")
     res = v.refresh_due_feeds(full=True)
     assert res["message"].startswith("Checked for accounts without a password.")
@@ -1648,7 +1649,50 @@ def test_password_check_uses_omarchys_password_dialog(v):
 
 
 def test_weekly_run_never_asks_for_a_password(v):
-    v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/awk"}
+    v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash"}
     v.COMMANDS[tuple(v.NO_PASSWORD_ARGV)] = (0, "")
     v.refresh_due_feeds()
     assert v.no_password_scan() == ("", None)
+
+
+def test_full_scan_says_when_the_password_check_cannot_run(v):
+    res = v.refresh_due_feeds(full=True)                                  # no pkexec here
+    assert res["message"].endswith("The password check could not run: pkexec is missing.")
+
+
+def test_remove_secret_lines(v):
+    bash = put(Path(v.HOME, ".bash_history"), "ls\nexport GITHUB_TOKEN=ghp_" + "a" * 36 + "\ncd /tmp\n", 0o600)
+    fish = put(Path(v.HOME, ".local/share/fish/fish_history"),
+               "- cmd: echo hi\n  when: 1\n- cmd: curl -H 'Authorization: token ghp_" + "b" * 36 + "'\n  when: 2\n"
+               "  paths:\n    - /tmp\n- cmd: ls\n  when: 3\n", 0o600)
+    c = {x["id"]: x for x in v.audit(peek=True)["checks"]}["exposed-secrets"]
+    assert c["status"] == "warn" and c["fix"]["action"] == "remove-secret-lines"
+    res = v.run_fix("remove-secret-lines")
+    assert res["ok"] and res["message"].startswith("Removed 2 lines with keys"), res
+    assert bash.read_text() == "ls\ncd /tmp\n"
+    assert fish.read_text() == "- cmd: echo hi\n  when: 1\n- cmd: ls\n  when: 3\n"
+    assert stat.S_IMODE(os.stat(bash).st_mode) == 0o600
+    assert {x["id"]: x for x in v.audit(peek=True)["checks"]}["exposed-secrets"]["status"] == "pass"
+    assert v.run_fix("remove-secret-lines")["message"] == "No lines with keys were found."
+
+
+def test_signatures_update_with_update_sources_only(v):
+    v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash", v.ROOT + "/usr/bin/freshclam",
+                  v.ROOT + "/usr/bin/clamscan"}
+    v.COMMANDS[tuple(v.FRESHCLAM_ARGV)] = (1, "daily.cld database is up-to-date\n")   # 1 = already current
+    v.COMMANDS[tuple(v.NO_PASSWORD_ARGV)] = (0, "")
+    v.COMMANDS[scan_argv(v)] = (0, "")
+    calls = []
+    real = v.run
+    v.run = lambda argv, **kw: (calls.append(tuple(argv)), real(argv, **kw))[1]
+    res = v.refresh_due_feeds(sources_only=True)
+    assert calls[0] == tuple(v.FRESHCLAM_ARGV) and res["message"].startswith("Refreshed the ClamAV virus signatures")
+    calls.clear()
+    v.refresh_due_feeds(full=True)                                         # Full scan: not the signatures
+    assert tuple(v.FRESHCLAM_ARGV) not in calls
+    calls.clear()
+    v.refresh_due_feeds()                                                  # weekly: never asks
+    assert tuple(v.FRESHCLAM_ARGV) not in calls and tuple(v.NO_PASSWORD_ARGV) not in calls
+    v.COMMANDS[tuple(v.FRESHCLAM_ARGV)] = (126, "")                        # dialog dismissed
+    res = v.refresh_due_feeds(sources_only=True)
+    assert "virus signatures were not updated" in res["message"] and "tries again" not in res["message"]

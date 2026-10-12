@@ -13,12 +13,13 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 
 ## Decisions
 
-- **Root changes run in a visible terminal, permanently.** Vigil will not
-  install a root helper, sudoers rule or polkit policy. Every privileged step
-  that changes something is a constant script you see before it runs, or an
-  Omarchy command. The one read-only root step, the Full scan's password
-  check, uses Omarchy's own password dialog (pkexec) instead, so the scan
-  never interrupts you with a terminal.
+- **Root steps are constant scripts you see before they run.** Vigil will not
+  install a root helper, sudoers rule or polkit policy. Since 0.16 the panel
+  shows each script in plain words and as commands, then runs it through
+  pkexec, so Omarchy's own password dialog asks and the panel stays open.
+  Only Omarchy's interactive tools (and choosing an SSH passphrase) still
+  use a terminal. (Until 0.15 every root step ran in a visible terminal;
+  closing the panel to type in it got in the way.)
 - **Hand off rather than rebuild.** Where a maintained tool already does the
   job well (ClamUI, Bumblebee, Black Ops, Omarchy's own commands), Vigil
   shows its status and opens it. It does not copy it.
@@ -110,7 +111,22 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.15 (this release): Full scan with progress, and a schedule you can see
+## 0.16 (this release): no terminal pop-ups
+
+- [x] Fixes, Undo, Clean all and installs run from the panel: the
+      confirmation explains them, then Omarchy's password dialog asks
+      (pkexec), and a result card shows what happened. Packages come from
+      pacman directly. Only tools that ask questions as they go keep a
+      terminal.
+- [x] Exposed secrets: **Remove those lines** deletes the leaked-key lines
+      from your shell history directly (whole entries in fish).
+- [x] Update sources also updates ClamAV's virus signatures (asks for your
+      password); the Overview shows when ClamAV last checked.
+- [x] Fixed: the Full scan password check never ran on Arch (`awk` is a
+      link, which Vigil never runs as root); it now runs through bash.
+- [x] The countdowns stay visible while a scan runs.
+
+## 0.15: Full scan with progress, and a schedule you can see
 
 - [x] Full scan opens no terminal: the password check uses Omarchy's own
       password dialog (pkexec), first, while you are at the screen. A progress

@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "keasbeexd.vigil",
   "name": "Vigil",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "author": "Marc Ferro @keasbeexd",
   "license": "MIT",
-  "description": "A security suite for Omarchy in five pillars: hardening, malware detection (with ClamUI), supply-chain checks (with Bumblebee), privacy and system care. Plain-language findings and fixes you approve one by one; root changes run in a visible terminal. Sends nothing anywhere.",
+  "description": "A security suite for Omarchy in five pillars: hardening, malware detection (with ClamUI), supply-chain checks (with Bumblebee), privacy and system care. Plain-language findings and fixes you approve one by one; root changes ask for your password in Omarchy's own dialog. Sends nothing anywhere.",
   "kinds": [
     "bar-widget"
   ],

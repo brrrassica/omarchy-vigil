@@ -53,7 +53,7 @@ function inList(v, list) {
 
 var HELPER_ACTIONS = ["ssh-perms", "gnupg-perms", "optout-on", "optout-off", "clean-thumbnails", "empty-trash",
                       "credential-perms", "integrity-accept", "arch-audit-refresh", "osv-refresh", "aur-refresh",
-                      "virus-scan-now", "clean-user", "clean-app-cache"]
+                      "virus-scan-now", "clean-user", "clean-app-cache", "remove-secret-lines"]
 
 // What the confirmation card says before a helper action runs.
 var HELPER_INFO = {
@@ -71,6 +71,10 @@ var HELPER_INFO = {
                    what: ["Permanently deletes the files in the trash. This cannot be undone."] },
   "clean-user": { title: "Clear thumbnails, the trash and unused caches",
                   what: ["The no-root half of Clean all."] },
+  "remove-secret-lines": { title: "Remove leaked keys from your shell history",
+                          what: ["Deletes the lines in your shell history that contain the keys Vigil found. Nothing else changes.",
+                                 "Close your other terminal windows first: an open shell can write its history back.",
+                                 "Also revoke those keys with the service that issued them: they may already have been read."] },
   "clean-app-cache": { title: "Clear unused application caches",
                        what: ["Deletes files in ~/.cache that no app has read or written for a week.",
                               "Caches in use are left alone; apps rebuild anything they need."] },
@@ -122,13 +126,17 @@ function howTo(check) {
 // Title and lines for the confirmation card of any runnable action.
 function confirmation(kind, id, report) {
   if (kind === "clean-all") return cleanAllConfirmation(report)
+  if (kind === "update-sources") return updateConfirmation(report)
   if (kind === "full-scan") return fullScanConfirmation(report)
   var a = kind === "helper" ? helperInfo(id) : (kind === "terminal" ? terminalAction(id) : null)
   if (!a) return null
   var lines = a.what.slice(0)
-  if (kind === "terminal")
-    lines.push(String(a.run || a.args || "").indexOf("sudo ") !== -1 || /^omarchy-(setup|sudo|remove|update|pkg)/.test(a.tool || "")
-      ? "Opens a terminal, where you type your password." : "Opens a terminal.")
+  if (kind === "terminal") {
+    var mode = runMode(id)
+    lines.push(mode === "terminal" ? "Opens a terminal: this tool asks you questions as it goes."
+      : mode === "root" ? "Omarchy asks for your password, then Vigil shows the result here."
+      : "Vigil shows the result here. No password needed.")
+  }
   return { title: a.title, lines: lines }
 }
 
@@ -180,6 +188,57 @@ function undoDropIn(name, path, afterText, after) {
   }
 }
 
+// How an action runs. Most run without a terminal: "root" ones through pkexec,
+// so Omarchy's own password dialog asks, "user" ones as you; the panel shows
+// what they printed. Only tools that ask you questions as they go (Omarchy's
+// updater and setup wizards, the orphan review, choosing an SSH passphrase)
+// keep a terminal.
+var TERMINAL_ONLY = ["update", "usb-auth", "thunderbolt-auth", "fido2", "sudo-passwordless-off",
+                     "docker-group-off", "clean-orphans", "ssh-passphrase"]
+var USER_MODE = ["allow-idle", "restart", "run-arch-audit", "show-ld-preload", "show-plugins", "screen-lock-default"]
+var PKEXEC = "/usr/bin/pkexec"
+var BASH = "/usr/bin/bash"
+
+function runMode(id) {
+  if (!terminalAction(id)) return ""
+  if (inList(id, TERMINAL_ONLY)) return "terminal"
+  return inList(id, USER_MODE) ? "user" : "root"
+}
+
+// The command lines of an action's body: the script with its sudo prefixes
+// removed when it runs as root (it already is), or a tool resolved to a
+// trusted path.
+function actionBody(a, tools) {
+  if (a.tool) {
+    var dir = toolDir(tools, a.tool)
+    return dir === "" ? "" : dir + "/" + a.tool + a.args
+  }
+  if (a.source) {
+    var sdir = toolDir(tools, a.source)
+    return sdir === "" ? "" : "source " + sdir + "/" + a.source + " && " + a.run
+  }
+  return a.run
+}
+
+function stripSudo(script) {
+  return script.replace(/(^|[\s;&|(!])sudo /g, "$1")
+}
+
+// The processes to run for an action outside a terminal, in order:
+// [{ argv, asRoot }]. home is your home folder, for the scripts that need it.
+function actionPlan(id, tools, home) {
+  var a = terminalAction(id)
+  var mode = runMode(id)
+  if (!a || mode === "terminal" || mode === "") return []
+  var body = actionBody(a, tools)
+  if (body === "") return []
+  if (mode === "user") return [{ argv: [BASH, "-c", "set -e\n" + body], asRoot: false }]
+  if (toolDir(tools, "pkexec") === "" || typeof home !== "string" || !/^\/[^\0\n]{0,200}$/.test(home)) return []
+  var steps = [{ argv: [PKEXEC, "/usr/bin/env", "HOME=" + home, BASH, "-c", "set -e\n" + stripSudo(body)], asRoot: true }]
+  if (a.then) steps.push({ argv: [BASH, "-c", "set -e\n" + a.then], asRoot: false })
+  return steps
+}
+
 // Each entry: title, what (lines shown before anything runs), and either a
 // constant `run` script or an Omarchy `tool` (resolved to a root-owned path
 // in /usr/bin or /usr/share/omarchy/bin by the helper) with constant `args`.
@@ -197,8 +256,8 @@ var TERMINAL_ACTIONS = {
     title: "Turn the firewall on",
     what: ["Blocks other computers from connecting to yours unless you allowed it.",
            "Apps on this computer still reach the internet as usual. The firewall stays on after restarts.",
-           "Technical: sudo ufw enable, then sudo systemctl enable --now ufw.service"],
-    run: "sudo /usr/bin/ufw enable && sudo /usr/bin/systemctl enable --now ufw.service"
+           "Technical: ufw --force enable, then systemctl enable --now ufw.service"],
+    run: "sudo /usr/bin/ufw --force enable && sudo /usr/bin/systemctl enable --now ufw.service && echo 'The firewall is on.'"
   },
   "firewall-deny-in": {
     title: "Block incoming connections by default",
@@ -211,8 +270,9 @@ var TERMINAL_ACTIONS = {
     title: "Install and turn on the firewall",
     what: ["Installs the ufw firewall, blocks incoming connections and turns it on, now and after restarts.",
            "Apps on this computer still reach the internet as usual.",
-           "Technical: omarchy pkg add ufw, ufw default deny incoming, ufw enable"],
-    tool: "omarchy-pkg-add", args: " ufw && sudo /usr/bin/ufw default deny incoming && sudo /usr/bin/ufw enable && sudo /usr/bin/systemctl enable --now ufw.service"
+           "Technical: pacman -S ufw, ufw default deny incoming, ufw enable"],
+    run: "/usr/bin/pacman -S --needed --noconfirm ufw && /usr/bin/ufw default deny incoming && /usr/bin/ufw --force enable "
+      + "&& /usr/bin/systemctl enable --now ufw.service && echo 'The firewall is on.'"
   },
   "sysctl-harden": {
     title: "Turn on kernel and network protections",
@@ -337,8 +397,9 @@ var TERMINAL_ACTIONS = {
   "install-clamav": {
     title: "Install ClamAV",
     what: ["Installs the ClamAV virus scanner and downloads its list of known viruses.",
-           "Technical: omarchy pkg add clamav, then sudo freshclam"],
-    tool: "omarchy-pkg-add", args: " clamav && sudo /usr/bin/freshclam && sudo /usr/bin/systemctl enable --now clamav-freshclam.service"
+           "Technical: pacman -S clamav, freshclam, systemctl enable clamav-freshclam"],
+    run: "/usr/bin/pacman -S --needed --noconfirm clamav && /usr/bin/freshclam && /usr/bin/systemctl enable --now clamav-freshclam.service "
+      + "&& echo 'ClamAV is installed and keeps its signatures up to date.'"
   },
   "freshclam-service": {
     title: "Keep virus signatures up to date",
@@ -351,8 +412,8 @@ var TERMINAL_ACTIONS = {
     title: "Install osv-scanner",
     what: ["Installs the tool Vigil uses to check your npm and Bun packages against known malware.",
            "It sends only package names and versions to OSV.dev, never your files.",
-           "Technical: omarchy pkg add osv-scanner"],
-    tool: "omarchy-pkg-add", args: " osv-scanner"
+           "Technical: pacman -S osv-scanner"],
+    run: "/usr/bin/pacman -S --needed --noconfirm osv-scanner && echo 'osv-scanner is installed.'"
   },
   "freshclam": {
     title: "Update virus signatures now",
@@ -365,11 +426,12 @@ var TERMINAL_ACTIONS = {
     what: ["Installs ClamUI, an app for virus scans and quarantine, with ClamAV and its virus signatures,",
            "and turns on the service that keeps the signatures up to date.",
            "Downloads from the Arch mirrors, Flathub and the ClamAV servers.",
-           "Technical: omarchy pkg add flatpak clamav, flatpak install io.github.linx_systems.ClamUI, freshclam service"],
-    tool: "omarchy-pkg-add", args: " flatpak clamav && "
-      + "/usr/bin/flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo && "
-      + "/usr/bin/flatpak install --user flathub io.github.linx_systems.ClamUI && sudo /usr/bin/freshclam && "
-      + "sudo /usr/bin/systemctl enable --now clamav-freshclam.service"
+           "Technical: pacman -S flatpak clamav, freshclam service, then as you: flatpak install --user ClamUI"],
+    run: "/usr/bin/pacman -S --needed --noconfirm flatpak clamav && /usr/bin/freshclam "
+      + "&& /usr/bin/systemctl enable --now clamav-freshclam.service",
+    // Then, as you: ClamUI goes into your own Flatpak installation.
+    then: "/usr/bin/flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo "
+      + "&& /usr/bin/flatpak install --user --noninteractive flathub io.github.linx_systems.ClamUI && echo 'ClamUI is installed.'"
   },
 
 
@@ -392,8 +454,8 @@ var TERMINAL_ACTIONS = {
   "install-arch-audit": {
     title: "Install arch-audit",
     what: ["Installs the tool that checks your packages against the Arch security team list of known holes.",
-           "Technical: omarchy pkg add arch-audit"],
-    tool: "omarchy-pkg-add", args: " arch-audit"
+           "Technical: pacman -S arch-audit"],
+    run: "/usr/bin/pacman -S --needed --noconfirm arch-audit && echo 'arch-audit is installed.'"
   },
   "run-arch-audit": {
     title: "List packages with known security holes",
@@ -435,15 +497,7 @@ var TERMINAL_ACTIONS = {
            "Technical: omarchy plugin list"],
     tool: "omarchy-plugin-list", args: ""
   },
-  "edit-shell-history": {
-    title: "Remove leaked keys from your shell history",
-    what: ["Opens each of your shell history files in your editor, one after the other. Delete the lines that",
-           "Details points to, then save and quit. Also revoke those keys with the service that issued them:",
-           "anything in your history may already have been read.",
-           "Technical: opens ~/.bash_history, ~/.zsh_history and the fish history with your editor"],
-    run: "for f in \"$HOME/.bash_history\" \"$HOME/.zsh_history\" \"$HOME/.local/share/fish/fish_history\"; do "
-      + "if [ -f \"$f\" ]; then \"${EDITOR:-nvim}\" \"$f\"; fi; done"
-  },
+
   "ssh-passphrase": {
     title: "Add a passphrase to your SSH keys",
     what: ["Protects each SSH key that has no passphrase, so a stolen copy is useless; it asks you for the new one.",
@@ -582,18 +636,8 @@ function toolDir(tools, name) {
 function terminalScript(id, tools) {
   var a = terminalAction(id)
   if (!a) return ""
-  var body = ""
-  if (a.tool) {
-    var dir = toolDir(tools, a.tool)
-    if (dir === "") return ""
-    body = dir + "/" + a.tool + a.args
-  } else if (a.source) {
-    var sdir = toolDir(tools, a.source)
-    if (sdir === "") return ""
-    body = "source " + sdir + "/" + a.source + " && " + a.run
-  } else {
-    body = a.run
-  }
+  var body = actionBody(a, tools)
+  if (body === "") return ""
   var intro = ["Vigil: " + a.title, ""].concat(a.what).concat(["",
     body.indexOf("sudo ") !== -1 ? "You will be asked for your password." : "No password needed."])
   var shown = []
@@ -612,14 +656,18 @@ function canRun(fixObj, tools, apps) {
   if (fixObj.kind === "app") return appCommand(fixObj.action, apps).length > 0
   if (fixObj.kind === "docs") return docsCommand(fixObj.action, tools).length > 0
   if (fixObj.kind === "helper") return isHelperAction(fixObj.action)
-  if (fixObj.kind === "terminal") return launcherPath(tools) !== "" && terminalScript(fixObj.action, tools) !== ""
+  if (fixObj.kind === "terminal") {
+    if (runMode(fixObj.action) === "terminal")
+      return launcherPath(tools) !== "" && terminalScript(fixObj.action, tools) !== ""
+    return actionPlan(fixObj.action, tools, "/home/check").length > 0
+  }
   return false
 }
 
 // ---------------------------------------------------------------------------
 // Clean all (Care tab). Runs the cleanups the Care checks currently offer, in
 // at most two steps: the no-root ones through the helper (`fix clean-user`),
-// the root ones in one terminal (`clean-system`), so sudo asks once.
+// the root ones in one pkexec run (`clean-system`), so you are asked once.
 // Orphaned packages are left out on purpose: removing packages can take away
 // something you use, so that stays a separate, reviewed step.
 
@@ -629,7 +677,7 @@ var CLEAN_ALL = { "clean-thumbnails": "user", "empty-trash": "user", "clean-app-
 function cleanAllPlan(report) {
   var plan = { user: false, system: false, items: [] }
   if (!report || !report.checks) return plan
-  var systemOk = launcherPath(report.tools) !== "" && terminalScript("clean-system", report.tools) !== ""
+  var systemOk = actionPlan("clean-system", report.tools, "/home/check").length > 0
   for (var i = 0; i < report.checks.length; i++) {
     var c = report.checks[i]
     if (c.category !== "care" || !c.fix || c.fix.kind === "none") continue
@@ -648,7 +696,7 @@ function cleanAllConfirmation(report) {
   if (plan.items.length === 0) return null
   var lines = plan.items.slice(0)
   if (plan.user) lines.push("Files are cleared right away. The trash cannot be restored; caches rebuild themselves.")
-  if (plan.system) lines.push("Then a terminal opens for the package cache and logs; sudo asks for your password once.")
+  if (plan.system) lines.push("For the package cache and logs, Omarchy asks for your password once.")
   lines.push("Orphaned packages are left out: removing packages deserves a look, so use Review and remove.")
   return { title: "Clean all", lines: lines }
 }
@@ -832,6 +880,26 @@ function progressText(p) {
   return s
 }
 
+// The Update sources card: what gets updated, and the one step that asks.
+function updateConfirmation(report) {
+  if (!report) return null
+  var lines = ["Downloads the latest of everything Vigil checks against:"]
+  var has = function(id) {
+    for (var i = 0; i < report.sources.length; i++) if (report.sources[i].id === id) return true
+    return false
+  }
+  var n = 1
+  if (has("signatures")) lines.push((n++) + ". ClamAV virus signatures. Omarchy asks for your password for this one step,"
+    + " because ClamAV keeps them in a system folder.")
+  if (has("arch-audit")) lines.push((n++) + ". The Arch security team list of known holes in packages.")
+  if (has("osv")) lines.push((n++) + ". The OSV.dev list of malicious npm and Bun packages.")
+  if (has("aur")) lines.push((n++) + ". The status of your AUR packages.")
+  if (n === 1) lines = ["Nothing to update yet. Install ClamAV, arch-audit or osv-scanner (Detect and Supply tabs) to add them."]
+  lines.push("No scan runs, and nothing on your computer changes. The panel shows the progress.")
+  lines.push("Technical: pkexec freshclam, arch-audit --upgradable, osv-scanner, one AUR lookup with curl")
+  return { title: "Update sources", lines: lines }
+}
+
 // The Full scan card. Everything runs in the background; the one step that
 // needs your password uses Omarchy's own password dialog, not a terminal.
 function fullScanConfirmation(report) {
@@ -880,7 +948,7 @@ function parseReport(text) {
   if (d.tools && typeof d.tools === "object") {
     for (var name in d.tools) {
       if (!Object.prototype.hasOwnProperty.call(d.tools, name)) continue
-      if (!/^omarchy-[a-z0-9-]{1,60}$/.test(name) && name !== "xdg-open") return null
+      if (!/^omarchy-[a-z0-9-]{1,60}$/.test(name) && name !== "xdg-open" && name !== "pkexec") return null
       var dir = d.tools[name]
       if (dir !== "" && !inList(dir, TRUSTED_TOOL_DIRS)) return null
       tools[name] = dir
@@ -1070,7 +1138,7 @@ function tooltip(report, running) {
 if (typeof module !== "undefined") {
   module.exports = {
     plain: plain, parseReport: parseReport, parseFixResult: parseFixResult, terminalScript: terminalScript,
-    terminalAction: terminalAction, launcherPath: launcherPath, canRun: canRun, checksFor: checksFor,
+    terminalAction: terminalAction, actionPlan: actionPlan, runMode: runMode, stripSudo: stripSudo, launcherPath: launcherPath, canRun: canRun, checksFor: checksFor,
     topFindings: topFindings, countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
     tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
     categoryLabel: categoryLabel, pillarCounts: pillarCounts, tabIntro: tabIntro, cleanAllPlan: cleanAllPlan,

@@ -20,13 +20,14 @@ information.
 
 Every finding says, in plain language, what Vigil found and why it matters.
 Most come with a fix. Nothing changes until you press **Run** on a
-confirmation that says exactly what will happen, and anything that needs
-root runs in a terminal you can watch.
+confirmation in the panel that says exactly what will happen; anything that
+needs root then asks for your password in Omarchy's own password dialog, and
+the panel shows the result.
 
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.15.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.16.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -71,6 +72,7 @@ reviewed) are dimmed.
 |---|---|
 | Every check in every pillar (reading local settings) | every 30 minutes, and whenever you open the panel; offline, under a second |
 | **Update sources**: known vulnerabilities, malicious packages, AUR status | once a week, and when you press **Update sources** or **Full scan** |
+| ClamAV virus signatures, on demand | when you press **Update sources** (asks for your password) |
 | **Full scan**, background part: a virus scan of your home folder, a Bumblebee rescan | once a week, and when you press **Full scan** |
 | Password check (accounts without a password) | only when you press **Full scan**, since it needs your password |
 | ClamAV virus signatures | continuously, by ClamAV's own update service |
@@ -80,15 +82,19 @@ The Overview has two buttons:
 
 - **Full scan** (`R` or `S`) runs every check and scan Vigil has, in this
   order: the password check (Omarchy's own password dialog asks for your
-  password; no terminal), the sources, a virus scan of your whole home
+  password), the lists of known holes, malicious packages and AUR status, a virus scan of your whole home
   folder (skipping caches, game libraries, `node_modules` and `.git`
   folders, at low priority), a Bumblebee rescan if it is installed, then
   every setting again. The panel shows a progress bar with the current step
   (and, during the virus scan, how many files are done), and a notification
   says when it is finished. Every tab then shows the results, and you fix
   what you choose from there.
-- **Update sources** (or `U`) only refreshes the lists Vigil checks against,
-  with no password and no scan. ClamAV's signatures update by themselves.
+- **Update sources** (or `U`) downloads the latest of everything Vigil checks
+  against: ClamAV's virus signatures first (Omarchy asks for your password,
+  since they live in a system folder), then the lists of known security
+  holes, malicious packages and AUR status. No scan runs. The automatic
+  weekly update never asks for a password: it skips the signatures, which
+  ClamAV's own service keeps current several times a day.
 
 Under the buttons, two lines count down to the next automatic update and the
 next automatic full scan (everything but the password check). Each button
@@ -107,8 +113,7 @@ or two), **How to fix**, and **Details**. Below that are its buttons:
 
 - **Fix** (named for what it does) when Vigil can do it, or **Learn more** /
   **Show …** when it can't: a guide in your browser (the Arch Wiki, a
-  plugin's page) or a read-only command in a
-  terminal.
+  plugin's page) or a read-only command whose output the panel shows.
 - **Undo Vigil's change** once Vigil has changed something for it.
 - **Mark as reviewed** on anything that is not passing, when you don't want
   that fix: a port you opened on purpose, an unencrypted desktop that never
@@ -127,8 +132,8 @@ at the time. If something new turns up, the finding comes back.
 Every change Vigil makes in `/etc` can be undone from the finding it fixed
 (cleanups and added passphrases are the exceptions; there is nothing to put
 back):
-open it and choose **Undo Vigil's change**. The undo runs in a terminal like
-the fix did, and it deletes the file only if its first line is still Vigil's
+open it and choose **Undo Vigil's change**. The undo asks for your password
+like the fix did, and it deletes the file only if its first line is still Vigil's
 marker; a file someone has edited since is left alone. For Avahi, undo puts
 back the original file Vigil saved before its first change.
 
@@ -161,26 +166,26 @@ lower it. A warning you mark as reviewed stops counting.
 
 | Check | Finding when | Fix |
 |---|---|---|
-| Firewall | ufw is not installed, switched off, or lets incoming connections in | Turns ufw on (terminal, sudo) |
-| Kernel self-protection | Any of nine kernel switches is off (`kptr_restrict`, `dmesg_restrict`, `ptrace_scope`, unprivileged BPF, the `fs.protected_*` set, `suid_dumpable`) | Writes `/etc/sysctl.d/90-omarchy-vigil.conf` (terminal, sudo) |
+| Firewall | ufw is not installed, switched off, or lets incoming connections in | Turns ufw on (asks for your password) |
+| Kernel self-protection | Any of nine kernel switches is off (`kptr_restrict`, `dmesg_restrict`, `ptrace_scope`, unprivileged BPF, the `fs.protected_*` set, `suid_dumpable`) | Writes `/etc/sysctl.d/90-omarchy-vigil.conf` (asks for your password) |
 | Network stack | ICMP redirects, source routing, reverse-path filtering, SYN cookies or broadcast pings are set loosely | Same file as above |
-| LLMNR | systemd-resolved answers LLMNR, which attackers on shared Wi-Fi abuse | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf` (terminal, sudo) |
-| SSH server | sshd runs and allows passwords or root login | `/etc/ssh/sshd_config.d/00-omarchy-vigil.conf`, only if you have an authorized key, validated with `sshd -t` (terminal, sudo) |
-| SSH keys | `~/.ssh` or a private key is readable by others, or a key has no passphrase | Makes them private (no root); **Add a passphrase** runs `ssh-keygen -p` for each key without one (terminal, no root) |
+| LLMNR | systemd-resolved answers LLMNR, which attackers on shared Wi-Fi abuse | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf` (asks for your password) |
+| SSH server | sshd runs and allows passwords or root login | `/etc/ssh/sshd_config.d/00-omarchy-vigil.conf`, only if you have an authorized key, validated with `sshd -t` (asks for your password) |
+| SSH keys | `~/.ssh` or a private key is readable by others, or a key has no passphrase | Makes them private (no root); **Add a passphrase** runs `ssh-keygen -p` for each key without one (in a terminal, since you type the passphrase; no root) |
 | GnuPG folder | `~/.gnupg` is readable by others | Makes it private (no root) |
-| Automatic screen lock | Stay Awake is on, the lock is off, or it takes over 15 minutes | Turns Stay Awake off; sets `idle.lock` to 300 seconds, Omarchy's default, with Omarchy's own `omarchy-shell-config` helper (terminal, no root) |
+| Automatic screen lock | Stay Awake is on, the lock is off, or it takes over 15 minutes | Turns Stay Awake off; sets `idle.lock` to 300 seconds, Omarchy's default, with Omarchy's own `omarchy-shell-config` helper (no root) |
 | Disk encryption | The system disk is not on LUKS | Cannot be added after install; Arch Wiki guide |
-| Restart after updates | A newer kernel is installed than the one running | **Restart now** (terminal, after a confirmation) |
+| Restart after updates | A newer kernel is installed than the one running | **Restart now** (after a confirmation) |
 | Secure Boot | Shown for information only; Vigil does not suggest setting it up, since a mistake can stop the computer starting | |
 | Wrong-password lockout | `pam_faillock` is missing or never locks | Arch Wiki guide |
-| FireWire | The machine has a FireWire port and its driver can load (information; shown only on machines with the port) | `/etc/modprobe.d/90-omarchy-vigil-firewire.conf` (terminal, sudo) |
+| FireWire | The machine has a FireWire port and its driver can load (information; shown only on machines with the port) | `/etc/modprobe.d/90-omarchy-vigil-firewire.conf` (asks for your password) |
 | Passwordless sudo | Omarchy's passwordless sudo is on | `omarchy-sudo-passwordless --disable` (terminal) |
 | Docker group | You are in the docker group, which equals root | `omarchy-remove-security-sudoless-docker` (terminal) |
 | USB authorization | New USB devices are trusted automatically (information) | `omarchy-setup-security-usb-authorization` (terminal) |
 | Thunderbolt authorization | Thunderbolt accessories are trusted automatically (information) | `omarchy-setup-security-thunderbolt-authorization` (terminal) |
 | Security key or fingerprint | sudo takes only a password (information) | `omarchy-setup-security-fido2` (terminal) |
 | System updates | No full update in 14 days (warning) or 30 days (failure) | `omarchy-update` (terminal) |
-| Open network ports | Programs listen on the network with no firewall in front | **Show listeners** runs `sudo ss -tulpn` (read-only) |
+| Open network ports | Programs listen on the network with no firewall in front | **Show listeners** runs `ss -tulpn` as root and shows the result in the panel (read-only) |
 | Exposed secrets | API keys and tokens in the formats their providers publish (AWS, GitHub, GitLab, Slack, Stripe, Anthropic, OpenAI, Google, private keys) in your shell histories, or credential files such as `~/.aws/credentials`, `~/.netrc` and `~/.git-credentials` readable by other accounts. Shows the file and line, never the secret. | Makes credential files private (no root); revoke leaked keys with their provider |
 
 ### Detect
@@ -209,10 +214,10 @@ lower it. A warning you mark as reviewed stops counting.
 
 | Check | Finding when | Fix |
 |---|---|---|
-| DNS fallback servers | systemd-resolved falls back to Google, Cloudflare or Quad9 | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-fallback.conf` (terminal, sudo) |
-| Connectivity check | NetworkManager pings a server every few minutes (information) | `/etc/NetworkManager/conf.d/90-omarchy-vigil-connectivity.conf` (terminal, sudo) |
-| Hardware address on Wi-Fi | Networks see your real MAC address | `/etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf` (terminal, sudo) |
-| Network announcements | Avahi announces this machine's name | Sets `disable-publishing=yes` in `/etc/avahi/avahi-daemon.conf` (terminal, sudo). Refuses unless the setting appears exactly once under `[publish]`, keeps the first original as `avahi-daemon.conf.vigil-backup`, and restores the previous file if Avahi does not restart. |
+| DNS fallback servers | systemd-resolved falls back to Google, Cloudflare or Quad9 | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-fallback.conf` (asks for your password) |
+| Connectivity check | NetworkManager pings a server every few minutes (information) | `/etc/NetworkManager/conf.d/90-omarchy-vigil-connectivity.conf` (asks for your password) |
+| Hardware address on Wi-Fi | Networks see your real MAC address | `/etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf` (asks for your password) |
+| Network announcements | Avahi announces this machine's name | Sets `disable-publishing=yes` in `/etc/avahi/avahi-daemon.conf` (asks for your password). Refuses unless the setting appears exactly once under `[publish]`, keeps the first original as `avahi-daemon.conf.vigil-backup`, and restores the previous file if Avahi does not restart. |
 | Telemetry opt-out variables | `DO_NOT_TRACK` and similar are not set (information) | Writes `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` (no root) |
 | Black Ops | Shows whether [Black Ops](https://github.com/brightwalker25/omarchy-black-ops) is installed; it blocks app telemetry, which Vigil leaves to it | |
 
@@ -229,8 +234,8 @@ which asks before removing anything) and the system journal
 
 **Clean all** (or `C` on the Care tab) does every cleanup on offer in one go,
 after one confirmation that lists each item and its size: thumbnails, the
-trash and unused caches right away, then the package cache and the journal
-in one terminal, so sudo asks once. Orphaned packages are left out on purpose: removing packages
+trash and unused caches right away, then the package cache and the journal,
+for which Omarchy asks for your password once. Orphaned packages are left out on purpose: removing packages
 can take away something you use, so that stays a separate, reviewed step.
 
 ### Accounts, history and old services
@@ -241,7 +246,7 @@ Checks a newcomer benefits from that need no extra tools:
 |---|---|---|
 | User accounts | Another account has root's powers, accounts share one ID (both from `/etc/passwd`), or an account has no password (from the last Full scan, which reads `/etc/shadow` with sudo and keeps only the account names) | How to fix and the Arch Wiki guide; Vigil does not change accounts itself, since a mistake can lock you out |
 | Shell history | A history file (`~/.bash_history`, `~/.zsh_history`, `~/.histfile`, fish) is a link or not a normal file, a way attackers hide what they typed | Guide (MITRE ATT&CK); mark as reviewed if you did it yourself |
-| Old network services | A telnet, rsh, rlogin, FTP, TFTP, NIS or xinetd service is switched on | **Switch them off**: `sudo systemctl disable --now` on each one that is on (terminal) |
+| Old network services | A telnet, rsh, rlogin, FTP, TFTP, NIS or xinetd service is switched on | **Switch them off**: `systemctl disable --now` on each one that is on (asks for your password) |
 
 Earlier versions ran Lynis for these. Vigil now does them itself: Lynis
 looks for Debian package names that never match on Arch, and most of its
@@ -256,13 +261,16 @@ The panel always says which kind an action is:
    making `~/.ssh` and `~/.gnupg` private, the opt-out file, the thumbnail
    cache and the trash. Each is a fixed action name; nothing from a file or
    from the report reaches it.
-3. **Terminal actions** open a floating Omarchy terminal running one of the
-   constant scripts in [`Model.js`](Model.js). The terminal first prints what
-   it will do and waits for Enter; `sudo` then asks for your password.
-   Ctrl+C cancels. Wherever Omarchy has its own command for the job (USB and
-   Thunderbolt authorization, FIDO2, passwordless sudo, the docker group,
-   updates, orphans, package installs), Vigil runs that command rather than
-   doing it itself.
+3. **Script actions** run one of the constant scripts in
+   [`Model.js`](Model.js) without a terminal. The panel first shows what it
+   will do, in plain words and then the exact commands, and waits for
+   **Run**. Scripts that need root run through `pkexec`, so Omarchy's own
+   password dialog asks; cancelling it changes nothing. The panel then shows
+   what the script printed. Only tools that ask you questions as they go
+   still open a terminal: Omarchy's updater, its USB, Thunderbolt and FIDO2
+   setups, passwordless sudo, the docker group, the orphan review, and
+   choosing an SSH passphrase. Packages Vigil installs come straight from
+   the Arch repositories with `pacman --needed --noconfirm`.
 4. **Open an app or a guide**: **Open ClamUI** starts ClamUI directly, and
    **Learn more** opens a page with `xdg-open`, each with a fixed command and
    no shell. Pages come only from a fixed list in `Model.js` (Arch Wiki,
@@ -326,13 +334,13 @@ service (ClamAV's servers), and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/full-scan.json` | the helper, mode 0600 | after each Full scan, automatic or not: its date and time, for the countdown |
 | `~/.local/state/omarchy-vigil/last-run.json` | the helper, mode 0600 | after each weekly or button update: its date, time and whether every source updated |
 | `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` | the helper | only when you set the opt-out variables |
-| `/etc/sysctl.d/90-omarchy-vigil.conf` | terminal action | only when you apply the kernel settings |
-| `/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf` | terminal action | only when you turn LLMNR off |
-| `/etc/systemd/resolved.conf.d/90-omarchy-vigil-fallback.conf` | terminal action | only when you remove the DNS fallback |
-| `/etc/ssh/sshd_config.d/00-omarchy-vigil.conf` | terminal action | only when you harden SSH |
-| `/etc/NetworkManager/conf.d/90-omarchy-vigil-connectivity.conf` | terminal action | only when you turn the connectivity check off |
-| `/etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf` | terminal action | only when you change the hardware address setting |
-| `/etc/avahi/avahi-daemon.conf` (first original kept at `avahi-daemon.conf.vigil-backup`) | terminal action | only when you stop Avahi announcements |
+| `/etc/sysctl.d/90-omarchy-vigil.conf` | a script action, as root | only when you apply the kernel settings |
+| `/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf` | a script action, as root | only when you turn LLMNR off |
+| `/etc/systemd/resolved.conf.d/90-omarchy-vigil-fallback.conf` | a script action, as root | only when you remove the DNS fallback |
+| `/etc/ssh/sshd_config.d/00-omarchy-vigil.conf` | a script action, as root | only when you harden SSH |
+| `/etc/NetworkManager/conf.d/90-omarchy-vigil-connectivity.conf` | a script action, as root | only when you turn the connectivity check off |
+| `/etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf` | a script action, as root | only when you change the hardware address setting |
+| `/etc/avahi/avahi-daemon.conf` (first original kept at `avahi-daemon.conf.vigil-backup`) | a script action, as root | only when you stop Avahi announcements |
 
 Every file in `/etc` that Vigil creates starts with the line
 `# Written by Vigil (keasbeexd.vigil)`. Vigil reads, but never writes,

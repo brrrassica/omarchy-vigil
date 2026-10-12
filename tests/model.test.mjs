@@ -23,7 +23,8 @@ const TOOLS = {
   "omarchy-toggle-idle": "/usr/bin",
   "omarchy-shell-config": "/usr/share/omarchy/bin",
   "omarchy-plugin-list": "/usr/share/omarchy/bin",
-  "xdg-open": "/usr/bin"
+  "xdg-open": "/usr/bin",
+  "pkexec": "/usr/bin"
 }
 
 function check(over = {}) {
@@ -104,7 +105,7 @@ test("terminal scripts: closed set, tool dirs enforced", () => {
   assert.equal(M.terminalScript("update", {}), "")
   assert.equal(M.terminalScript("update", { "omarchy-update": "/tmp" }), "")
   assert.match(M.terminalScript("update", TOOLS), /\( set -e; \/usr\/bin\/omarchy-update \)$/)
-  assert.match(M.terminalScript("install-arch-audit", TOOLS), /\/usr\/share\/omarchy\/bin\/omarchy-pkg-add arch-audit/)
+  assert.match(M.terminalScript("update", TOOLS), /\/usr\/bin\/omarchy-update/)
   assert.equal(M.launcherPath({}), "")
   assert.equal(M.launcherPath(TOOLS), "/usr/bin/omarchy-launch-floating-terminal-with-presentation")
 })
@@ -365,7 +366,7 @@ test("clean all covers the offered cleanups and never orphans", () => {
   const card = M.confirmation("clean-all", "care", careReport())
   assert.equal(card.title, "Clean all")
   assert.ok(card.lines.some(l => l.startsWith("Orphaned packages are left out")))
-  assert.ok(card.lines.some(l => l.includes("sudo asks for your password once")))
+  assert.ok(card.lines.some(l => l.includes("Omarchy asks for your password once")))
 })
 
 test("clean all without a terminal launcher keeps only the no-root part", () => {
@@ -373,7 +374,7 @@ test("clean all without a terminal launcher keeps only the no-root part", () => 
   assert.equal(plan.user, true)
   assert.equal(plan.system, false)
   assert.deepEqual(plan.items, ["Thumbnail cache: 12.0 MB"])
-  assert.ok(!M.confirmation("clean-all", "care", careReport({ tools: {} })).lines.some(l => l.includes("terminal opens")))
+  assert.ok(!M.confirmation("clean-all", "care", careReport({ tools: {} })).lines.some(l => l.includes("asks for your password")))
 })
 
 test("clean all has nothing to offer on a tidy system or without a report", () => {
@@ -479,4 +480,45 @@ test("last run: scans first, then updates, with times", () => {
     ["Scans", ""], ["Settings checks (every tab)", "ran today at 10:02"],
     ["Virus scan (home folder)", "ran yesterday at 22:10"], ["Password check (Full scan button only)", "not run yet"],
     ["Updates", ""], ["ClamAV virus signatures", "updated today at 08:00"]])
+})
+
+test("actions run without a terminal unless the tool asks questions", () => {
+  assert.equal(M.runMode("update"), "terminal")
+  assert.equal(M.runMode("ssh-passphrase"), "terminal")
+  assert.equal(M.runMode("screen-lock-default"), "user")
+  assert.equal(M.runMode("firewall-on"), "root")
+  assert.equal(M.runMode("nope"), "")
+  const fw = M.actionPlan("firewall-on", TOOLS, "/home/marc")
+  assert.equal(fw.length, 1)
+  assert.deepEqual(fw[0].argv.slice(0, 5), ["/usr/bin/pkexec", "/usr/bin/env", "HOME=/home/marc", "/usr/bin/bash", "-c"])
+  assert.ok(!fw[0].argv[5].includes("sudo ") && fw[0].argv[5].includes("/usr/bin/ufw --force enable"))
+  const ui = M.actionPlan("install-clamui", TOOLS, "/home/marc")
+  assert.equal(ui.length, 2)
+  assert.ok(ui[0].asRoot && !ui[1].asRoot && ui[1].argv[0] === "/usr/bin/bash" && ui[1].argv[2].includes("flatpak install --user"))
+  assert.deepEqual(M.actionPlan("update", TOOLS, "/home/marc"), [])           // terminal tools have no plan
+  assert.deepEqual(M.actionPlan("firewall-on", Object.assign({}, TOOLS, { pkexec: "" }), "/home/marc"), [])
+  assert.deepEqual(M.actionPlan("firewall-on", TOOLS, "relative"), [])
+  assert.equal(M.stripSudo("sudo a && sudo b | sudo tee x; omarchy-sudo-passwordless"), "a && b | tee x; omarchy-sudo-passwordless")
+  for (const id of Object.keys(M.TERMINAL_ACTIONS)) {
+    for (const step of M.actionPlan(id, TOOLS, "/home/marc")) {
+      const r = spawnSync("bash", ["-n", "-c", step.argv[step.argv.length - 1]])
+      assert.equal(r.status, 0, id + ": " + r.stderr)
+      assert.ok(!/\bread -r/.test(step.argv[step.argv.length - 1]), id + " would wait for input")
+    }
+  }
+  const card = M.confirmation("terminal", "firewall-on", null)
+  assert.ok(card.lines[card.lines.length - 1].startsWith("Omarchy asks for your password"))
+})
+
+test("update sources card: lists what updates and where the password comes in", () => {
+  const r = parse(report({ sources: [
+    { id: "signatures", label: "ClamAV virus signatures", date: "", time: "", state: "never", tried: "" },
+    { id: "arch-audit", label: "Arch vulnerability database", date: "", time: "", state: "never", tried: "" }] }))
+  const card = M.confirmation("update-sources", "all", r)
+  assert.equal(card.title, "Update sources")
+  assert.match(card.lines[1], /^1\. ClamAV virus signatures\. Omarchy asks for your password/)
+  assert.match(card.lines[2], /^2\. The Arch security team list/)
+  assert.ok(card.lines[card.lines.length - 1].startsWith("Technical: "))
+  const none = M.confirmation("update-sources", "all", parse(report()))
+  assert.match(none.lines[0], /^Nothing to update yet/)
 })

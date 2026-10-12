@@ -31,6 +31,19 @@ Panel {
     "LC_ALL": "C.UTF-8"
   })
 
+  // Actions get only what their scripts and Omarchy's tools need: your home,
+  // a fixed PATH (with Omarchy's commands), Omarchy's location, and the
+  // session variables its shell and password dialog use.
+  readonly property var actionEnv: ({
+    "HOME": Quickshell.env("HOME") || "/",
+    "PATH": "/usr/share/omarchy/bin:/usr/bin:/bin",
+    "OMARCHY_PATH": Quickshell.env("OMARCHY_PATH") || "/usr/share/omarchy",
+    "XDG_RUNTIME_DIR": Quickshell.env("XDG_RUNTIME_DIR") || "",
+    "WAYLAND_DISPLAY": Quickshell.env("WAYLAND_DISPLAY") || "",
+    "DBUS_SESSION_BUS_ADDRESS": Quickshell.env("DBUS_SESSION_BUS_ADDRESS") || "",
+    "LANG": "C.UTF-8"
+  })
+
   readonly property int refreshMinutes: {
     var n = Number(setting("refreshMinutes", 30))
     return isFinite(n) ? Math.max(5, Math.min(1440, Math.round(n))) : 30
@@ -38,6 +51,11 @@ Panel {
   readonly property bool notifyOnNew: setting("notifyOnNew", true) === true
   // Weekly refresh of the maintained sources (arch-audit, OSV, the AUR).
   readonly property bool autoUpdate: setting("autoUpdate", true) === true
+  property var actionSteps: []
+  property int actionIndex: 0
+  property string actionOutput: ""
+  property string actionTitle: ""
+  property var actionResult: null          // { title, verdict, ok, output } after an action ran
   property string feedBuffer: ""
   property bool feedOverflow: false
   property string feedResult: ""           // the last non-progress line: the result
@@ -77,7 +95,7 @@ Panel {
   readonly property var cleanPlan: Model.cleanAllPlan(report)
 
   readonly property var visibleChecks: tab === "overview" ? [] : Model.checksFor(report, tab)
-  readonly property bool busy: auditProc.running || fixProc.running
+  readonly property bool busy: auditProc.running || fixProc.running || actionProc.running
 
   function localPath(url) {
     var value = String(url)
@@ -134,13 +152,21 @@ Panel {
     // Anything but Update sources may scan the whole home folder, which can take a long time.
     feedDeadline.interval = mode === "sources" ? 1200000 : 4 * 3600000
     feedDeadline.restart()
-    if (mode === "sources") setStatus("Updating sources\u2026", false)
+    if (mode === "sources") setStatus("Updating sources\u2026 Omarchy may ask for your password first.", false)
     else if (mode === "full") setStatus("Full scan started. You can close this panel; you get a notification when it is done.", false)
     else if (mode === "scan") setStatus("Virus scan started. It runs in the background.", false)
   }
 
   // Full scan: the background part (sources and the virus scan) plus the
   // checks that need a password, in one terminal. Asks first on the usual card.
+  // Update sources asks first too: it may ask for your password (ClamAV's
+  // signatures live in a system folder), so it explains itself on the card.
+  function requestUpdate() {
+    if (!report || busy || feedProc.running) return
+    pendingKind = "update-sources"
+    pendingAction = "all"
+  }
+
   function requestFullScan() {
     if (!report || busy || feedProc.running) return
     pendingKind = "full-scan"
@@ -196,6 +222,10 @@ Panel {
     var action = pendingAction
     cancelPending()
     if (!report) return
+    if (kind === "update-sources") {
+      refreshFeeds("sources")
+      return
+    }
     if (kind === "full-scan") {
       // No terminal: the password step uses Omarchy's own password dialog,
       // so the panel stays open and shows the progress.
@@ -204,19 +234,16 @@ Panel {
     }
     if (kind === "clean-all") {
       var plan = Model.cleanAllPlan(report)
-      if (plan.system) {
-        var cleanLauncher = Model.launcherPath(report.tools)
-        var cleanScript = Model.terminalScript("clean-system", report.tools)
-        if (cleanLauncher !== "" && cleanScript !== "") Quickshell.execDetached([cleanLauncher, cleanScript])
-      }
+      if (plan.system) startAction("clean-system")
       if (plan.user) runHelper(["fix", "clean-user"])
-      else if (plan.system) setStatus("Opened in a terminal. Vigil checks again when you reopen this panel.", false)
       return
     }
     if (kind === "helper") {
       if (!Model.isHelperAction(action)) return
       runHelper(["fix", action])
     } else if (kind === "terminal") {
+      if (Model.runMode(action) !== "terminal") { startAction(action); return }
+      // Only tools that ask you questions as they go still use a terminal.
       var launcher = Model.launcherPath(report.tools)
       var script = Model.terminalScript(action, report.tools)
       if (launcher === "" || script === "") { setStatus("This action is not available on this system.", true); return }
@@ -224,6 +251,46 @@ Panel {
       setStatus("Opened in a terminal. Vigil checks again when you reopen this panel.", false)
       root.close()
     }
+  }
+
+  // Runs an action's steps in the panel, one after the other: root steps
+  // through pkexec (Omarchy's password dialog), the rest as you. What they
+  // print is shown on the result card afterwards.
+  function startAction(id) {
+    if (actionProc.running) return
+    var steps = Model.actionPlan(id, report.tools, Quickshell.env("HOME") || "")
+    if (steps.length === 0) { setStatus("This action is not available on this system.", true); return }
+    var a = Model.terminalAction(id)
+    actionSteps = steps
+    actionIndex = 0
+    actionOutput = ""
+    actionTitle = a ? a.title : ""
+    actionResult = null
+    actionProc.command = steps[0].argv
+    actionProc.running = true
+    actionDeadline.restart()
+    setStatus(steps[0].asRoot ? "Waiting for your password\u2026" : "Working\u2026", false)
+  }
+
+  function finishAction(code) {
+    actionDeadline.stop()
+    var cancelled = actionSteps[actionIndex] && actionSteps[actionIndex].asRoot && (code === 126 || code === 127)
+    if (code === 0 && actionIndex + 1 < actionSteps.length) {
+      actionIndex += 1
+      actionProc.command = actionSteps[actionIndex].argv
+      actionProc.running = true
+      actionDeadline.restart()
+      return
+    }
+    actionResult = {
+      title: actionTitle,
+      verdict: code === 0 ? "Done." : (cancelled ? "Cancelled: no password was given, so nothing changed."
+                                                  : "Did not finish. What it printed is below."),
+      ok: code === 0,
+      output: Model.plain(actionOutput, 6000)
+    }
+    setStatus("", false)
+    runAudit()
   }
 
   // Runs bin/vigil with one of three fixed verbs and an id the panel already
@@ -350,6 +417,21 @@ Panel {
       root.finishAudit(exitCode)
     }
   }
+
+  Process {
+    id: actionProc
+    clearEnvironment: true
+    environment: root.actionEnv
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(data) {
+        // Keep the last 8 KiB of what the action printed.
+        root.actionOutput = (root.actionOutput + data).slice(-8192)
+      }
+    }
+    onExited: function(exitCode, exitStatus) { root.finishAction(exitCode) }
+  }
+  Timer { id: actionDeadline; interval: 1800000; onTriggered: if (actionProc.running) actionProc.signal(15) }
 
   Process {
     id: fixProc
@@ -511,7 +593,7 @@ Panel {
       onTextKey: function(t) {
         if (t === "r" || t === "R" || t === "s" || t === "S") root.requestFullScan()
         else if (t === "f" || t === "F") root.requestFix(root.selectedCheck())
-        else if (t === "u" || t === "U") root.refreshFeeds("sources")
+        else if (t === "u" || t === "U") root.requestUpdate()
         else if ((t === "c" || t === "C") && root.tab === "care") root.requestCleanAll()
         else if (t === "d" || t === "D") {
           var sel = root.selectedCheck()
@@ -636,6 +718,60 @@ Panel {
             }
           }
 
+          // What the last action did, in place of a terminal.
+          CursorSurface {
+            visible: root.actionResult !== null
+            width: parent.width
+            hasCursor: true
+            foreground: root.foreground
+            implicitHeight: resultColumn.implicitHeight + Style.space(20)
+            Column {
+              id: resultColumn
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(10)
+              anchors.rightMargin: Style.space(10)
+              spacing: Style.space(6)
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                text: root.actionResult ? root.actionResult.title : ""
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+                wrapMode: Text.WordWrap
+              }
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                text: root.actionResult ? root.actionResult.verdict : ""
+                color: root.actionResult && !root.actionResult.ok ? root.urgent : root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.italic: true
+                wrapMode: Text.WordWrap
+              }
+              Text {
+                textFormat: Text.PlainText
+                visible: root.actionResult !== null && root.actionResult.output !== ""
+                width: parent.width
+                text: root.actionResult ? root.actionResult.output : ""
+                color: root.dim
+                font.family: "monospace"
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WrapAnywhere
+              }
+              Button {
+                text: "Close"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.actionResult = null
+              }
+            }
+          }
+
           Text {
             textFormat: Text.PlainText
             visible: root.statusMessage !== ""
@@ -700,11 +836,11 @@ Panel {
               }
               Button {
                 text: feedProc.running && !root.feedFull ? "Updating\u2026" : "Update sources"
-                tooltipText: "Download the latest lists Vigil checks against. No password, no scan"
+                tooltipText: "Download the latest virus signatures and lists Vigil checks against. No scan"
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                enabled: !feedProc.running
-                onClicked: root.refreshFeeds("sources")
+                enabled: !feedProc.running && !root.busy && root.pending === null
+                onClicked: root.requestUpdate()
               }
             }
             // While an update or scan runs: what it is doing, and how far along.
@@ -735,7 +871,7 @@ Panel {
               }
             }
             Repeater {
-              model: feedProc.running ? [] : Model.scheduleLines(root.report, root.autoUpdate, new Date())
+              model: Model.scheduleLines(root.report, root.autoUpdate, new Date())
               delegate: Text {
                 required property var modelData
                 textFormat: Text.PlainText
