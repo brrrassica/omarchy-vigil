@@ -1880,3 +1880,44 @@ def test_a_closed_panel_does_not_stop_the_run(v, monkeypatch):
     v.emit({"x": 2})                                   # no exception: the run carries on
     assert v.PROGRESS["gone"] is True
     v.PROGRESS.pop("gone")
+
+
+# --------------------------------------------------------------------------
+# Security key or fingerprint
+
+def omarchy_tools(v, *names):
+    for n in names:
+        v.TRUSTED.add(v.ROOT + "/usr/bin/" + n)
+
+
+def strong_auth(v):
+    return next(c for c in v.audit(peek=True)["checks"] if c["id"] == "strong-auth")
+
+
+def test_fingerprint_offered_only_where_omarchy_finds_a_reader(v):
+    put(Path(v.ROOT, "etc/pam.d/sudo"), "auth include system-auth\n")
+    c = strong_auth(v)
+    assert c["fix"]["action"] == "fido2" and c["undo"]["action"] == ""      # no detector: FIDO2 as before
+    omarchy_tools(v, "omarchy-hw-fingerprint", "omarchy-setup-security-fingerprint")
+    v.COMMANDS[("/usr/bin/omarchy-hw-fingerprint",)] = (1, "")
+    assert strong_auth(v)["fix"]["action"] == "fido2"                       # no reader
+    v.COMMANDS[("/usr/bin/omarchy-hw-fingerprint",)] = (0, "")
+    c = strong_auth(v)
+    assert c["status"] == "info" and c["fix"] == {"kind": "terminal", "action": "fingerprint",
+                                                  "label": "Set up fingerprint"}
+    assert "fingerprint reader" in c["summary"]
+    v.COMMANDS[("/usr/bin/omarchy-hw-fingerprint",)] = (None, "")           # timed out: not offered
+    assert strong_auth(v)["fix"]["action"] == "fido2"
+
+
+def test_set_up_methods_offer_omarchys_removal_as_undo(v):
+    put(Path(v.ROOT, "etc/pam.d/sudo"), "auth sufficient pam_fprintd.so\nauth include system-auth\n")
+    c = strong_auth(v)
+    assert c["status"] == "pass" and c["undo"]["action"] == ""                # removal tool missing: no undo
+    omarchy_tools(v, "omarchy-remove-security-fingerprint", "omarchy-remove-security-fido2")
+    c = strong_auth(v)
+    assert c["summary"] == "sudo accepts your fingerprint."
+    assert c["undo"] == {"action": "undo-fingerprint", "label": "Stop using your fingerprint"}
+    assert "_undo" not in c
+    put(Path(v.ROOT, "etc/pam.d/sudo"), "auth sufficient pam_u2f.so cue\nauth include system-auth\n")
+    assert strong_auth(v)["undo"] == {"action": "undo-fido2", "label": "Stop using a security key"}

@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta
 
-VERSION = "0.17.2"
+VERSION = "0.17.3"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -447,13 +447,16 @@ def check(fn):
     return fn
 
 
-def result(id, category, title, status, summary, why="", detail="", fix=None, weight=1, howto=""):
-    return {
+def result(id, category, title, status, summary, why="", detail="", fix=None, weight=1, howto="", undo=None):
+    out = {
         "id": id, "category": category, "title": title, "status": status,
         "summary": summary, "why": why, "detail": detail, "howto": howto,
         "fix": fix or {"kind": "none", "action": "", "label": ""},
         "weight": weight,
     }
+    if undo:                      # an Omarchy command that reverses what is set up ("undo-..." action, label)
+        out["_undo"] = {"action": undo[0], "label": undo[1]}
+    return out
 
 
 def fix(kind, action, label):
@@ -1085,11 +1088,31 @@ def check_strong_auth():
         text = read_text(sys_path("/etc/pam.d/sudo")) or ""
     except Refused:
         return result(cid, cat, title, "unknown", "Could not read /etc/pam.d/sudo.", why, weight=0)
-    found = [n for n, mod in (("FIDO2 key", "pam_u2f.so"), ("fingerprint", "pam_fprintd.so")) if mod in text]
-    if found:
-        return result(cid, cat, title, "pass", "sudo accepts a %s." % " or ".join(found), why, weight=0)
+    fido2, finger = "pam_u2f.so" in text, "pam_fprintd.so" in text
+    if finger:
+        return result(cid, cat, title, "pass", "sudo accepts your fingerprint%s." % (
+            " or a FIDO2 key" if fido2 else ""), why, weight=0,
+            undo=("undo-fingerprint", "Stop using your fingerprint"))
+    if fido2:
+        return result(cid, cat, title, "pass", "sudo accepts a FIDO2 key.", why, weight=0,
+                      undo=("undo-fido2", "Stop using a security key"))
+    if has_fingerprint_reader():
+        return result(cid, cat, title, "info", "This computer has a fingerprint reader; sudo uses your password "
+                      "only.", why, fix=fix("terminal", "fingerprint", "Set up fingerprint"), weight=0,
+                      howto="Press Set up fingerprint: Omarchy installs the reader driver and asks you to touch "
+                            "the sensor a few times. Your password keeps working too.")
     return result(cid, cat, title, "info", "sudo uses your password only.", why,
                   fix=fix("terminal", "fido2", "Set up a FIDO2 key"), weight=0)
+
+
+def has_fingerprint_reader():
+    """Asks Omarchy's own detector (it reads sysfs only), and offers fingerprint
+    setup only where Omarchy itself would."""
+    tool = find_tool("omarchy-hw-fingerprint") or ""
+    if not tool or not find_tool("omarchy-setup-security-fingerprint"):
+        return False
+    rc, _ = run([tool], timeout=5, limit=4096)
+    return rc == 0
 
 
 _PACMAN_TS = re.compile(r"^\[(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})")
@@ -3316,6 +3339,10 @@ UNDO_FILES = {
 }
 AVAHI_BACKUP = "/etc/avahi/avahi-daemon.conf.vigil-backup"
 
+# Undo through Omarchy's own removal commands, for what Omarchy set up.
+TOOL_UNDO = {"undo-fingerprint": "omarchy-remove-security-fingerprint",
+             "undo-fido2": "omarchy-remove-security-fido2"}
+
 CHECK_UNDO = {
     "kernel-hardening": "undo-sysctl", "network-hardening": "undo-sysctl", "llmnr": "undo-llmnr",
     "dns-fallback": "undo-dns-fallback", "ssh-server": "undo-sshd", "connectivity-check": "undo-connectivity",
@@ -3639,9 +3666,11 @@ def audit(peek=False):
         fp = fingerprint(c)
         c["dismissed"] = c["dismissible"] and fp in dismissed
         c["dismissedAt"] = dismissed.get(fp, "") if c["dismissed"] else ""
+        own = c.pop("_undo", None)
         action = CHECK_UNDO.get(c["id"], "")
-        c["undo"] = {"action": action, "label": "Undo Vigil's change"} if action and undo_available(action) \
-            else {"action": "", "label": ""}
+        c["undo"] = own if own and find_tool(TOOL_UNDO[own["action"]]) else (
+            {"action": action, "label": "Undo Vigil's change"} if action and undo_available(action)
+            else {"action": "", "label": ""})
     counts = {k: 0 for k in ("fail", "warn", "pass", "info", "na", "unknown")}
     for c in checks:
         counts[c["status"]] = counts.get(c["status"], 0) + 1
@@ -3651,6 +3680,8 @@ def audit(peek=False):
         "warn" if any(c["status"] == "warn" for c in scored) else "ok")
     tools = {}
     for name in ("omarchy-launch-floating-terminal-with-presentation", "omarchy-setup-security-fido2",
+                 "omarchy-remove-security-fido2", "omarchy-setup-security-fingerprint",
+                 "omarchy-remove-security-fingerprint",
                  "omarchy-sudo-passwordless", "omarchy-remove-security-sudoless-docker", "omarchy-update",
                  "omarchy-pkg-add", "omarchy-update-orphan-pkgs", "omarchy-toggle-idle", "omarchy-shell-config",
                  "omarchy-plugin-list", "xdg-open", "pkexec"):

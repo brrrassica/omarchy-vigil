@@ -135,6 +135,11 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       approval for new devices briefly (edge and dev) and removed it again,
       commands included, so the buttons pointed at commands that no longer
       exist.
+- [x] 0.17.3: fingerprint login. On a computer where Omarchy's own detector
+      finds a fingerprint reader, the "Security key or fingerprint" row
+      offers **Set up fingerprint** (Omarchy's setup, in a terminal, since you
+      touch the sensor). Once a fingerprint or security key is set up, the row
+      offers Omarchy's removal command as its Undo.
 
 ## 0.16: no terminal pop-ups
 

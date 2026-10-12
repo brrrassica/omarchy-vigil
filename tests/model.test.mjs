@@ -13,6 +13,9 @@ const M = require(path.join(here, "..", "Model.js"))
 const TOOLS = {
   "omarchy-launch-floating-terminal-with-presentation": "/usr/bin",
   "omarchy-setup-security-fido2": "/usr/bin",
+  "omarchy-remove-security-fido2": "/usr/bin",
+  "omarchy-setup-security-fingerprint": "/usr/bin",
+  "omarchy-remove-security-fingerprint": "/usr/bin",
   "omarchy-sudo-passwordless": "/usr/bin",
   "omarchy-remove-security-sudoless-docker": "/usr/bin",
   "omarchy-update": "/usr/bin",
@@ -589,4 +592,18 @@ test("a scan started elsewhere is followed, and anything odd is refused", () => 
   assert.equal(M.parseRunning('{"running":{"step":1,"of":2,"doing":"x","done":0,"total":0}}').running.step, 1)
   assert.equal(M.parseRunning('{"running":"x"}'), null)
   assert.equal(M.parseRunning("nope"), null)
+})
+
+test("fingerprint setup and removal are Omarchy's own commands, in a terminal", () => {
+  for (const [id, tool] of [["fingerprint", "omarchy-setup-security-fingerprint"],
+                            ["undo-fingerprint", "omarchy-remove-security-fingerprint"],
+                            ["undo-fido2", "omarchy-remove-security-fido2"]]) {
+    assert.equal(M.runMode(id), "terminal", id)
+    assert.equal(M.terminalAction(id).tool, tool)
+    assert.match(M.terminalScript(id, TOOLS), new RegExp("/usr/bin/" + tool))
+  }
+  const r = parse(report({ checks: [check({ id: "strong-auth", status: "pass",
+    undo: { action: "undo-fingerprint", label: "Stop using your fingerprint" } })] }))
+  assert.equal(r.checks[0].undo.action, "undo-fingerprint")
+  assert.equal(parse(report({ checks: [check({ undo: { action: "fingerprint", label: "x" } })] })), null)
 })

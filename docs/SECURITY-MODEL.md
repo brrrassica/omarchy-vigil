@@ -245,6 +245,12 @@ say where they connect before they run.
 - The plugin capability scan reads other plugins' files as text, at most 300
   files per plugin, 512 KiB per file, 8 MiB and three seconds in total,
   without following symlinks. It never loads, imports or runs them.
+- To offer fingerprint login only where it works, the helper runs Omarchy's
+  own detector, `omarchy-hw-fingerprint`, with no arguments, the empty
+  environment and a five-second limit, and uses only its exit code. It is
+  a root-owned file in `/usr/bin` or `/usr/share/omarchy/bin` (a test
+  checks the lookup) and reads `/sys/bus/usb/devices` only. It runs only
+  when sudo has neither a fingerprint nor a security key set up.
 - For the Last run list Vigil reads ClamUI's log index
   (`clamui/logs/log_index.json` in its data folder, Flatpak or not) with
   the no-follow reader and a 2 MiB cap, and keeps only the newest

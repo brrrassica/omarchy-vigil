@@ -195,7 +195,7 @@ function undoDropIn(name, path, afterText, after) {
 // what they printed. Only tools that ask you questions as they go (Omarchy's
 // updater and setup wizards, the orphan review, choosing an SSH passphrase)
 // keep a terminal.
-var TERMINAL_ONLY = ["update", "fido2", "sudo-passwordless-off",
+var TERMINAL_ONLY = ["update", "fido2", "undo-fido2", "fingerprint", "undo-fingerprint", "sudo-passwordless-off",
                      "docker-group-off", "clean-orphans", "ssh-passphrase"]
 var USER_MODE = ["allow-idle", "restart", "run-arch-audit", "show-ld-preload", "show-plugins", "screen-lock-default"]
 var PKEXEC = "/usr/bin/pkexec"
@@ -390,6 +390,28 @@ var TERMINAL_ACTIONS = {
            "Omarchy walks you through it.",
            "Technical: runs omarchy-setup-security-fido2"],
     tool: "omarchy-setup-security-fido2", args: ""
+  },
+  "undo-fido2": {
+    title: "Stop using a security key",
+    what: ["Your security key no longer confirms system changes. Your password works as before.",
+           "Omarchy also removes the key settings and the packages it installed for them.",
+           "Technical: runs omarchy-remove-security-fido2"],
+    tool: "omarchy-remove-security-fido2", args: ""
+  },
+  "fingerprint": {
+    title: "Use your fingerprint",
+    what: ["Lets your fingerprint confirm system changes and unlock the screen. Your password keeps working too.",
+           "Omarchy installs the reader driver, then asks you to touch the sensor several times to save",
+           "your fingerprint and checks that it works. Have the laptop open.",
+           "Technical: runs omarchy-setup-security-fingerprint (fprintd, for sudo, polkit and the lock screen)"],
+    tool: "omarchy-setup-security-fingerprint", args: ""
+  },
+  "undo-fingerprint": {
+    title: "Stop using your fingerprint",
+    what: ["Your fingerprint no longer confirms system changes or unlocks the screen. Your password works as before.",
+           "Omarchy also deletes your saved fingerprints from this computer and removes the reader driver.",
+           "Technical: runs omarchy-remove-security-fingerprint"],
+    tool: "omarchy-remove-security-fingerprint", args: ""
   },
   "update": {
     title: "Update the system",
