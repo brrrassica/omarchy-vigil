@@ -43,7 +43,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       the original, rolls back if Avahi does not restart.
 - [x] ID `keasbeexd.vigil`, matching the other keasbeexd plugins.
 
-## Phase 3 (0.3, this release): undo, reviewed warnings, history
+## Phase 3 (0.3): undo, reviewed warnings, history
 
 - [x] Undo from the panel for each `/etc` change, as a terminal action that
       removes a file only while its first line is still Vigil's marker, and
@@ -56,22 +56,23 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       with a hover readout and a one-line summary in words.
 - [ ] `preview.png` and the marketplace submission (checklist below).
 
-## Phase 4: deeper supply chain and detection
+## Phase 4 (0.4, this release): deeper supply chain and detection
 
-- **Exposed secrets**: API keys and tokens in shell history, `.env` files in
-  the home directory, readable cloud credentials and `.netrc`. Reports the
-  file and line, never the secret itself.
-- Known-bad AUR package list, shipped as reviewed data in this repository
-  (no download at run time), checked against `pacman -Qm`.
-- arch-audit results parsed into the panel (severity per package), run on
-  demand only, since it contacts security.archlinux.org.
-- ClamUI quarantine count and last scan, read from `clamui quarantine list
-  --json` if ClamUI offers it on the installed version; restore and delete
-  stay in ClamUI.
-- File-change alerts for a few high-value paths (`/etc/pam.d`,
-  `/etc/sudoers.d`, `/etc/ld.so.preload`, shell startup files).
-- Read-only audit of other Omarchy plugins: network, process and file
-  capabilities found in their code, without loading or running them.
+- [x] **Exposed secrets**: keys and tokens in shell histories, and credential
+      files readable by others (fixable without root). Reports file and
+      line, never the secret. Project `.env` files are left out on purpose:
+      they are normal in development and would drown the real findings.
+- [x] Known malicious AUR packages, from a reviewed list shipped in
+      `data/known-bad.json` with a public source per entry; version- and
+      install-date-aware. Plus known malware process names.
+- [x] arch-audit results in the panel (severity per package, fix available
+      or not), refreshed only when you press Check now.
+- [x] ClamUI quarantine count, from the number of files in its quarantine
+      folder (no dependency on ClamUI's database format).
+- [x] File-change alerts for accounts, PAM, SSH and `authorized_keys`,
+      system and user services, autostart and startup files, with Accept.
+      `/etc/sudoers.d` is root-only, so it cannot be watched without root.
+- [x] Read-only capability audit of other Omarchy plugins.
 
 ## Phase 5: privacy and recovery
 

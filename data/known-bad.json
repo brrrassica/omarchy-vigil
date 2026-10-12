@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "_comment": "Reviewed list of AUR packages that shipped malware, and process names left by that malware. Shipped with Vigil and never downloaded at run time. Each entry names its public source. A match means: find out where your copy came from; it does not prove your copy is the malicious one.",
+  "packages": [
+    {"name": "acroread", "versions": ["9.5.5-8"], "incident": "2018-07 orphaned-package takeover by xeactor: install script fetched and ran a remote script", "source": "https://lwn.net/Articles/759461/"},
+    {"name": "balz", "versions": ["1.20-3"], "incident": "2018-07 orphaned-package takeover by xeactor", "source": "https://lwn.net/Articles/759461/"},
+    {"name": "minergate", "versions": ["8.1-2"], "incident": "2018-07 orphaned-package takeover by xeactor", "source": "https://lwn.net/Articles/759461/"},
+    {"name": "librewolf-fix-bin", "incident": "2025-07 CHAOS RAT, uploaded by danikpapas, removed 2025-07-18", "source": "https://bleepingcomputer.com/news/security/arch-linux-pulls-aur-packages-that-installed-chaos-rat-malware"},
+    {"name": "firefox-patch-bin", "incident": "2025-07 CHAOS RAT, uploaded by danikpapas, removed 2025-07-18", "source": "https://bleepingcomputer.com/news/security/arch-linux-pulls-aur-packages-that-installed-chaos-rat-malware"},
+    {"name": "zen-browser-patched-bin", "incident": "2025-07 CHAOS RAT, uploaded by danikpapas, removed 2025-07-18", "source": "https://bleepingcomputer.com/news/security/arch-linux-pulls-aur-packages-that-installed-chaos-rat-malware"},
+    {"name": "minecraft-cracked", "incident": "2025-07 CHAOS RAT, listed in the Arch Linux security PSA", "source": "https://piefed.jeena.net/post/206825"},
+    {"name": "ttf-ms-fonts-all", "incident": "2025-07 CHAOS RAT, listed in the Arch Linux security PSA", "source": "https://piefed.jeena.net/post/206825"},
+    {"name": "ttf-all-ms-fonts", "incident": "2025-07 CHAOS RAT, listed in the Arch Linux security PSA", "source": "https://piefed.jeena.net/post/206825"},
+    {"name": "vesktop-bin-patched", "incident": "2025-07 CHAOS RAT, listed in the Arch Linux security PSA", "source": "https://piefed.jeena.net/post/206825"},
+    {"name": "google-chrome-stable", "installedBetween": ["2025-07-15", "2025-08-10"], "incident": "2025-07/08 fake Chrome package carrying the Spark RAT; the name alone is not malicious, so only installs from the attack window match", "source": "https://itsfoss.com/news/arch-linux-spark-rat/"}
+  ],
+  "processes": [
+    {"name": "systemd-initd", "incident": "Process name used by the CHAOS RAT from the July 2025 AUR packages", "source": "https://piefed.jeena.net/post/206825"}
+  ]
+}

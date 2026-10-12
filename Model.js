@@ -51,7 +51,8 @@ function inList(v, list) {
 // No value from the report, a file or the network is ever put into a script:
 // the report only names an action id, and an unknown id does nothing.
 
-var HELPER_ACTIONS = ["ssh-perms", "gnupg-perms", "optout-on", "optout-off", "clean-thumbnails", "empty-trash"]
+var HELPER_ACTIONS = ["ssh-perms", "gnupg-perms", "optout-on", "optout-off", "clean-thumbnails", "empty-trash",
+                      "credential-perms", "integrity-accept", "arch-audit-refresh"]
 
 // What the confirmation card says before a helper action runs.
 var HELPER_INFO = {
@@ -66,7 +67,16 @@ var HELPER_INFO = {
   "clean-thumbnails": { title: "Clear the thumbnail cache",
                         what: ["Deletes everything in ~/.cache/thumbnails. Previews are recreated when needed."] },
   "empty-trash": { title: "Empty the trash",
-                   what: ["Permanently deletes the files in the trash. This cannot be undone."] }
+                   what: ["Permanently deletes the files in the trash. This cannot be undone."] },
+  "credential-perms": { title: "Make credential files private",
+                        what: ["Sets files such as ~/.aws/credentials, ~/.netrc and ~/.git-credentials to 600,",
+                               "so only you can read them. Their contents are not read or changed."] },
+  "integrity-accept": { title: "Accept the file changes",
+                        what: ["Records the watched files as they are now as the new normal.",
+                               "Only do this once you recognise every change in the list."] },
+  "arch-audit-refresh": { title: "Check for known vulnerabilities",
+                          what: ["Runs arch-audit, which downloads the Arch security tracker from security.archlinux.org,",
+                                 "and saves the result in ~/.local/state/omarchy-vigil/arch-audit.json."] }
 }
 
 function isHelperAction(id) {

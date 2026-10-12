@@ -19,7 +19,7 @@ root runs in a terminal you can watch.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.3.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.4.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -117,6 +117,7 @@ score; checks with weight 0 are information and never lower it.
 | Security key or fingerprint | sudo takes only a password (information) | `omarchy-setup-security-fido2` (terminal) |
 | System updates | No full update in 14 days (warning) or 30 days (failure) | `omarchy-update` (terminal) |
 | Open network ports | Programs listen on the network with no firewall in front | |
+| Exposed secrets | API keys and tokens (AWS, GitHub, GitLab, Slack, Stripe, Anthropic, OpenAI-style, Google, private keys, bearer tokens, exported `*_TOKEN`/`*_SECRET` variables) in your shell histories, or credential files such as `~/.aws/credentials`, `~/.netrc` and `~/.git-credentials` readable by other accounts. Shows the file and line, never the secret. | Makes credential files private (no root); revoke leaked keys with their provider |
 | Lynis | Installs Lynis and runs `lynis audit system --quick` for a hardening index and suggestions | |
 
 ### Detect
@@ -125,6 +126,8 @@ score; checks with weight 0 are information and never lower it.
 |---|---|
 | Startup files | Reads shell startup files, autostart entries, user services and timers, uwsm and environment.d files, Hyprland config and your crontab, and flags lines that download and run code, decode hidden code, open reverse shells, or set `LD_PRELOAD`. These are leads to read, not proof. |
 | System-wide preload | Fails if `/etc/ld.so.preload` loads anything; rootkits use it to hide. |
+| Known malware processes | Looks for process names on Vigil's reviewed list among everything running (for example `systemd-initd`, left by the 2025 CHAOS RAT AUR packages). |
+| Changes to important files | Records a fingerprint of accounts, PAM, SSH settings, `~/.ssh/authorized_keys`, system and user services, autostart entries and your startup files, and lists anything changed, added or removed since. Notes when a system update explains the changes. **Accept these changes** records the current state as the new normal. |
 | ClamUI | Vigil hands virus scanning to [ClamUI](https://github.com/linx-systems/clamui): file and folder scans, scheduled scans, USB drive scans and quarantine. When it is installed, **Open ClamUI** starts it; otherwise Vigil offers to install it from Flathub. |
 | ClamAV virus engine | Whether ClamAV is installed and its signatures are under a week old; updates them with `freshclam`; quick scan of `~/Downloads` in a terminal. |
 | Rootkit Hunter | Installs rkhunter, records a baseline, and runs `rkhunter --check`. |
@@ -134,9 +137,10 @@ score; checks with weight 0 are information and never lower it.
 | Check | What it does |
 |---|---|
 | Known-compromised packages | Shows the last result of the [Bumblebee](https://github.com/duketopceo/omarchy-bumblebee) plugin, which checks packages, lockfiles, editor extensions and MCP configs against a catalog of known compromises. Vigil only reads Bumblebee's result file; install Bumblebee yourself to use it. |
-| Known vulnerabilities | Installs arch-audit and lists installed packages with published vulnerabilities that already have a fix. |
+| Known malicious AUR packages | Compares your AUR packages with a reviewed list of packages that shipped malware (2018 hijacked orphans, 2025 RAT packages), shipped in [`data/known-bad.json`](data/known-bad.json) with a public source for each entry. Version- and install-date-aware where a name alone is not enough. Nothing is downloaded. |
+| Known vulnerabilities | Installs arch-audit. **Check now** runs it (it contacts security.archlinux.org) and lists vulnerable packages with severity; serious ones with a fix available lower the score until you update. |
 | AUR and other foreign packages | Lists packages that did not come from the official repositories, so you can remove what you no longer recognise. |
-| Other Omarchy plugins | Lists your third-party plugins. They run unsandboxed with your account's access, so keep only the ones you use. |
+| Other Omarchy plugins | Lists your third-party plugins and what each one's code can do: network access, root through sudo or pkexec, shell commands, downloading and running code, compiled binaries. Vigil reads the files as text and never loads or runs them. |
 
 ### Privacy
 
@@ -188,13 +192,16 @@ Vigil makes no network connections. The checks read local files and ask
 actions you start yourself use the network, and their confirmation says so:
 installing ClamUI (Arch mirrors, dl.flathub.org, ClamAV's servers), installing
 a scanner (Arch mirrors), updating ClamAV's signatures (ClamAV's servers),
-`arch-audit` (security.archlinux.org) and `omarchy-update`.
+**Check now** for known vulnerabilities (arch-audit, security.archlinux.org) and
+`omarchy-update`.
 
 ## Files Vigil writes
 
 | Path | Written by | When |
 |---|---|---|
 | `~/.local/state/omarchy-vigil/state.json` | the helper, mode 0600 | every check: which findings you have already seen, which you marked as reviewed, and one score per day for 30 days |
+| `~/.local/state/omarchy-vigil/baseline.json` | the helper, mode 0600 | first check, and when you accept file changes: fingerprints (not contents) of the watched files |
+| `~/.local/state/omarchy-vigil/arch-audit.json` | the helper, mode 0600 | when you press Check now: vulnerable package names and severities |
 | `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` | the helper | only when you set the opt-out variables |
 | `/etc/sysctl.d/90-omarchy-vigil.conf` | terminal action | only when you apply the kernel settings |
 | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf` | terminal action | only when you turn LLMNR off |
@@ -219,9 +226,9 @@ omarchy plugin remove keasbeexd.vigil
 This removes the plugin folder. Vigil runs no services, timers or daemons, so
 nothing keeps running. These stay behind until you remove them:
 
-- `~/.local/state/omarchy-vigil/` (seen findings and score history). Remove
-  it with `rm ~/.local/state/omarchy-vigil/state.json` and
-  `rmdir ~/.local/state/omarchy-vigil`.
+- `~/.local/state/omarchy-vigil/` (seen findings, score history, the file
+  baseline and the last arch-audit result). Remove it with
+  `rm ~/.local/state/omarchy-vigil/*.json` and `rmdir ~/.local/state/omarchy-vigil`.
 - The opt-out file, if you set it. Remove it from the Privacy tab before
   uninstalling, or delete `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out`.
 - Settings you applied in `/etc`. They are your system settings now and keep

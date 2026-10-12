@@ -126,9 +126,26 @@ no polkit policy, no service, no timer and no daemon.
 
 ## Network
 
-The helper and panel make no network connections. Actions that do (package
-installs, `freshclam`, `arch-audit`, `omarchy-update`) are started by you
-and say so on their confirmation.
+The helper and panel make no network connections of their own. Actions that
+do (package installs, `freshclam`, `omarchy-update`, and **Check now**, which
+runs `arch-audit --json`) are started by you and say so on their
+confirmation. arch-audit's output is parsed with a byte cap, package names and
+versions are checked against a strict pattern, and only names, severities and
+counts are kept.
+
+## Reading other software
+
+- The known-bad list is data in this repository (`data/known-bad.json`),
+  read with the same bounded reader as any file and validated entry by
+  entry. Install dates come from pacman's local database, with package names
+  and versions checked against a strict pattern before they form a path.
+- The plugin capability scan reads other plugins' files as text, at most 300
+  files per plugin, 512 KiB per file, 8 MiB and three seconds in total,
+  without following symlinks. It never loads, imports or runs them.
+- File-change alerts store SHA-256 fingerprints, never contents; symlinks
+  are recorded by their target path and never followed.
+- Secrets found in shell history are reported by file, line and kind. The
+  matched text never leaves the helper.
 
 ## Repository hygiene
 

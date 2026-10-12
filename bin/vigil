@@ -42,7 +42,7 @@ import sys
 import time
 from base64 import b64decode
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -63,6 +63,10 @@ except KeyError:
 
 STATE_DIR = (".local", "state", "omarchy-vigil")
 STATE_NAME = "state.json"
+BASELINE_NAME = "baseline.json"
+ARCH_AUDIT_NAME = "arch-audit.json"
+STATE_FILE_MAX = 256 * 1024
+PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 OPT_OUT_DIR = (".config", "uwsm", "env.d")
 OPT_OUT_NAME = "90-omarchy-vigil-opt-out"
 
@@ -1218,8 +1222,8 @@ SCANNERS = [
      "run-lynis", "install-lynis"),
     ("arch-audit", "arch-audit", "supply", "Known vulnerabilities (arch-audit)",
      "arch-audit compares installed packages with the Arch security tracker and lists the ones with "
-     "published vulnerabilities. It contacts security.archlinux.org when you run it.",
-     "run-arch-audit", "install-arch-audit"),
+     "published vulnerabilities. Checking contacts security.archlinux.org, so Vigil only does it when you "
+     "press Check now.", "run-arch-audit", "install-arch-audit"),
 ]
 
 
@@ -1230,6 +1234,8 @@ def _scanner_check(sid, binary, cat, title, why, run_action, install_action):
         return result(cid, cat, title, "info", "Not installed.", why,
                       fix=fix("terminal", install_action, "Install"), weight=0)
     summary = "Installed. Runs on demand in a terminal."
+    if sid == "arch-audit":
+        return _arch_audit_check(cid, cat, title, why)
     if sid == "clamav":
         newest = 0
         for name in ("daily.cld", "daily.cvd"):
@@ -1248,6 +1254,70 @@ def _scanner_check(sid, binary, cat, title, why, run_action, install_action):
         summary = "Installed; database updated %s." % (
             "today" if days == 0 else "%d day%s ago" % (days, "" if days == 1 else "s"))
     return result(cid, cat, title, "info", summary, why, fix=fix("terminal", run_action, "Run"), weight=0)
+
+
+SEVERITIES = ["Critical", "High", "Medium", "Low", "Unknown"]
+
+
+def parse_arch_audit(text):
+    """Validated summary of `arch-audit --json`: [{name, severity, fixed, issues}] or None."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    avgs = data.get("avgs") if isinstance(data, dict) else data
+    if not isinstance(avgs, list):
+        return None
+    out = {}
+    for a in avgs[:2000]:
+        if not isinstance(a, dict) or not isinstance(a.get("packages"), list):
+            continue
+        sev = a.get("severity") if a.get("severity") in SEVERITIES else "Unknown"
+        fixed = isinstance(a.get("fixed"), str) and bool(_PKG_VER.match(a["fixed"]))
+        issues = len([i for i in a.get("issues", []) if isinstance(i, str)][:500]) if isinstance(a.get("issues"), list) else 0
+        for p in a["packages"][:50]:
+            if not isinstance(p, str) or not _PKG_NAME.match(p):
+                continue
+            cur = out.get(p)
+            if cur is None or SEVERITIES.index(sev) < SEVERITIES.index(cur["severity"]):
+                out[p] = {"name": p, "severity": sev, "fixed": fixed or (cur or {}).get("fixed", False),
+                          "issues": issues + (cur or {}).get("issues", 0)}
+            else:
+                cur["fixed"] = cur["fixed"] or fixed
+                cur["issues"] += issues
+    return sorted(out.values(), key=lambda e: (SEVERITIES.index(e["severity"]), e["name"]))[:500]
+
+
+def _arch_audit_check(cid, cat, title, why):
+    cached = _state_json(ARCH_AUDIT_NAME)
+    pkgs = cached.get("packages") if isinstance(cached, dict) else None
+    at = cached.get("at") if isinstance(cached, dict) and isinstance(cached.get("at"), str) else ""
+    refresh = fix("helper", "arch-audit-refresh", "Check now")
+    if not isinstance(pkgs, list) or not _DATE.match(at):
+        return result(cid, cat, title, "info", "Installed. Not checked yet.", why, fix=refresh, weight=0)
+    good = [p for p in pkgs if isinstance(p, dict) and isinstance(p.get("name"), str) and _PKG_NAME.match(p["name"])
+            and p.get("severity") in SEVERITIES and isinstance(p.get("fixed"), bool)]
+    fixable = [p for p in good if p["fixed"]]
+    serious = [p for p in fixable if p["severity"] in ("Critical", "High")]
+    lines = ["%s: %s%s" % (p["name"], p["severity"].lower(), ", fixed version available" if p["fixed"] else ", no fix yet")
+             for p in good]
+    try:
+        age = int((time.time() - time.mktime(time.strptime(at, "%Y-%m-%d"))) // 86400)
+    except ValueError:
+        age = 0
+    when = "checked today" if age <= 0 else "checked %d day%s ago" % (age, "" if age == 1 else "s")
+    if not good:
+        return result(cid, cat, title, "pass", "No known vulnerabilities in installed packages (%s)." % when, why,
+                      fix=refresh, weight=2)
+    summary = "%d vulnerable package%s, %d with a fix available (%s)." % (
+        len(good), "" if len(good) == 1 else "s", len(fixable), when)
+    if serious:
+        return result(cid, cat, title, "fail" if age <= 14 else "warn", summary + " Update to get the fixes.", why,
+                      clean_block(lines), fix("terminal", "update", "Update now"), weight=2)
+    if fixable:
+        return result(cid, cat, title, "warn", summary + " Update to get the fixes.", why, clean_block(lines),
+                      fix("terminal", "update", "Update now"), weight=2)
+    return result(cid, cat, title, "info", summary + " None has a fix yet.", why, clean_block(lines), fix=refresh, weight=0)
 
 
 def _make_scanner(spec):
@@ -1284,8 +1354,13 @@ def check_clamui():
            "hands virus scanning to it rather than rebuilding it.")
     kind = clamui_install()
     if kind:
-        return result(cid, cat, title, "pass", "Installed (%s). Open it to scan or review quarantine." % (
-            "Flatpak" if kind == "flatpak" else "system package"), why,
+        quarantined = 0
+        for parts in ((".local", "share", "clamui", "quarantine"),
+                      (".var", "app", CLAMUI_APP_ID, "data", "clamui", "quarantine")):
+            quarantined += sum(1 for n in list_dir(home_path(*parts), 10000) if not n.startswith("."))
+        note = " %d file%s in quarantine." % (quarantined, "" if quarantined == 1 else "s") if quarantined else ""
+        return result(cid, cat, title, "pass", "Installed (%s).%s Open it to scan or review quarantine." % (
+            "Flatpak" if kind == "flatpak" else "system package", note), why,
             fix=fix("app", "open-clamui", "Open ClamUI"), weight=0)
     return result(cid, cat, title, "info", "Not installed.", why,
                   fix=fix("terminal", "install-clamui", "Install ClamUI"), weight=0)
@@ -1344,13 +1419,15 @@ def check_bumblebee():
 def check_plugins():
     cid, cat, title = "omarchy-plugins", "supply", "Other Omarchy plugins"
     why = ("Omarchy plugins run inside the desktop shell with everything your account can reach, and they "
-           "are not sandboxed. Keep only the ones you use, from authors you trust, and read the diff that "
-           "`omarchy plugin update` shows you.")
+           "are not sandboxed. Vigil reads each one's code, without running it, and lists what it can do. "
+           "Network access or shell commands are normal for many plugins; downloading and running code, "
+           "or shipping compiled binaries you cannot read, deserve a closer look.")
     base = home_path(".config", "omarchy", "plugins")
     names = [n for n in list_dir(base, 200) if not n.startswith(".") and n != PLUGIN_ID]
-    lines = []
+    budget = [8 * 1024 * 1024, time.monotonic() + 3.0]
+    lines, risky = [], 0
     for name in names[:100]:
-        label = name
+        label = clean(name, 80)
         try:
             text = read_text(base + "/" + name + "/manifest.json", SMALL_FILE_MAX, follow=True)
             m = json.loads(text) if text else None
@@ -1358,11 +1435,413 @@ def check_plugins():
                 label = "%s (%s)" % (clean(m["name"], 60), clean(name, 80))
         except (Refused, ValueError, OSError):
             pass
-        lines.append(label)
+        try:
+            linked = stat.S_ISLNK(os.lstat(base + "/" + name).st_mode)
+        except OSError:
+            continue
+        if linked:
+            # A development install links to a checkout elsewhere. Vigil does
+            # not follow the link, so it says so rather than reporting "clean".
+            lines.append(label + ": linked from another folder (development install), not scanned")
+            continue
+        caps = plugin_capabilities(base + "/" + name, budget)
+        if "downloads and runs code" in caps or "compiled binaries" in caps:
+            risky += 1
+        lines.append(label + (": " + ", ".join(caps) if caps else ": no network, root or shell use found"))
     if not lines:
         return result(cid, cat, title, "pass", "No other third-party plugins are installed.", why, weight=0)
-    return result(cid, cat, title, "info", "%d third-party plugin%s installed." % (
-        len(lines), "" if len(lines) == 1 else "s"), why, clean_block(lines), weight=0)
+    summary = "%d third-party plugin%s installed." % (len(lines), "" if len(lines) == 1 else "s")
+    if risky:
+        return result(cid, cat, title, "warn", summary + " %d download%s and run%s code or ship%s binaries." % (
+            risky, "s" if risky == 1 else "", "s" if risky == 1 else "", "s" if risky == 1 else ""),
+            why, clean_block(lines), weight=1)
+    return result(cid, cat, title, "info", summary, why, clean_block(lines), weight=0)
+
+
+# --- Phase 4: secrets, known-bad packages, file changes, plugin code --------
+
+SECRET_PATTERNS = [
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "AWS access key"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"), "GitHub token"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{60,}\b"), "GitHub token"),
+    (re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b"), "GitLab token"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "Slack token"),
+    (re.compile(r"\bsk_live_[A-Za-z0-9]{20,}\b"), "Stripe live key"),
+    (re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b"), "Anthropic API key"),
+    (re.compile(r"\bsk-(proj-)?[A-Za-z0-9_-]{32,}\b"), "OpenAI-style API key"),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "Google API key"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "private key"),
+    (re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*", re.I), "bearer token"),
+    (re.compile(r"\bexport\s+[A-Z0-9_]*(TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY)[A-Z0-9_]*=['\"]?[^\s$'\"]{8,}"),
+     "secret in an exported variable"),
+]
+
+HISTORY_FILES = [(".bash_history",), (".zsh_history",), (".histfile",), (".local", "share", "fish", "fish_history"),
+                 (".python_history",), (".node_repl_history",), (".psql_history",), (".mysql_history",),
+                 (".sqlite_history",)]
+
+CREDENTIAL_FILES = [(".aws", "credentials"), (".netrc",), (".git-credentials",), (".docker", "config.json"),
+                    (".kube", "config"), (".npmrc",), (".pypirc",), (".config", "gh", "hosts.yml"),
+                    (".config", "gcloud", "application_default_credentials.json"),
+                    (".terraform.d", "credentials.tfrc.json"), (".config", "hub",), (".pgpass",)]
+
+
+@check
+def check_secrets():
+    cid, cat, title = "exposed-secrets", "harden", "Exposed secrets"
+    why = ("API keys and tokens typed on the command line end up in your shell history, where any program "
+           "you run can read them. Credential files should be readable only by you. If a key shows up here, "
+           "revoke it with the service that issued it, then delete the line. Vigil never shows the secret "
+           "itself, only where it is.")
+    hits, loose = [], []
+    for parts in HISTORY_FILES:
+        path = home_path(*parts)
+        try:
+            text = read_tail(path, PACMAN_LOG_TAIL)
+        except Refused:
+            continue
+        if not text:
+            continue
+        label = "~/" + "/".join(parts)
+        for n, line in enumerate(text.splitlines()[-50000:], 1):
+            for rx, kind in SECRET_PATTERNS:
+                if rx.search(line):
+                    hits.append("%s, line %d of the last 2 MB: %s" % (label, n, kind))
+                    break
+            if len(hits) >= 200:
+                break
+    for parts in CREDENTIAL_FILES:
+        try:
+            st = os.lstat(home_path(*parts))
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode) and st.st_mode & 0o077:
+            loose.append("~/%s is mode %03o (readable by other accounts)" % ("/".join(parts), stat.S_IMODE(st.st_mode)))
+    if loose:
+        return result(cid, cat, title, "warn", "%d credential file%s readable by other accounts." % (
+            len(loose), "" if len(loose) == 1 else "s"), why, clean_block(loose + hits),
+            fix("helper", "credential-perms", "Make them private"), weight=2)
+    if hits:
+        return result(cid, cat, title, "warn", "%d secret%s found in shell history." % (
+            len(hits), "" if len(hits) == 1 else "s"), why, clean_block(hits), weight=2)
+    return result(cid, cat, title, "pass", "No keys or tokens found in shell history, and credential files are private.",
+                  why, weight=2)
+
+
+_PKG_NAME = re.compile(r"^[a-z0-9@._+-]{1,100}$")
+_PKG_VER = re.compile(r"^[A-Za-z0-9._+:~-]{1,60}$")
+
+
+def known_bad():
+    """The reviewed list in data/known-bad.json, validated; empty on any problem."""
+    try:
+        raw = read_file(os.path.join(PLUGIN_DIR, "data", "known-bad.json"), SMALL_FILE_MAX)
+        data = json.loads(raw.decode("utf-8")) if raw else {}
+    except (Refused, ValueError, OSError):
+        return [], []
+    pkgs, procs = [], []
+    for e in data.get("packages", [])[:500] if isinstance(data, dict) else []:
+        if not isinstance(e, dict) or not isinstance(e.get("name"), str) or not _PKG_NAME.match(e["name"]):
+            continue
+        vers = [x for x in e.get("versions", []) if isinstance(x, str) and _PKG_VER.match(x)]
+        win = e.get("installedBetween")
+        if not (isinstance(win, list) and len(win) == 2 and all(isinstance(x, str) and _DATE.match(x) for x in win)):
+            win = None
+        pkgs.append({"name": e["name"], "versions": vers, "window": win,
+                     "incident": clean(e.get("incident", ""), 160)})
+    for e in data.get("processes", [])[:100] if isinstance(data, dict) else []:
+        if isinstance(e, dict) and isinstance(e.get("name"), str) and re.fullmatch(r"[A-Za-z0-9._-]{1,15}", e["name"]):
+            procs.append({"name": e["name"], "incident": clean(e.get("incident", ""), 160)})
+    return pkgs, procs
+
+
+def _install_date(name, version):
+    """YYYY-MM-DD from pacman's local database, or ''."""
+    if not _PKG_NAME.match(name) or not _PKG_VER.match(version) or ".." in name + version:
+        return ""
+    try:
+        text = read_text(sys_path("/var/lib/pacman/local/%s-%s/desc" % (name, version)), SMALL_FILE_MAX)
+    except Refused:
+        return ""
+    m = re.search(r"%INSTALLDATE%\n(\d{1,12})\n", text or "")
+    return time.strftime("%Y-%m-%d", time.gmtime(int(m.group(1)))) if m else ""
+
+
+@check
+def check_known_bad_packages():
+    cid, cat, title = "known-bad-packages", "supply", "Known malicious AUR packages"
+    why = ("A few AUR packages have shipped malware: hijacked orphans in 2018, and fake browser and font "
+           "packages carrying remote-access trojans in 2025. Vigil compares your AUR packages with a reviewed "
+           "list that ships with it; nothing is downloaded.")
+    pkgs, _ = known_bad()
+    tool = "/usr/bin/pacman"
+    if not pkgs:
+        return result(cid, cat, title, "unknown", "Vigil's list of known malicious packages could not be read.", why, weight=3)
+    if not is_trusted_executable(sys_path(tool)):
+        return result(cid, cat, title, "na", "pacman is not available.", why, weight=3)
+    rc, out = run([tool, "-Qm"], timeout=8, limit=CMD_MAX)
+    if rc is None:
+        return result(cid, cat, title, "unknown", "Could not list AUR packages.", why, weight=3)
+    installed = {}
+    for line in out.splitlines()[:5000]:
+        parts = line.split()
+        if len(parts) == 2:
+            installed[parts[0]] = parts[1]
+    hits = []
+    for e in pkgs:
+        ver = installed.get(e["name"])
+        if ver is None:
+            continue
+        if e["versions"] and ver not in e["versions"]:
+            continue
+        if e["window"]:
+            day = _install_date(e["name"], ver)
+            if not day or not (e["window"][0] <= day <= e["window"][1]):
+                continue
+        hits.append("%s %s: %s" % (e["name"], ver, e["incident"]))
+    if hits:
+        return result(cid, cat, title, "fail", "%d installed package%s match%s a known malware incident." % (
+            len(hits), "" if len(hits) == 1 else "s", "es" if len(hits) == 1 else ""), why + (
+            " Remove the package, check the Detect tab for malware processes, and treat the machine as "
+            "compromised until you are sure: change passwords from another device."), clean_block(hits), weight=3)
+    return result(cid, cat, title, "pass", "None of your %d AUR packages are on the list (%d entries)." % (
+        len(installed), len(pkgs)), why, weight=3)
+
+
+@check
+def check_malware_processes():
+    cid, cat, title = "malware-processes", "detect", "Known malware processes"
+    why = ("Some malware runs under a recognisable process name. Vigil looks for the names on its reviewed "
+           "list among everything running right now.")
+    _, procs = known_bad()
+    if not procs:
+        return result(cid, cat, title, "unknown", "Vigil's list of known malware could not be read.", why, weight=3)
+    wanted = {p["name"]: p["incident"] for p in procs}
+    found = []
+    for pid in list_dir(sys_path("/proc"), 20000):
+        if not pid.isdigit():
+            continue
+        try:
+            comm = (read_text(sys_path("/proc/%s/comm" % pid), 64) or "").strip()
+        except Refused:
+            continue
+        if comm in wanted:
+            found.append("PID %s: %s (%s)" % (pid, comm, wanted[comm]))
+    if found:
+        return result(cid, cat, title, "fail", "A process with a known malware name is running.", why + (
+            " Disconnect from the network, then follow the advice for the matching incident."),
+            clean_block(found), weight=3)
+    return result(cid, cat, title, "pass", "No known malware process names are running.", why, weight=3)
+
+
+# File-change alerts: a baseline of digests for high-value files, kept in the
+# state folder. Symlinks are recorded by their target, never followed.
+
+INTEGRITY_SYSTEM_FILES = ["/etc/passwd", "/etc/group", "/etc/shells", "/etc/environment", "/etc/profile",
+                          "/etc/ld.so.preload", "/etc/hosts", "/etc/ssh/sshd_config", "/etc/sudo.conf",
+                          "/etc/security/faillock.conf"]
+INTEGRITY_SYSTEM_DIRS = [("/etc/pam.d", ""), ("/etc/profile.d", ""), ("/etc/ssh/sshd_config.d", ".conf"),
+                         ("/etc/systemd/system", ".service"), ("/etc/systemd/system", ".timer"),
+                         ("/etc/xdg/autostart", ".desktop")]
+INTEGRITY_HOME_FILES = [(".ssh", "authorized_keys"), (".bashrc",), (".bash_profile",), (".profile",), (".zshrc",),
+                        (".config", "uwsm", "env")]
+INTEGRITY_HOME_DIRS = [((".config", "autostart"), ".desktop"), ((".config", "systemd", "user"), ".service"),
+                       ((".config", "systemd", "user"), ".timer"), ((".config", "uwsm", "env.d"), "")]
+INTEGRITY_MAX = 600
+
+
+def _digest(path):
+    """'link:<target>' for a symlink, 'sha256:<hex>' for a regular file, None if absent or unreadable."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        try:
+            return "link:" + hashlib.sha256(os.readlink(path).encode("utf-8", "replace")).hexdigest()[:32]
+        except OSError:
+            return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    try:
+        data = read_file(path, FILE_MAX)
+    except Refused:
+        return None
+    return None if data is None else "sha256:" + hashlib.sha256(data).hexdigest()[:32]
+
+
+def integrity_snapshot():
+    """{display path: digest} for the watched files, capped."""
+    paths = [(p, sys_path(p)) for p in INTEGRITY_SYSTEM_FILES]
+    for d, suffix in INTEGRITY_SYSTEM_DIRS:
+        paths += [(d + "/" + n, sys_path(d + "/" + n)) for n in list_dir(sys_path(d), 300) if n.endswith(suffix)]
+    paths += [("~/" + "/".join(p), home_path(*p)) for p in INTEGRITY_HOME_FILES]
+    for parts, suffix in INTEGRITY_HOME_DIRS:
+        base = home_path(*parts)
+        paths += [("~/" + "/".join(parts) + "/" + n, base + "/" + n) for n in list_dir(base, 300) if n.endswith(suffix)]
+    snap = {}
+    for shown, real in paths[:INTEGRITY_MAX]:
+        dg = _digest(real)
+        if dg is not None:
+            snap[shown] = dg
+    return snap
+
+
+def _read_json_file(dirfd, name, cap=STATE_FILE_MAX):
+    try:
+        fd = os.open(name, O_READ | os.O_NOFOLLOW, dir_fd=dirfd)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise Refused("%s is not a regular file" % name)
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != os.geteuid() or st.st_nlink != 1:
+            raise Refused("%s is not ours" % name)
+        raw = _read_fd(fd, cap)
+    finally:
+        os.close(fd)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _state_json(name):
+    """Read-only load of a JSON file from the state folder; None when absent or unusable."""
+    try:
+        dirfd = _open_home_dir(list(STATE_DIR))
+    except (OSError, Refused):
+        return None
+    try:
+        return _read_json_file(dirfd, name)
+    except Refused:
+        return None
+    finally:
+        os.close(dirfd)
+
+
+def save_baseline(snap):
+    dirfd = _state_dir()
+    try:
+        _lock(dirfd)
+        body = {"schema": SCHEMA, "at": time.strftime("%Y-%m-%d"), "files": snap}
+        write_atomic(dirfd, BASELINE_NAME, json.dumps(body, separators=(",", ":")).encode())
+    finally:
+        os.close(dirfd)
+
+
+def _last_upgrade_date():
+    try:
+        text = read_tail(sys_path("/var/log/pacman.log"), PACMAN_LOG_TAIL) or ""
+    except Refused:
+        return ""
+    last = ""
+    for line in text.splitlines():
+        if "starting full system upgrade" in line or "] [ALPM] upgraded " in line:
+            m = _PACMAN_TS.match(line)
+            if m:
+                last = m.group(1)
+    return last
+
+
+INTEGRITY_PEEK = {"value": False}
+
+
+@check
+def check_file_changes():
+    cid, cat, title = "file-changes", "detect", "Changes to important files"
+    why = ("Vigil remembers what a set of important files looked like: accounts, login rules (PAM), SSH "
+           "settings and authorized keys, system services, and your startup files. Attackers change these "
+           "to keep access. Updates and your own edits change them too, so read the list and choose Accept "
+           "once you recognise every change.")
+    snap = integrity_snapshot()
+    base = _state_json(BASELINE_NAME)
+    files = base.get("files") if isinstance(base, dict) else None
+    if not isinstance(files, dict) or not files:
+        if INTEGRITY_PEEK["value"]:
+            return result(cid, cat, title, "info", "No baseline yet.", why, weight=2)
+        try:
+            save_baseline(snap)
+        except (OSError, Refused):
+            return result(cid, cat, title, "unknown", "Could not save the baseline.", why, weight=2)
+        return result(cid, cat, title, "pass", "Baseline recorded for %d files. Changes show up from now on." % len(snap),
+                      why, weight=2)
+    since = base.get("at") if isinstance(base.get("at"), str) and _DATE.match(base.get("at")) else "the baseline"
+    old = {k: v for k, v in files.items() if isinstance(k, str) and isinstance(v, str)}
+    changed = sorted(k for k in snap if k in old and old[k] != snap[k])
+    added = sorted(k for k in snap if k not in old)
+    removed = sorted(k for k in old if k not in snap)
+    lines = ["changed: " + k for k in changed] + ["new: " + k for k in added] + ["removed: " + k for k in removed]
+    if not lines:
+        return result(cid, cat, title, "pass", "None of %d watched files changed since %s." % (len(snap), since),
+                      why, weight=2)
+    n = len(lines)
+    summary = "%d file%s changed since %s." % (n, "" if n == 1 else "s", since)
+    upgraded = _last_upgrade_date()
+    if upgraded and since != "the baseline" and upgraded >= since:
+        summary += " A system update ran since then, which explains most changes in /etc."
+    return result(cid, cat, title, "warn", summary, why, clean_block(lines),
+                  fix("helper", "integrity-accept", "Accept these changes"), weight=2)
+
+
+# Read-only scan of other plugins' code: what each can do. Nothing is loaded
+# or run; files are read as text with per-file and total byte budgets.
+
+PLUGIN_CAPABILITIES = [
+    ("network", re.compile(r"\b(curl|wget|urlopen|XMLHttpRequest|http\.client|requests\.(get|post)|aiohttp)\b")),
+    ("root (sudo/pkexec)", re.compile(r"\b(sudo|pkexec)\b")),
+    ("shell commands", re.compile(r"\"(ba)?sh\",\s*\"-l?c\"|\bbar\.run\(|execDetached\(\s*\"|subprocess\.|os\.system")),
+    ("downloads and runs code", PERSISTENCE_PATTERNS[0][0]),
+]
+PLUGIN_CODE_SUFFIXES = (".qml", ".js", ".mjs", ".py", ".sh", ".bash", ".lua")
+
+
+def _plugin_files(root):
+    files, stack, depth = [], [(root, 0)], {}
+    while stack and len(files) < 300:
+        cur, d = stack.pop()
+        for name in list_dir(cur, 400):
+            if name.startswith(".git") or name in ("node_modules", "__pycache__"):
+                continue
+            path = cur + "/" + name
+            try:
+                st = os.lstat(path)
+            except OSError:
+                continue
+            if stat.S_ISDIR(st.st_mode) and d < 4:
+                stack.append((path, d + 1))
+            elif stat.S_ISREG(st.st_mode) and st.st_size <= 512 * 1024:
+                files.append((path, name))
+    return files
+
+
+def plugin_capabilities(root, budget):
+    caps, binary = set(), False
+    for path, name in _plugin_files(root):
+        if budget[0] <= 0 or time.monotonic() > budget[1]:
+            break
+        try:
+            data = read_file(path, 512 * 1024)
+        except Refused:
+            continue
+        if not data:
+            continue
+        budget[0] -= len(data)
+        if data.startswith(b"\x7fELF"):
+            binary = True
+            continue
+        if not (name.endswith(PLUGIN_CODE_SUFFIXES) or data.startswith(b"#!")):
+            continue
+        text = data.decode("utf-8", "replace")
+        for label, rx in PLUGIN_CAPABILITIES:
+            if label not in caps and rx.search(text):
+                caps.add(label)
+    if binary:
+        caps.add("compiled binaries")
+    return [label for label, _ in PLUGIN_CAPABILITIES if label in caps] + (
+        ["compiled binaries"] if binary else [])
 
 
 # --- Privacy ----------------------------------------------------------------
@@ -1664,7 +2143,7 @@ def _read_state(dirfd):
         st = os.fstat(fd)
         if st.st_uid != os.geteuid() or st.st_nlink != 1:
             raise Refused("state file is not ours")
-        raw = _read_fd(fd, SMALL_FILE_MAX)
+        raw = _read_fd(fd, STATE_FILE_MAX)
     finally:
         os.close(fd)
     try:
@@ -1841,6 +2320,7 @@ def score_of(checks):
 def audit(peek=False):
     started = time.monotonic()
     _SYSTEMCTL_MEMO.clear()
+    INTEGRITY_PEEK["value"] = peek
     checks = []
     for fn in CHECKS:
         try:
@@ -2042,7 +2522,60 @@ def fix_empty_trash():
     return "Trash emptied."
 
 
+def fix_credential_perms():
+    changed = 0
+    for parts in CREDENTIAL_FILES:
+        try:
+            dfd = _open_home_dir(list(parts[:-1]))
+        except (FileNotFoundError, Refused):
+            continue
+        try:
+            try:
+                fd = os.open(parts[-1], O_READ | os.O_NOFOLLOW, dir_fd=dfd)
+            except OSError:
+                continue
+            try:
+                st = os.fstat(fd)
+                if stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid() and st.st_mode & 0o077:
+                    os.fchmod(fd, 0o600)
+                    changed += 1
+            finally:
+                os.close(fd)
+        finally:
+            os.close(dfd)
+    return "Made %d credential file%s private." % (changed, "" if changed == 1 else "s")
+
+
+def fix_integrity_accept():
+    snap = integrity_snapshot()
+    save_baseline(snap)
+    return "Recorded %d files as the new normal." % len(snap)
+
+
+def fix_arch_audit_refresh():
+    tool = "/usr/bin/arch-audit"
+    if not is_trusted_executable(sys_path(tool)):
+        raise Refused("arch-audit is not installed")
+    rc, out = run([tool, "--json"], timeout=90, limit=8 * 1024 * 1024)
+    if rc is None:
+        raise Refused("arch-audit did not finish (no network, or it took too long)")
+    pkgs = parse_arch_audit(out)
+    if pkgs is None:
+        raise Refused("arch-audit returned something Vigil could not read")
+    dirfd = _state_dir()
+    try:
+        _lock(dirfd)
+        body = {"schema": SCHEMA, "at": time.strftime("%Y-%m-%d"), "packages": pkgs}
+        write_atomic(dirfd, ARCH_AUDIT_NAME, json.dumps(body, separators=(",", ":")).encode())
+    finally:
+        os.close(dirfd)
+    return "Checked: %d vulnerable package%s." % (len(pkgs), "" if len(pkgs) == 1 else "s")
+
+
 FIXES = {
+    "credential-perms": fix_credential_perms,
+    "integrity-accept": fix_integrity_accept,
+    "arch-audit-refresh": fix_arch_audit_refresh,
     "ssh-perms": fix_ssh_perms,
     "gnupg-perms": fix_gnupg_perms,
     "optout-on": fix_optout_on,

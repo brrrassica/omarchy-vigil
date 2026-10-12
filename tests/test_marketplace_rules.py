@@ -100,7 +100,10 @@ def test_tree_hygiene():
 
 def test_no_shared_tmp_or_shell_in_python():
     src = (REPO / "bin" / "vigil").read_text()
-    for bad in ("shell=True", "os.system", "capture_output", "communicate(", "/tmp/", "urlopen", "import requests"):
+    # Actual calls and imports; the words themselves appear in the patterns
+    # Vigil uses to detect them in other plugins.
+    for bad in ("shell=True", "os.system(", "capture_output", "communicate(", "/tmp/", "urlopen(",
+                "import requests", "import urllib", "import socket", "import http", "from urllib"):
         assert bad not in src, bad
     assert src.startswith("#!/usr/bin/python3 -I -S\n")
 
