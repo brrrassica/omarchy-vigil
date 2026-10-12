@@ -107,7 +107,19 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.9 (this release): easier to read
+## 0.10 (this release): Clean all, Lynis in the panel
+
+- [x] **Clean all** on the Care tab (and `C`): one confirmation listing every
+      cleanup on offer with its size; the no-root ones run at once, the root
+      ones share one terminal. Orphaned packages stay a separate step.
+- [x] Lynis results in the panel instead of a wall of text: hardening index,
+      warnings and suggestions, Lynis's own fix where it gives one, and where
+      to read more. Information only.
+- [x] Lynis findings that a Vigil check covers are left out and named, matched
+      by Lynis test ID (verified against Lynis's `db/tests.db`) and, for
+      kernel settings, per setting.
+
+## 0.9: easier to read
 
 - [x] The Overview leads with a large bold score and a bold one-line verdict,
       with the check time in small dim text underneath.

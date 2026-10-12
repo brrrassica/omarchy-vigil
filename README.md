@@ -26,7 +26,7 @@ root runs in a terminal you can watch.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.9.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.10.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -52,6 +52,7 @@ you ask.
 | `F` | Fix the selected finding (asks first) |
 | `D` | Mark the selected warning as reviewed, or show it again |
 | `U` | Update and check everything now |
+| `C` | On the Care tab: Clean all |
 | `R` | Check again |
 | `Esc` | Cancel a confirmation, or close |
 
@@ -155,7 +156,7 @@ lower it. A warning you mark as reviewed stops counting.
 | System updates | No full update in 14 days (warning) or 30 days (failure) | `omarchy-update` (terminal) |
 | Open network ports | Programs listen on the network with no firewall in front | |
 | Exposed secrets | API keys and tokens in the formats their providers publish (AWS, GitHub, GitLab, Slack, Stripe, Anthropic, OpenAI, Google, private keys) in your shell histories, or credential files such as `~/.aws/credentials`, `~/.netrc` and `~/.git-credentials` readable by other accounts. Shows the file and line, never the secret. | Makes credential files private (no root); revoke leaked keys with their provider |
-| Lynis | Installs Lynis and runs `lynis audit system --quick` for a hardening index and suggestions | |
+| Lynis | Installs Lynis and runs `lynis audit system --quick --quiet`; the panel then lists its hardening index, warnings and suggestions, leaving out what Vigil already checks | |
 
 ### Detect
 
@@ -197,6 +198,25 @@ Thumbnail cache and trash (cleared without root), application caches (size
 only), package cache (`paccache -rk2`), orphaned packages
 (`omarchy-update-orphan-pkgs`, which asks before removing anything) and the
 system journal (`journalctl --vacuum-time=2weeks`).
+
+**Clean all** (or `C` on the Care tab) does every cleanup on offer in one go,
+after one confirmation that lists each item and its size: thumbnails and the
+trash right away, then the package cache and the journal in one terminal, so
+sudo asks once. Orphaned packages are left out on purpose: removing packages
+can take away something you use, so that stays a separate, reviewed step.
+
+### Lynis
+
+Lynis prints a long report. Vigil's Lynis action runs it quietly, then copies
+just the score, warning and suggestion lines (and its kernel-setting details)
+from `/var/log/lynis-report.dat`, which only root can read, to Vigil's state
+folder. The Lynis row under Harden lists them, with Lynis's own fix where its
+report gives one and where to read more (`sudo lynis show details <ID>`,
+`cisofy.com/lynis/controls/<ID>`). Findings that a Vigil check already covers
+(firewall, SSH, kernel and network settings Vigil manages, disk encryption,
+malware scanners, arch-audit, file integrity, USB authorization) are left out
+and named instead, so nothing shows twice. Lynis is written for servers too,
+so its findings are information and never change the score.
 
 ## How actions run
 
@@ -271,6 +291,7 @@ service (ClamAV's servers), rkhunter's data update, and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/osv.json` | the helper, mode 0600 | weekly and on Check now: known-malicious packages found, if any, and which folders were checked |
 | `~/.local/state/omarchy-vigil/aur.json` | the helper, mode 0600 | weekly and on Check now: names of AUR packages that left the AUR or have no maintainer |
 | `~/.local/state/omarchy-vigil/virus-scan.json` | the helper, mode 0600 | weekly and on Scan now: names of infected files found in Downloads, if any |
+| `~/.local/state/omarchy-vigil/lynis.dat` | the Lynis terminal action, mode 0600 | when you run Lynis from Vigil: the score, warning and suggestion lines of its report |
 | `~/.local/state/omarchy-vigil/last-run.json` | the helper, mode 0600 | after each weekly or button update: its date, time and whether every source updated |
 | `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` | the helper | only when you set the opt-out variables |
 | `/etc/sysctl.d/90-omarchy-vigil.conf` | terminal action | only when you apply the kernel settings |

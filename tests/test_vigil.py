@@ -474,6 +474,31 @@ def test_clean_thumbnails_stays_inside(v, tmp_path):
     assert list(thumbs.iterdir()) == []
 
 
+def test_clean_user_clears_thumbnails_and_trash(v):
+    thumbs = Path(v.HOME, ".cache/thumbnails")
+    put(thumbs / "normal" / "a.png", "x")
+    put(Path(v.HOME, ".local/share/Trash/files/old.txt"), "x" * 5000)
+    v.TRUSTED.add(v.sys_path("/usr/bin/gio"))
+    v.COMMANDS[("/usr/bin/gio", "trash", "--empty")] = (0, "")
+    res = v.run_fix("clean-user")
+    assert res["ok"], res
+    assert list(thumbs.iterdir()) == []
+    assert "Trash emptied" in res["message"]
+
+
+def test_clean_user_keeps_going_without_gio(v):
+    put(Path(v.HOME, ".cache/thumbnails/normal/a.png"), "x")
+    put(Path(v.HOME, ".local/share/Trash/files/old.txt"), "x" * 5000)
+    res = v.run_fix("clean-user")
+    assert res["ok"], res
+    assert "Removed 1 thumbnail" in res["message"] and "not emptied" in res["message"]
+
+
+def test_clean_user_skips_an_empty_trash(v):
+    res = v.run_fix("clean-user")              # no gio, no trash: nothing to refuse
+    assert res["ok"] and "trash" not in res["message"].lower(), res
+
+
 def test_size_checks(v):
     assert v.check_thumbnails()["status"] == "pass"
     put(Path(v.HOME, ".cache/thumbnails/normal/a.png"), "x" * 10000)
@@ -1310,3 +1335,109 @@ def test_warnings_cost_less_than_failures(v):
     warn = v.result("a", "harden", "A", "warn", "x", weight=3)
     fail = v.result("b", "harden", "B", "fail", "x", weight=3)
     assert v.score_of([warn]) == 94 and v.score_of([fail]) == 70
+
+
+# --------------------------------------------------------------------------
+# Lynis: the terminal action copies a few report lines; Vigil lists them.
+
+LYNIS_DAT = """hardening_index=64
+report_datetime_end=2026-10-12 10:00:03
+warning[]=NETW-2705|Couldn't find 2 responsive nameservers|-|-|
+suggestion[]=AUTH-9262|Install a PAM module for password strength testing|-|-|
+suggestion[]=AUTH-9262|Install a PAM module for password strength testing|-|-|
+suggestion[]=KRNL-6000|One or more sysctl values differ|net.ipv4.conf.all.send_redirects (exp: 0)|-|
+suggestion[]=not an id|Should be dropped|-|-|
+suggestion[]=BOOT-5122|\x1b[31mcolour\u202e and bidi|-|-|
+hostname=should-not-matter
+"""
+
+
+def lynis_check(v):
+    return v._scanner_check(*[s for s in v.SCANNERS if s[0] == "lynis"][0])
+
+
+def test_parse_lynis(v):
+    d = v.parse_lynis(LYNIS_DAT)
+    assert d["index"] == 64 and d["date"] == "2026-10-12"
+    assert [w["id"] for w in d["warnings"]] == ["NETW-2705"]
+    assert [s["id"] for s in d["suggestions"]] == ["AUTH-9262", "KRNL-6000", "BOOT-5122"]
+    assert d["suggestions"][1]["detail"] == "net.ipv4.conf.all.send_redirects (exp: 0)"
+    assert "\x1b" not in d["suggestions"][2]["text"] and "\u202e" not in d["suggestions"][2]["text"]
+    assert v.parse_lynis("hardening_index=250\nfoo=bar\n") is None
+    assert v.parse_lynis("") is None
+
+
+def test_lynis_check_lists_findings_without_scoring(v):
+    v.TRUSTED.add(v.sys_path("/usr/bin/lynis"))
+    c = lynis_check(v)
+    assert c["status"] == "info" and "Run it once" in c["summary"] and c["fix"]["action"] == "run-lynis"
+    put(Path(v.HOME, ".local/state/omarchy-vigil/lynis.dat"), LYNIS_DAT, 0o600)
+    c = lynis_check(v)
+    assert c["status"] == "info" and c["weight"] == 0
+    assert c["summary"].startswith("Hardening index 64 of 100. 1 warning, 3 suggestions.")
+    assert "\u2022 Couldn't find 2 responsive nameservers (NETW-2705)" in c["detail"]
+    assert c["fix"]["label"] == "Run again"
+
+
+def test_lynis_detail_is_capped_with_a_count(v):
+    lines = "".join("suggestion[]=TEST-%04d|Suggestion number %d|-|-|\n" % (i, i) for i in range(60))
+    shown, covered = v._lynis_fold(v.parse_lynis(lines), None)
+    out = v._lynis_detail(shown, covered).splitlines()
+    assert len(out) == v.LIST_MAX + 1
+    assert out[0].startswith("For any item: sudo lynis show details <ID>")
+    assert out[-1].startswith("\u2026 and 23 more.")       # 3 header lines + 37 shown of 60
+
+
+LYNIS_OVERLAP = """hardening_index=70
+warning[]=FIRE-4590|No firewall found|-|-|
+suggestion[]=SSH-7408|Consider hardening SSH configuration|MaxAuthTries (6 --> 3)|-|
+suggestion[]=AUTH-9262|Install a PAM module for password strength testing|-|Install libpam-passwdqc|
+suggestion[]=KRNL-6000|One or more sysctl values differ from the scan profile and could be tweaked||Change sysctl value or disable test (skip-test=KRNL-6000:<sysctl-key>)|
+details[]=KRNL-6000|sysctl|desc:Disable sending of redirects;field:net.ipv4.conf.all.send_redirects;prefval:0;value:1;|
+details[]=KRNL-6000|sysctl|desc:Log martians;field:net.ipv4.conf.all.log_martians;prefval:1;value:0;|
+details[]=SSH-7408|sshd|field:MaxAuthTries;prefval:3;value:6;|
+"""
+
+
+def test_lynis_leaves_out_what_vigil_checks(v):
+    shown, covered = v._lynis_fold(v.parse_lynis(LYNIS_OVERLAP), {
+        "firewall": "Firewall", "network-hardening": "Network stack"})   # SSH server did not run
+    assert covered == ["Firewall", "Network stack"]
+    assert shown["warnings"] == []
+    ids = [s["id"] for s in shown["suggestions"]]
+    assert ids == ["SSH-7408", "AUTH-9262", "KRNL-6000"]
+    krnl = shown["suggestions"][2]
+    assert "net.ipv4.conf.all.log_martians (Lynis prefers 1, now 0)" in krnl["detail"]
+    assert "send_redirects" not in krnl["detail"] and krnl["solution"] == ""
+    detail = v._lynis_detail(shown, covered)
+    assert "Left out because Vigil already checks them: Firewall, Network stack." in detail
+    assert "   Fix: Install libpam-passwdqc" in detail
+
+
+def test_lynis_sysctl_item_disappears_when_vigil_manages_every_setting(v):
+    text = LYNIS_OVERLAP.replace("net.ipv4.conf.all.log_martians", "net.ipv4.tcp_syncookies")
+    shown, covered = v._lynis_fold(v.parse_lynis(text), {"network-hardening": "Network stack"})
+    assert "KRNL-6000" not in [s["id"] for s in shown["suggestions"]]
+    assert covered == ["Network stack"]
+
+
+def test_audit_folds_lynis_into_vigil_checks(v):
+    v.TRUSTED.add(v.sys_path("/usr/bin/lynis"))
+    put(Path(v.HOME, ".local/state/omarchy-vigil/lynis.dat"), LYNIS_OVERLAP, 0o600)
+    checks = [v.result("firewall", "harden", "Firewall", "warn", "Off."),
+              v.result("ssh-server", "harden", "SSH server", "na", "Not installed."),
+              lynis_check(v)]
+    assert checks[2]["summary"].startswith("Hardening index 70 of 100. 1 warning, 3 suggestions.")
+    v.fold_lynis(checks)
+    assert checks[2]["summary"].startswith("Hardening index 70 of 100. 0 warnings, 3 suggestions.")
+    assert "Left out because Vigil already checks them: Firewall." in checks[2]["detail"]
+
+
+def test_lynis_copy_must_be_ours(v, tmp_path):
+    v.TRUSTED.add(v.sys_path("/usr/bin/lynis"))
+    elsewhere = put(tmp_path / "planted.dat", LYNIS_DAT)
+    state = Path(v.HOME, ".local/state/omarchy-vigil")
+    state.mkdir(parents=True, mode=0o700)
+    os.symlink(elsewhere, state / "lynis.dat")
+    c = lynis_check(v)
+    assert "Run it once" in c["summary"]

@@ -43,7 +43,7 @@ import sys
 import time
 from base64 import b64decode
 
-VERSION = "0.9.0"
+VERSION = "0.10.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1218,7 +1218,9 @@ SCANNERS = [
      "rkhunter looks for known rootkits, changed system programs and suspicious files. Run it after "
      "installing it once with --propupd so it learns what normal looks like.", "run-rkhunter", "install-rkhunter"),
     ("lynis", "lynis", "harden", "Lynis audit",
-     "Lynis runs hundreds of hardening checks and gives a hardening index with concrete suggestions.",
+     "Lynis runs hundreds of hardening checks and gives a hardening index with concrete suggestions. "
+     "It is written for servers as well as desktops, so some suggestions will not apply to a laptop. "
+     "Vigil lists them for reference; they do not change your score.",
      "run-lynis", "install-lynis"),
     ("arch-audit", "arch-audit", "supply", "Known vulnerabilities (arch-audit)",
      "arch-audit checks your installed packages against the Arch security team's tracker and lists the "
@@ -1236,6 +1238,8 @@ def _scanner_check(sid, binary, cat, title, why, run_action, install_action):
     summary = "Installed. Runs on demand in a terminal."
     if sid == "arch-audit":
         return _arch_audit_check(cid, cat, title, why)
+    if sid == "lynis":
+        return _lynis_check(cid, cat, title, why)
     if sid == "clamav":
         newest = 0
         for name in ("daily.cld", "daily.cvd"):
@@ -1258,6 +1262,169 @@ def _scanner_check(sid, binary, cat, title, why, run_action, install_action):
         summary = "Signatures update automatically (last %s)." % (
             "today" if days == 0 else "%d day%s ago" % (days, "" if days == 1 else "s"))
     return result(cid, cat, title, "info", summary, why, fix=fix("terminal", run_action, "Run"), weight=0)
+
+
+# Lynis writes a machine-readable report to /var/log/lynis-report.dat, which
+# only root can read. The terminal action that runs Lynis copies just its
+# score, warning and suggestion lines into the state folder as LYNIS_NAME;
+# Vigil reads that copy. Lynis is general-purpose (servers too), so what it
+# says is shown for reference and never changes the score.
+LYNIS_NAME = "lynis.dat"
+LYNIS_STALE_DAYS = 30
+_LYNIS_ID = re.compile(r"^[A-Z]{3,6}(-[0-9]{4})?$")
+_SYSCTL_KEY = re.compile(r"^[a-z0-9_.-]{1,80}$")
+
+# Lynis tests that ask about something a Vigil check already covers, checked
+# against Lynis's own test list (db/tests.db). When the Vigil check ran here,
+# the Lynis item is folded into it rather than shown twice. KRNL-6000 (sysctl
+# values) is matched per setting, against the settings Vigil itself manages.
+LYNIS_COVERED_BY = {
+    "FIRE-4512": "firewall", "FIRE-4540": "firewall", "FIRE-4590": "firewall",
+    "SSH-7408": "ssh-server", "SSH-7440": "ssh-server",
+    "CRYP-7930": "disk-encryption",
+    "HRDN-7230": "scanner-clamav", "MALW-3280": "scanner-clamav", "MALW-3276": "scanner-rkhunter",
+    "FINT-4350": "file-changes",
+    "PKGS-7320": "scanner-arch-audit", "PKGS-7322": "scanner-arch-audit",
+    "USB-2000": "usb-authorization", "USB-3000": "usb-authorization",
+}
+LYNIS_SYSCTL_TEST = "KRNL-6000"
+
+
+def _lynis_field(parts, i, limit):
+    v = parts[i].strip() if len(parts) > i else ""
+    return "" if v in ("", "-") else clean(v, limit)
+
+
+def parse_lynis(text):
+    """{index, date, warnings, suggestions, sysctl} from Lynis report lines, or None."""
+    out = {"index": None, "date": "", "warnings": [], "suggestions": [], "sysctl": []}
+    seen = set()
+    for line in text.splitlines()[:5000]:
+        key, sep, val = line.partition("=")
+        if not sep:
+            continue
+        if key == "hardening_index":
+            if val.strip().isdigit() and 0 <= int(val.strip()) <= 100:
+                out["index"] = int(val.strip())
+        elif key == "report_datetime_end":
+            if _DATE.match(val[:10]):
+                out["date"] = val[:10]
+        elif key in ("warning[]", "suggestion[]"):
+            parts = val.split("|")
+            tid, text_ = parts[0].strip(), _lynis_field(parts, 1, 160)
+            if not _LYNIS_ID.match(tid) or not text_ or (tid, text_) in seen:
+                continue
+            seen.add((tid, text_))
+            bucket = out["warnings"] if key == "warning[]" else out["suggestions"]
+            if len(bucket) < 200:
+                bucket.append({"id": tid, "text": text_, "detail": _lynis_field(parts, 2, 100),
+                               "solution": _lynis_field(parts, 3, 160)})
+        elif key == "details[]":
+            # details[]=KRNL-6000|sysctl|desc:...;field:<key>;prefval:<v>;value:<v>;|
+            parts = val.split("|")
+            if parts[0].strip() != LYNIS_SYSCTL_TEST or len(parts) < 3 or len(out["sysctl"]) >= 200:
+                continue
+            fields = dict(f.split(":", 1) for f in parts[2].split(";") if ":" in f)
+            name = fields.get("field", "").strip()
+            if _SYSCTL_KEY.match(name):
+                out["sysctl"].append({"key": name, "want": clean(fields.get("prefval", ""), 20),
+                                      "now": clean(fields.get("value", ""), 20)})
+    if out["index"] is None and not out["warnings"] and not out["suggestions"]:
+        return None
+    return out
+
+
+def _plural(n, word):
+    return "%d %s%s" % (n, word, "" if n == 1 else "s")
+
+
+def _lynis_fold(data, vigil):
+    """Split Lynis items into the ones to show and the Vigil checks that already cover the rest.
+
+    vigil maps the id of every Vigil check that ran here to its title; None skips folding."""
+    vigil = vigil or {}
+    vigil_keys = {name: cid for cid, table in (("kernel-hardening", KERNEL_SYSCTLS),
+                                              ("network-hardening", NETWORK_SYSCTLS))
+                  for name, _t, _r, _p in table}
+    covered, shown = [], {"warnings": [], "suggestions": []}
+    for kind in ("warnings", "suggestions"):
+        for it in data[kind]:
+            it = dict(it)
+            owner = LYNIS_COVERED_BY.get(it["id"])
+            if owner in vigil:
+                covered.append(vigil[owner])
+                continue
+            if it["id"] == LYNIS_SYSCTL_TEST and data["sysctl"]:
+                ours = [k for k in data["sysctl"] if vigil_keys.get(k["key"]) in vigil]
+                rest = [k for k in data["sysctl"] if k not in ours]
+                covered += [vigil[vigil_keys[k["key"]]] for k in ours]
+                if not rest:
+                    continue
+                it["detail"] = "Settings Vigil does not manage: " + ", ".join(
+                    "%s (Lynis prefers %s, now %s)" % (k["key"], k["want"] or "?", k["now"] or "?") for k in rest)
+                it["solution"] = ""         # Lynis's own advice here is to edit its scan profile
+            shown[kind].append(it)
+    names = []
+    for n in covered:
+        if n not in names:
+            names.append(n)
+    return shown, names
+
+
+def _lynis_detail(shown, covered):
+    lines = ["For any item: sudo lynis show details <ID> shows what Lynis saw, and "
+             "cisofy.com/lynis/controls/<ID> explains how to fix it."]
+    if covered:
+        lines.append("Left out because Vigil already checks them: %s." % ", ".join(covered))
+    for heading, items in (("Warnings", shown["warnings"]), ("Suggestions", shown["suggestions"])):
+        if not items:
+            continue
+        lines += ["", heading]
+        for it in items:
+            lines.append("\u2022 %s (%s)" % (it["text"], it["id"]))
+            if it["detail"]:
+                lines.append("   " + it["detail"])
+            if it["solution"]:
+                lines.append("   Fix: " + it["solution"])
+    # The report keeps LIST_MAX + 1 lines of detail; the last one says what was left out.
+    out, total = [], 0
+    for i, line in enumerate(lines):
+        if i >= LIST_MAX or total + len(line) + 1 > 3800:
+            out.append("\u2026 and %d more. Run Lynis in a terminal to see the full list."
+                       % len([x for x in lines[i:] if x.startswith("\u2022")]))
+            break
+        out.append(line)
+        total += len(line) + 1
+    return "\n".join(out)
+
+
+def _lynis_check(cid, cat, title, why, vigil=None):
+    data = parse_lynis(_state_text(LYNIS_NAME))
+    if data is None:
+        return result(cid, cat, title, "info", "Installed. Run it once and Vigil lists what it found here.", why,
+                      fix=fix("terminal", "run-lynis", "Run"), weight=0)
+    shown, covered = _lynis_fold(data, vigil)
+    parts = []
+    if data["index"] is not None:
+        parts.append("Hardening index %d of 100." % data["index"])
+    parts.append("%s, %s." % (_plural(len(shown["warnings"]), "warning"),
+                              _plural(len(shown["suggestions"]), "suggestion")))
+    days = _days_since(data["date"]) if data["date"] else None
+    if days is not None:
+        parts.append("Ran %s." % ("today" if days == 0 else "yesterday" if days == 1 else "%d days ago" % days))
+        if days > LYNIS_STALE_DAYS:
+            parts.append("Run it again for a current picture.")
+    return result(cid, cat, title, "info", " ".join(parts), why, _lynis_detail(shown, covered),
+                  fix("terminal", "run-lynis", "Run again"), weight=0)
+
+
+def fold_lynis(checks):
+    """Redo the Lynis row once every other check has run, leaving out what Vigil covers."""
+    vigil = {c["id"]: c["title"] for c in checks if c["status"] in ("pass", "warn", "fail", "info")}
+    for i, c in enumerate(checks):
+        if c["id"] == "scanner-lynis" and c["fix"]["action"] == "run-lynis":
+            spec = [x for x in SCANNERS if x[0] == "lynis"][0]
+            checks[i] = tidy(_lynis_check("scanner-lynis", spec[2], spec[3], spec[4], vigil))
 
 
 SEVERITIES = ["Critical", "High", "Medium", "Low", "Unknown"]
@@ -2100,7 +2267,7 @@ def integrity_snapshot():
     return snap
 
 
-def _read_json_file(dirfd, name, cap=STATE_FILE_MAX):
+def _read_state_bytes(dirfd, name, cap=STATE_FILE_MAX):
     try:
         fd = os.open(name, O_READ | os.O_NOFOLLOW, dir_fd=dirfd)
     except FileNotFoundError:
@@ -2109,16 +2276,37 @@ def _read_json_file(dirfd, name, cap=STATE_FILE_MAX):
         raise Refused("%s is not a regular file" % name)
     try:
         st = os.fstat(fd)
-        if st.st_uid != os.geteuid() or st.st_nlink != 1:
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_nlink != 1:
             raise Refused("%s is not ours" % name)
-        raw = _read_fd(fd, cap)
+        return _read_fd(fd, cap)
     finally:
         os.close(fd)
+
+
+def _read_json_file(dirfd, name, cap=STATE_FILE_MAX):
+    raw = _read_state_bytes(dirfd, name, cap)
+    if raw is None:
+        return None
     try:
         data = json.loads(raw.decode("utf-8"))
     except ValueError:
         return None
     return data if isinstance(data, dict) else None
+
+
+def _state_text(name, cap=STATE_FILE_MAX):
+    """Read-only load of a text file from the state folder; "" when absent or unusable."""
+    try:
+        dirfd = _open_home_dir(list(STATE_DIR))
+    except (OSError, Refused):
+        return ""
+    try:
+        raw = _read_state_bytes(dirfd, name, cap)
+    except Refused:
+        return ""
+    finally:
+        os.close(dirfd)
+    return raw.decode("utf-8", "replace") if raw else ""
 
 
 def _state_json(name):
@@ -2777,6 +2965,14 @@ def score_of(checks):
     return max(0, min(100, score))
 
 
+def tidy(c):
+    for k in ("title", "summary", "why"):
+        c[k] = clean(c[k], 400 if k == "why" else STR_MAX)
+    c["detail"] = clean(c["detail"], 3000) if "\n" not in c["detail"] else "\n".join(
+        clean(x, STR_MAX) for x in c["detail"].splitlines()[:LIST_MAX + 1])
+    return c
+
+
 def audit(peek=False):
     started = time.monotonic()
     _SYSTEMCTL_MEMO.clear()
@@ -2788,11 +2984,11 @@ def audit(peek=False):
         except Exception as e:  # one broken check must not hide the others
             c = result(fn.__name__.replace("check_", "").replace("_", "-"), "harden", fn.__name__,
                        "unknown", "This check failed to run (%s)." % type(e).__name__)
-        for k in ("title", "summary", "why"):
-            c[k] = clean(c[k], 400 if k == "why" else STR_MAX)
-        c["detail"] = clean(c["detail"], 3000) if "\n" not in c["detail"] else "\n".join(
-            clean(x, STR_MAX) for x in c["detail"].splitlines()[:LIST_MAX + 1])
-        checks.append(c)
+        checks.append(tidy(c))
+    try:
+        fold_lynis(checks)
+    except Exception:  # the plain Lynis row stays
+        pass
     state = load_state()
     dismissed = state_dismissed(state)
     for c in checks:
@@ -2986,6 +3182,18 @@ def fix_empty_trash():
     return "Trash emptied."
 
 
+def fix_clean_user():
+    """Clean all, the part that needs no root: thumbnails, then the trash."""
+    msgs = [fix_clean_thumbnails()]
+    size, _ = _dir_size(home_path(".local", "share", "Trash"), time.monotonic() + WALK_MAX_SECONDS)
+    if size:
+        try:
+            msgs.append(fix_empty_trash())
+        except Refused as e:
+            msgs.append("The trash was not emptied: %s." % e)
+    return " ".join(msgs)
+
+
 def fix_credential_perms():
     changed = 0
     for parts in CREDENTIAL_FILES:
@@ -3033,6 +3241,7 @@ FIXES = {
     "optout-off": fix_optout_off,
     "clean-thumbnails": fix_clean_thumbnails,
     "empty-trash": fix_empty_trash,
+    "clean-user": fix_clean_user,
 }
 
 

@@ -53,7 +53,7 @@ function inList(v, list) {
 
 var HELPER_ACTIONS = ["ssh-perms", "gnupg-perms", "optout-on", "optout-off", "clean-thumbnails", "empty-trash",
                       "credential-perms", "integrity-accept", "arch-audit-refresh", "osv-refresh", "aur-refresh",
-                      "virus-scan-now"]
+                      "virus-scan-now", "clean-user"]
 
 // What the confirmation card says before a helper action runs.
 var HELPER_INFO = {
@@ -69,6 +69,8 @@ var HELPER_INFO = {
                         what: ["Deletes everything in ~/.cache/thumbnails. Previews are recreated when needed."] },
   "empty-trash": { title: "Empty the trash",
                    what: ["Permanently deletes the files in the trash. This cannot be undone."] },
+  "clean-user": { title: "Clear thumbnails and empty the trash",
+                  what: ["The no-root half of Clean all."] },
   "credential-perms": { title: "Make credential files private",
                         what: ["Sets files such as ~/.aws/credentials, ~/.netrc and ~/.git-credentials to 600,",
                                "so only you can read them. Their contents are not read or changed."] },
@@ -100,7 +102,8 @@ function helperInfo(id) {
 }
 
 // Title and lines for the confirmation card of any runnable action.
-function confirmation(kind, id) {
+function confirmation(kind, id, report) {
+  if (kind === "clean-all") return cleanAllConfirmation(report)
   var a = kind === "helper" ? helperInfo(id) : (kind === "terminal" ? terminalAction(id) : null)
   if (!a) return null
   var lines = a.what.slice(0)
@@ -334,8 +337,17 @@ var TERMINAL_ACTIONS = {
   },
   "run-lynis": {
     title: "Run a Lynis audit",
-    what: ["Runs: sudo lynis audit system --quick", "Ends with a hardening index and a list of suggestions."],
-    run: "sudo /usr/bin/lynis audit system --quick"
+    what: ["Runs: sudo lynis audit system --quick --quiet, which takes a minute or two.",
+           "Then copies the score, warning and suggestion lines (and its kernel-setting details) of its report",
+           "(/var/log/lynis-report.dat, readable only by root) to ~/.local/state/omarchy-vigil/lynis.dat,",
+           "so Vigil can list them in the panel instead of a wall of text here."],
+    run: "umask 077; echo 'Lynis is checking hundreds of settings. This takes a minute or two.'; "
+      + "sudo /usr/bin/lynis audit system --quick --quiet --no-colors >/dev/null; "
+      + "/usr/bin/mkdir -p \"$HOME/.local/state/omarchy-vigil\"; "
+      + "sudo /usr/bin/grep -E '^((hardening_index|report_datetime_end|warning\\[\\]|suggestion\\[\\])=|details\\[\\]=KRNL-6000[|])' "
+      + "/var/log/lynis-report.dat > \"$HOME/.local/state/omarchy-vigil/lynis.dat.new\"; "
+      + "/usr/bin/mv -f \"$HOME/.local/state/omarchy-vigil/lynis.dat.new\" \"$HOME/.local/state/omarchy-vigil/lynis.dat\"; "
+      + "echo 'Done. Open Vigil to see what Lynis found, under Harden.'"
   },
   "install-arch-audit": {
     title: "Install arch-audit",
@@ -357,6 +369,14 @@ var TERMINAL_ACTIONS = {
     title: "Review orphaned packages",
     what: ["Runs the Omarchy command omarchy-update-orphan-pkgs", "It lists them and asks before removing anything."],
     tool: "omarchy-update-orphan-pkgs", args: ""
+  },
+  "clean-system": {
+    title: "Trim the package cache and system logs",
+    what: ["Runs: sudo paccache -rk2, then sudo journalctl --vacuum-time=2weeks",
+           "Keeps the two newest versions of each package, for rollback, and two weeks of logs."],
+    run: "if [ -x /usr/bin/paccache ]; then sudo /usr/bin/paccache -rk2; "
+      + "else echo 'paccache is not installed (pacman-contrib), so the package cache was left as is.'; fi; "
+      + "sudo /usr/bin/journalctl --vacuum-time=2weeks"
   },
   "clean-journal": {
     title: "Trim system logs",
@@ -453,6 +473,43 @@ function canRun(fixObj, tools, apps) {
   if (fixObj.kind === "helper") return isHelperAction(fixObj.action)
   if (fixObj.kind === "terminal") return launcherPath(tools) !== "" && terminalScript(fixObj.action, tools) !== ""
   return false
+}
+
+// ---------------------------------------------------------------------------
+// Clean all (Care tab). Runs the cleanups the Care checks currently offer, in
+// at most two steps: the no-root ones through the helper (`fix clean-user`),
+// the root ones in one terminal (`clean-system`), so sudo asks once.
+// Orphaned packages are left out on purpose: removing packages can take away
+// something you use, so that stays a separate, reviewed step.
+
+var CLEAN_ALL = { "clean-thumbnails": "user", "empty-trash": "user",
+                  "clean-pacman-cache": "system", "clean-journal": "system" }
+
+function cleanAllPlan(report) {
+  var plan = { user: false, system: false, items: [] }
+  if (!report || !report.checks) return plan
+  var systemOk = launcherPath(report.tools) !== "" && terminalScript("clean-system", report.tools) !== ""
+  for (var i = 0; i < report.checks.length; i++) {
+    var c = report.checks[i]
+    if (c.category !== "care" || !c.fix || c.fix.kind === "none") continue
+    if (!Object.prototype.hasOwnProperty.call(CLEAN_ALL, c.fix.action)) continue
+    var side = CLEAN_ALL[c.fix.action]
+    if (side === "system" && !systemOk) continue
+    if (side === "user") plan.user = true
+    else plan.system = true
+    plan.items.push(c.title + ": " + c.summary.replace(/\.$/, ""))
+  }
+  return plan
+}
+
+function cleanAllConfirmation(report) {
+  var plan = cleanAllPlan(report)
+  if (plan.items.length === 0) return null
+  var lines = plan.items.slice(0)
+  lines.push("Thumbnails and the trash are cleared right away. The trash cannot be restored.")
+  if (plan.system) lines.push("Then a terminal opens for the package cache and logs; sudo asks for your password once.")
+  lines.push("Orphaned packages are left out: removing packages deserves a look, so use Review and remove.")
+  return { title: "Clean all", lines: lines }
 }
 
 // ---------------------------------------------------------------------------
@@ -767,7 +824,7 @@ if (typeof module !== "undefined") {
     terminalAction: terminalAction, launcherPath: launcherPath, canRun: canRun, checksFor: checksFor,
     topFindings: topFindings, countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
     tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
-    categoryLabel: categoryLabel, tabIntro: tabIntro, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
+    categoryLabel: categoryLabel, tabIntro: tabIntro, cleanAllPlan: cleanAllPlan, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
     shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
     relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,

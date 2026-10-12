@@ -332,3 +332,59 @@ test("sources and last run are validated and worded plainly", () => {
   assert.equal(M.sourceLine({ id: "virus-scan", state: "ok", date: "2026-10-12" }, now), "ran today")
   assert.equal(M.sourceLine({ id: "virus-scan", state: "never", date: "" }, now), "not run yet")
 })
+
+// ---------------------------------------------------------------------------
+// Clean all (Care tab)
+
+function careReport(extra = {}) {
+  const care = (id, title, summary, kind, action) => check({
+    id, category: "care", title, status: "info", summary, weight: 0,
+    fix: kind ? { kind, action, label: "x" } : { kind: "none", action: "", label: "" }
+  })
+  return parse(report(Object.assign({
+    checks: [
+      care("thumbnails", "Thumbnail cache", "12.0 MB.", "helper", "clean-thumbnails"),
+      care("trash", "Trash", "Empty.", null),
+      care("pacman-cache", "Package cache", "3.1 GB.", "terminal", "clean-pacman-cache"),
+      care("orphans", "Orphaned packages", "2 orphaned packages.", "terminal", "clean-orphans"),
+      care("journal", "System logs", "Logs take up 400M.", "terminal", "clean-journal"),
+      check()
+    ]
+  }, extra)))
+}
+
+test("clean all covers the offered cleanups and never orphans", () => {
+  const plan = M.cleanAllPlan(careReport())
+  assert.equal(plan.user, true)
+  assert.equal(plan.system, true)
+  assert.deepEqual(plan.items, ["Thumbnail cache: 12.0 MB", "Package cache: 3.1 GB", "System logs: Logs take up 400M"])
+  const card = M.confirmation("clean-all", "care", careReport())
+  assert.equal(card.title, "Clean all")
+  assert.ok(card.lines.some(l => l.startsWith("Orphaned packages are left out")))
+  assert.ok(card.lines.some(l => l.includes("sudo asks for your password once")))
+})
+
+test("clean all without a terminal launcher keeps only the no-root part", () => {
+  const plan = M.cleanAllPlan(careReport({ tools: {} }))
+  assert.equal(plan.user, true)
+  assert.equal(plan.system, false)
+  assert.deepEqual(plan.items, ["Thumbnail cache: 12.0 MB"])
+  assert.ok(!M.confirmation("clean-all", "care", careReport({ tools: {} })).lines.some(l => l.includes("terminal opens")))
+})
+
+test("clean all has nothing to offer on a tidy system or without a report", () => {
+  assert.equal(M.cleanAllPlan(null).items.length, 0)
+  assert.equal(M.confirmation("clean-all", "care", null), null)
+  assert.equal(M.cleanAllPlan(parse(report())).items.length, 0)
+})
+
+test("clean all and the Lynis copy are fixed scripts with absolute paths", () => {
+  const sys = M.terminalScript("clean-system", TOOLS)
+  assert.match(sys, /sudo \/usr\/bin\/paccache -rk2/)
+  assert.match(sys, /sudo \/usr\/bin\/journalctl --vacuum-time=2weeks/)
+  const lynis = M.terminalScript("run-lynis", TOOLS)
+  assert.match(lynis, /umask 077;/)
+  assert.match(lynis, /sudo \/usr\/bin\/lynis audit system --quick --quiet/)
+  assert.match(lynis, /sudo \/usr\/bin\/grep -E .*\/var\/log\/lynis-report\.dat > "\$HOME\/\.local\/state\/omarchy-vigil\/lynis\.dat\.new"/)
+  assert.ok(M.isHelperAction("clean-user"))
+})

@@ -68,7 +68,8 @@ Panel {
   property string expandedId: ""
   property string pendingKind: ""
   property string pendingAction: ""
-  readonly property var pending: pendingAction === "" ? null : Model.confirmation(pendingKind, pendingAction)
+  readonly property var pending: pendingAction === "" ? null : Model.confirmation(pendingKind, pendingAction, report)
+  readonly property var cleanPlan: Model.cleanAllPlan(report)
 
   readonly property var visibleChecks: tab === "overview"
     ? Model.topFindings(report, 6)
@@ -150,6 +151,13 @@ Panel {
     pendingAction = check.fix.action
   }
 
+  // Clean all asks once, on the same card as every other action.
+  function requestCleanAll() {
+    if (!report || busy || cleanPlan.items.length === 0) return
+    pendingKind = "clean-all"
+    pendingAction = "care"
+  }
+
   function cancelPending() {
     pendingKind = ""
     pendingAction = ""
@@ -160,6 +168,17 @@ Panel {
     var action = pendingAction
     cancelPending()
     if (!report) return
+    if (kind === "clean-all") {
+      var plan = Model.cleanAllPlan(report)
+      if (plan.system) {
+        var cleanLauncher = Model.launcherPath(report.tools)
+        var cleanScript = Model.terminalScript("clean-system", report.tools)
+        if (cleanLauncher !== "" && cleanScript !== "") Quickshell.execDetached([cleanLauncher, cleanScript])
+      }
+      if (plan.user) runHelper(["fix", "clean-user"])
+      else if (plan.system) setStatus("Opened in a terminal. Vigil checks again when you reopen this panel.", false)
+      return
+    }
     if (kind === "helper") {
       if (!Model.isHelperAction(action)) return
       runHelper(["fix", action])
@@ -440,6 +459,7 @@ Panel {
         if (t === "r" || t === "R") root.runAudit()
         else if (t === "f" || t === "F") root.requestFix(root.selectedCheck())
         else if (t === "u" || t === "U") root.refreshFeeds(true)
+        else if ((t === "c" || t === "C") && root.tab === "care") root.requestCleanAll()
         else if (t === "d" || t === "D") {
           var sel = root.selectedCheck()
           if (sel) root.setReviewed(sel, !sel.dismissed)
@@ -726,6 +746,21 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
+            }
+            Item {
+              visible: root.tab === "care" && root.cleanPlan.items.length > 0
+              width: parent.width
+              implicitHeight: cleanAllButton.implicitHeight + Style.space(8)
+              Button {
+                id: cleanAllButton
+                anchors.bottom: parent.bottom
+                text: "Clean all"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                bordered: true
+                enabled: !root.busy && root.pending === null
+                onClicked: root.requestCleanAll()
+              }
             }
           }
 
