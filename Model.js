@@ -217,7 +217,7 @@ function undoDropIn(name, path, afterText, after) {
 // what they printed. Only tools that ask you questions as they go (Omarchy's
 // updater and setup wizards, the orphan review, choosing an SSH passphrase)
 // keep a terminal.
-var TERMINAL_ONLY = ["update", "fido2", "undo-fido2", "fingerprint", "undo-fingerprint", "sudo-passwordless-off",
+var TERMINAL_ONLY = ["update", "update-firmware", "fido2", "undo-fido2", "fingerprint", "undo-fingerprint", "sudo-passwordless-off",
                      "docker-group-off", "clean-orphans", "ssh-passphrase"]
 var USER_MODE = ["allow-idle", "restart", "run-arch-audit", "show-ld-preload", "show-plugins", "screen-lock-default",
                  "hand-over-schedules", "undo-schedules"]
@@ -442,6 +442,13 @@ var TERMINAL_ACTIONS = {
            "Technical: runs omarchy-remove-security-fingerprint"],
     tool: "omarchy-remove-security-fingerprint", args: ""
   },
+  "update-firmware": {
+    title: "Update firmware",
+    what: ["Installs the firmware updates fwupd found for this computer, from LVFS where hardware makers publish them.",
+           "Keep the laptop plugged in. Some updates finish during a restart; Omarchy tells you when.",
+           "Technical: runs omarchy-update-firmware (fwupdmgr refresh, then fwupdmgr update)"],
+    tool: "omarchy-update-firmware", args: ""
+  },
   "update": {
     title: "Update the system",
     what: ["Installs every waiting update, including security fixes. Restart afterwards if Vigil asks you to.",
@@ -508,18 +515,18 @@ var TERMINAL_ACTIONS = {
     title: "Install the missing helpers",
     what: ["Installs the tools Vigil works with that are missing: ClamAV (virus scanner) with its service",
            "that keeps virus signatures up to date, arch-audit (known security holes), osv-scanner",
-           "(malicious packages), ClamUI (virus scans and quarantine) and Bumblebee by Perplexity",
+           "(malicious packages), fwupd (firmware updates), ClamUI (virus scans and quarantine) and Bumblebee by Perplexity",
            "(known-compromised packages). Ones you already have are left alone.",
            "Bumblebee comes from Perplexity on GitHub and is installed only if it matches the checksum",
            "Perplexity publishes with it. The rest come from the Arch mirrors, Flathub and ClamAV.",
-           "Technical: pacman -S --needed clamav arch-audit osv-scanner flatpak, enable clamav-freshclam, bumblebee v" + BUMBLEBEE_VERSION + " to /usr/local/bin, flatpak install ClamUI"],
+           "Technical: pacman -S --needed clamav arch-audit osv-scanner fwupd flatpak, enable clamav-freshclam, bumblebee v" + BUMBLEBEE_VERSION + " to /usr/local/bin, flatpak install ClamUI"],
     // What the progress bar says at each "VIGIL-STEP n" line the script prints.
-    stages: ["Installing ClamAV, arch-audit and osv-scanner from the Arch mirrors",
+    stages: ["Installing ClamAV, arch-audit, osv-scanner and fwupd from the Arch mirrors",
              "Turning on automatic virus signature updates",
              "Downloading Bumblebee from Perplexity and checking it",
              "Installing ClamUI from Flathub (the longest step)"],
     run: "echo VIGIL-STEP 1\n"
-      + "/usr/bin/pacman -S --needed --noconfirm clamav arch-audit osv-scanner flatpak\necho 'Packages installed.'\n"
+      + "/usr/bin/pacman -S --needed --noconfirm clamav arch-audit osv-scanner fwupd flatpak\necho 'Packages installed.'\n"
       + "echo VIGIL-STEP 2\n"
       + "/usr/bin/systemctl enable --now clamav-freshclam.service\n"
       + "echo VIGIL-STEP 3\n"
@@ -724,6 +731,7 @@ var TERMINAL_ACTIONS = {
 // nothing from the report ever becomes a URL.
 var DOCS = {
   "arch-ssh-keys": "https://wiki.archlinux.org/title/SSH_keys",
+  "arch-fwupd": "https://wiki.archlinux.org/title/Fwupd",
   "arch-gnupg": "https://wiki.archlinux.org/title/GnuPG",
   "arch-dm-crypt": "https://wiki.archlinux.org/title/Dm-crypt",
   "arch-faillock": "https://wiki.archlinux.org/title/Security#Lock_out_user_after_three_failed_login_attempts",
@@ -908,7 +916,8 @@ function validCheck(c) {
   }
 }
 
-var SOURCE_IDS = ["signatures", "virus-scan", "arch-audit", "osv", "aur", "password-check", "bumblebee",
+var SOURCE_IDS = ["signatures", "virus-scan", "arch-audit", "osv", "aur", "password-check", "bumblebee", "firmware",
+                  "pending-updates",
                   "bumblebee-list"]
 var SOURCE_STATES = ["ok", "stale", "never", "failed"]
 var DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -967,7 +976,7 @@ function lastRunLine(run, now) {
     + (run.ok ? ". Every source refreshed." : ". Some sources did not refresh; Vigil tries again tomorrow.")
 }
 
-var SCAN_SOURCES = ["virus-scan", "bumblebee", "password-check"]
+var SCAN_SOURCES = ["virus-scan", "bumblebee", "firmware", "password-check"]
 
 // The Overview's LAST RUN list: every scan (with the settings checks first),
 // then every source update, each with when it last ran or updated.
@@ -1107,8 +1116,8 @@ function actionOutputText(output) {
 }
 
 // What the red Install button lists, by id from the report's "missing".
-var HELPER_NAMES = { "clamav": "ClamAV", "arch-audit": "arch-audit", "osv-scanner": "osv-scanner", "clamui": "ClamUI",
-                     "bumblebee": "Bumblebee" }
+var HELPER_NAMES = { "clamav": "ClamAV", "arch-audit": "arch-audit", "osv-scanner": "osv-scanner", "fwupd": "fwupd",
+                     "clamui": "ClamUI", "bumblebee": "Bumblebee" }
 
 function missingLabel(report) {
   if (!report || !report.missing || report.missing.length === 0) return ""
@@ -1128,13 +1137,14 @@ function updateConfirmation(report) {
   var n = 1
   if (has("signatures")) lines.push((n++) + ". ClamAV virus signatures. Omarchy asks for your password for this one step,"
     + " because ClamAV keeps them in a system folder.")
+  if (has("pending-updates")) lines.push((n++) + ". The list of waiting system and Omarchy updates (nothing is installed).")
   if (has("arch-audit")) lines.push((n++) + ". The Arch security team list of known holes in packages.")
   if (has("osv")) lines.push((n++) + ". The OSV.dev list of malicious npm and Bun packages.")
   if (has("aur")) lines.push((n++) + ". The status of your AUR packages.")
   if (has("bumblebee-list")) lines.push((n++) + ". Perplexity list of known-compromised packages, for Bumblebee.")
   if (n === 1) lines = ["Nothing to update yet. Install ClamAV, arch-audit or osv-scanner (Detect and Supply tabs) to add them."]
   lines.push("No scan runs, and nothing on your computer changes. The panel shows the progress.")
-  lines.push("Technical: wake clamav-freshclam (pkexec), arch-audit --upgradable, osv-scanner, an AUR lookup and Perplexity threat_intel, both with curl")
+  lines.push("Technical: wake clamav-freshclam (pkexec), checkupdates, arch-audit --upgradable, osv-scanner, an AUR lookup and Perplexity threat_intel, both with curl")
   return { title: "Update sources", lines: lines }
 }
 
@@ -1145,10 +1155,12 @@ function fullScanConfirmation(report) {
   return { title: "Full scan", lines: [
     "Runs every check and scan Vigil has, in this order:",
     "1. Checks that every account has a password. Omarchy asks for your password for this one step.",
-    "2. Updates the lists of known security holes, malicious packages and AUR status.",
-    "3. Scans your home folder for viruses, if ClamAV is installed. This can take a while.",
-    "4. Has Bumblebee rescan your packages, if it is installed.",
-    "5. Checks every setting in every tab again.",
+    "2. Checks for system and Omarchy updates, and updates the lists of known security holes,",
+    "   malicious packages and AUR status.",
+    "3. Has Bumblebee check your packages, if it is installed.",
+    "4. Checks for firmware updates, if fwupd is installed.",
+    "5. Scans your home folder for viruses, if ClamAV is installed. This can take a while.",
+    "6. Checks every setting in every tab again.",
     "The panel shows the progress, and you get a notification when it is done."] }
 }
 
@@ -1230,7 +1242,7 @@ function parseReport(text) {
   var nextFullScan = optionalDate(d.nextFullScan)
   var missing = []
   if (d.missing !== undefined) {
-    if (!Array.isArray(d.missing) || d.missing.length > 5) return null
+    if (!Array.isArray(d.missing) || d.missing.length > 6) return null
     for (var mi = 0; mi < d.missing.length; mi++) {
       if (!Object.prototype.hasOwnProperty.call(HELPER_NAMES, d.missing[mi]) || missing.indexOf(d.missing[mi]) !== -1) return null
       missing.push(d.missing[mi])

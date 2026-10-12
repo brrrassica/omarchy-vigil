@@ -209,6 +209,17 @@ accepted) cannot be signalled; the panel then says so.
 The weekly refresh (and **Update sources** or **Full scan**) is the only network use Vigil starts
 by itself, and only once the relevant tool is installed:
 
+- `checkupdates --nocolor` (pacman-contrib, which Omarchy ships) syncs a
+  private copy of the package databases into `/tmp/checkup-db-<uid>` as
+  you and lists waiting updates; only `name old -> new` lines matching a
+  strict pattern are kept. It installs nothing.
+- In the Full scan, `fwupdmgr refresh --no-unreported-check` (fwupd's
+  polkit policy lets a logged-in user refresh firmware metadata without a
+  password) and `fwupdmgr get-updates --json --no-unreported-check
+  --no-metadata-check`, as you, with stdin closed so nothing can prompt.
+  Only device names, versions and whether a release lists CVEs or a high
+  urgency are kept. Installing firmware is Omarchy's
+  `omarchy-update-firmware`, in a terminal, when you press the button.
 - `arch-audit --json --upgradable` and `osv-scanner --format json
   --no-resolve --recursive -- <folders>` are root-owned system binaries, run
   with the helper's usual absolute path, empty environment, deadline and

@@ -13,6 +13,7 @@ const M = require(path.join(here, "..", "Model.js"))
 const TOOLS = {
   "omarchy-launch-floating-terminal-with-presentation": "/usr/bin",
   "omarchy-setup-security-fido2": "/usr/bin",
+  "omarchy-update-firmware": "/usr/bin",
   "omarchy-remove-security-fido2": "/usr/bin",
   "omarchy-setup-security-fingerprint": "/usr/bin",
   "omarchy-remove-security-fingerprint": "/usr/bin",
@@ -546,7 +547,7 @@ test("missing helpers: a red Install button that names them, and one plan for al
   assert.equal(card.lines[0], "Missing now: ClamAV, ClamUI.")
   const plan = M.actionPlan("install-helpers", TOOLS, "/home/marc")
   assert.equal(plan.length, 2)
-  assert.match(plan[0].argv[5], /pacman -S --needed --noconfirm clamav arch-audit osv-scanner flatpak/)
+  assert.match(plan[0].argv[5], /pacman -S --needed --noconfirm clamav arch-audit osv-scanner fwupd flatpak/)
   assert.ok(!plan[1].asRoot && plan[1].argv[2].includes("flatpak install --user --noninteractive --or-update"))
   assert.equal(M.missingLabel(parse(report({ missing: ["bumblebee"] }))), "MISSING Bumblebee. INSTALL")
 })
@@ -578,7 +579,7 @@ test("an action in the panel shows how far it got; the words come from Vigil, no
   // Every stage is announced, in order, and a failed pacman stops the script.
   const all = steps.map(s => s.argv[s.argv.length - 1]).join("\n")
   assert.deepEqual([...all.matchAll(/^echo VIGIL-STEP ([0-9])$/gm)].map(m => Number(m[1])), [0, 1, 2, 3, 4])
-  assert.match(all, /^\/usr\/bin\/pacman -S --needed --noconfirm clamav arch-audit osv-scanner flatpak$/m)
+  assert.match(all, /^\/usr\/bin\/pacman -S --needed --noconfirm clamav arch-audit osv-scanner fwupd flatpak$/m)
 })
 
 test("a scan started elsewhere is followed, and anything odd is refused", () => {

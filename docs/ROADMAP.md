@@ -111,7 +111,15 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.19 (this release): false positives
+## 0.20 (this release): updates and firmware
+
+- [x] System updates says when a newer Omarchy is out (checkupdates, in
+      Update sources and the Full scan) and offers Omarchy's updater.
+- [x] Firmware updates: the Full scan asks fwupd (LVFS); a firmware
+      security fix is a warning, with Omarchy's `omarchy-update-firmware`.
+      fwupd joins the red Install button.
+
+## 0.19: false positives
 
 - [x] **False positive** next to each virus detection: asks first, then
       stops counting that exact file (by SHA-256) until it changes.

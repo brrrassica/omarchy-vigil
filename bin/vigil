@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta
 
-VERSION = "0.19.0"
+VERSION = "0.20.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1122,6 +1122,20 @@ def has_fingerprint_reader():
 _PACMAN_TS = re.compile(r"^\[(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})")
 
 
+def pending_updates(last_update):
+    """(count, omarchy) from the last update check, if it ran after the last
+    full update (an older check is out of date by then), else None."""
+    cache = feed_cache("pending-updates") if feed_available("pending-updates") else None
+    if not cache or not isinstance(cache.get("count"), int) or isinstance(cache.get("count"), bool):
+        return None
+    checked = cache["at"] + " " + (cache.get("time") if isinstance(cache.get("time"), str) else "00:00")
+    if last_update and checked <= last_update:
+        return None
+    om = cache.get("omarchy")
+    om = om if isinstance(om, dict) and om.get("name") in OMARCHY_PACKAGES else None
+    return max(0, min(cache["count"], 100000)), om
+
+
 @check
 def check_updates():
     cid, cat, title = "updates", "harden", "System updates"
@@ -1133,12 +1147,12 @@ def check_updates():
         text = None
     if not text:
         return result(cid, cat, title, "unknown", "Could not read the package log.", why, weight=2)
-    last = None
+    last, last_stamp = None, ""
     for line in text.splitlines():
         if "starting full system upgrade" in line or "pacman -Syu" in line:
             m = _PACMAN_TS.match(line)
             if m:
-                last = m.group(1)
+                last, last_stamp = m.group(1), m.group(1) + " " + m.group(2)
     if not last:
         return result(cid, cat, title, "warn", "No full system update found in the recent package log.", why,
                       fix=fix("terminal", "update", "Update now"), weight=2)
@@ -1148,6 +1162,19 @@ def check_updates():
         return result(cid, cat, title, "unknown", "Could not read the date of the last update.", why, weight=2)
     days = max(0, int((time.time() - then) // 86400))
     summary = "Last full update: %s (%d day%s ago)." % (last, days, "" if days == 1 else "s")
+    waiting = pending_updates(last_stamp)
+    if waiting:
+        count, omarchy = waiting
+        if omarchy:
+            others = count - 1
+            return result(cid, cat, title, "warn", "Omarchy %s is out; you have %s.%s" % (
+                clean(omarchy.get("to"), 40), clean(omarchy.get("from"), 40),
+                " %d other update%s waiting too." % (others, "" if others == 1 else "s") if others else ""),
+                why, fix=fix("terminal", "update", "Update now"), weight=2,
+                howto="Press Update now: Omarchy's own updater installs Omarchy and every other waiting "
+                      "update. Omarchy releases often carry security fixes.")
+        if count:
+            summary += " %d update%s waiting." % (count, "" if count == 1 else "s")
     if days > 30:
         return result(cid, cat, title, "fail", summary, why, fix=fix("terminal", "update", "Update now"), weight=2)
     if days > 14:
@@ -1461,6 +1488,8 @@ def missing_helpers():
         out.append("arch-audit")
     if not is_trusted_executable(sys_path("/usr/bin/osv-scanner")):
         out.append("osv-scanner")
+    if not is_trusted_executable(sys_path(FWUPDMGR)):
+        out.append("fwupd")
     if not clamui_install():
         out.append("clamui")
     if not bumblebee_ok():
@@ -1646,10 +1675,11 @@ for _spec in SCANNERS:
 
 FEED_FILES = {"arch-audit": "arch-audit.json", "osv": "osv.json", "aur": "aur.json", "virus-scan": "virus-scan.json",
               "full-scan": "full-scan.json", "signatures": "signatures.json",
-              "bumblebee-list": "bumblebee-list.json", "bumblebee": "bumblebee.json"}
+              "bumblebee-list": "bumblebee-list.json", "bumblebee": "bumblebee.json",
+              "pending-updates": "pending-updates.json", "firmware": "firmware.json"}
 # Two weekly timers: the sources (Update sources), and the automatic part of
 # a Full scan (the virus scan of the home folder and a Bumblebee rescan).
-SOURCE_FEEDS = ("arch-audit", "osv", "aur", "bumblebee-list")
+SOURCE_FEEDS = ("pending-updates", "arch-audit", "osv", "aur", "bumblebee-list")
 FEED_DAYS = 7
 FEED_RETRY_DAYS = 1
 
@@ -1687,6 +1717,10 @@ def feed_available(name):
         return is_trusted_executable(sys_path("/usr/bin/curl")) and is_trusted_executable(sys_path("/usr/bin/pacman"))
     if name == "virus-scan":
         return is_trusted_executable(sys_path("/usr/bin/clamscan"))
+    if name == "pending-updates":
+        return is_trusted_executable(sys_path(CHECKUPDATES)) and is_trusted_executable(sys_path("/usr/bin/pacman"))
+    if name == "firmware":
+        return is_trusted_executable(sys_path(FWUPDMGR))
     return False
 
 
@@ -1852,6 +1886,8 @@ def source_status():
                            tried="", by="ClamUI")
     if feed_available("bumblebee"):
         feed("bumblebee", "Bumblebee scan")
+    if feed_available("firmware"):
+        feed("firmware", "Firmware update check")
     d, _ = no_password_scan()
     _, t = _mtime_stamp([home_path(*STATE_DIR, NO_PASSWORD_NAME)]) if d else ("", "")
     add("password-check", "Password check (Full scan button only)", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
@@ -1869,7 +1905,8 @@ def source_status():
         by = "ClamUI" if ext[0] and _newer(ext, (d, t)) == ext and ext != (d, t) else ""
         d, t = _newer(ext, (d, t))
         add("signatures", "ClamAV virus signatures", d, t, fresh(d, FEED_DAYS), by=by)
-    for name, label in (("arch-audit", "Arch vulnerability database"), ("osv", "OSV malicious-package database"),
+    for name, label in (("pending-updates", "Check for system and Omarchy updates"),
+                        ("arch-audit", "Arch vulnerability database"), ("osv", "OSV malicious-package database"),
                         ("aur", "AUR package status"), ("bumblebee-list", "Bumblebee compromised-package list")):
         if feed_available(name):
             feed(name, label)
@@ -2404,8 +2441,113 @@ def set_ignored(did, on):
             else "Counting it again."}
 
 
+# --- Waiting updates and firmware --------------------------------------------
+# checkupdates (pacman-contrib, which Omarchy ships and its own update
+# indicator uses) syncs a private copy of the package databases as you and
+# lists what an update would install. fwupd's fwupdmgr asks LVFS, where
+# hardware makers publish firmware, which updates this computer can take.
+
+CHECKUPDATES = "/usr/bin/checkupdates"
+FWUPDMGR = "/usr/bin/fwupdmgr"
+OMARCHY_PACKAGES = ("omarchy", "omarchy-dev")
+_PENDING_LINE = re.compile(r"^([a-z0-9@._+-]{1,100}) ([A-Za-z0-9.:+~_-]{1,80}) -> ([A-Za-z0-9.:+~_-]{1,80})$")
+
+
+def parse_checkupdates(text):
+    """[(name, installed, new)] from `checkupdates --nocolor`."""
+    out = []
+    for line in text.splitlines()[:10000]:
+        m = _PENDING_LINE.match(line.strip())
+        if m:
+            out.append(m.groups())
+    return out
+
+
+def refresh_pending_updates():
+    rc, out = run([CHECKUPDATES, "--nocolor"], timeout=180, limit=2 * 1024 * 1024)
+    if rc not in (0, 2):                                   # 0: updates waiting, 2: none, else an error
+        save_feed("pending-updates", {}, ok=False)
+        raise Refused("could not check for updates (offline?)")
+    pkgs = parse_checkupdates(out or "") if rc == 0 else []
+    omarchy = next(({"name": n, "from": a, "to": b} for n, a, b in pkgs if n in OMARCHY_PACKAGES), None)
+    save_feed("pending-updates", {"count": len(pkgs), "omarchy": omarchy})
+    return "%d update%s waiting." % (len(pkgs), "" if len(pkgs) == 1 else "s")
+
+
+def parse_fwupd_updates(text):
+    """[{device, from, to, security}] from `fwupdmgr get-updates --json`, or None."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    devices = data.get("Devices") if isinstance(data, dict) else None
+    if not isinstance(devices, list):
+        return None
+    out = []
+    for d in devices[:200]:
+        rels = d.get("Releases") if isinstance(d, dict) else None
+        if not isinstance(rels, list) or not rels or not isinstance(rels[0], dict):
+            continue
+        rel = rels[0]                                       # newest first
+        issues = rel.get("Issues")
+        security = (isinstance(issues, list) and any(isinstance(i, str) and i for i in issues)) \
+            or rel.get("Urgency") in ("high", "critical")
+        out.append({"device": clean(d.get("Name"), 80) or "A device", "from": clean(d.get("Version"), 40),
+                    "to": clean(rel.get("Version"), 40), "security": bool(security)})
+    return out
+
+
+def refresh_firmware():
+    # Newer firmware information first; fwupd lets you do this without a password.
+    # A failure here (offline) still leaves the last information to check against.
+    run([FWUPDMGR, "refresh", "--no-unreported-check"], timeout=120, limit=256 * 1024)
+    rc, out = run([FWUPDMGR, "get-updates", "--json", "--no-unreported-check", "--no-metadata-check"],
+                  timeout=120, limit=8 * 1024 * 1024)
+    updates = [] if rc == 2 else (parse_fwupd_updates(out or "") if rc == 0 else None)
+    if updates is None:
+        save_feed("firmware", {}, ok=False)
+        raise Refused("fwupd could not check")
+    save_feed("firmware", {"updates": updates[:50]})
+    return "Firmware checked."
+
+
+@check
+def check_firmware():
+    cid, cat, title = "firmware", "harden", "Firmware updates"
+    why = ("Firmware is the software inside your hardware: the BIOS, the SSD, the Thunderbolt chip. Hardware "
+           "makers publish security fixes for it on LVFS, and fwupd installs them.")
+    if not feed_available("firmware"):
+        return result(cid, cat, title, "info", "Not checked: fwupd is not installed.", why,
+                      fix=fix("terminal", "install-helpers", "Install"), weight=0,
+                      howto="Press Install: Vigil installs fwupd from the Arch repositories, and the next Full "
+                            "scan checks your firmware.")
+    cache = feed_cache("firmware")
+    if cache is None:
+        return result(cid, cat, title, "info", "Checked in the next Full scan.", why, weight=0,
+                      howto="Press Full scan on the Overview.")
+    ups = [u for u in cache.get("updates", []) if isinstance(u, dict)][:50] \
+        if isinstance(cache.get("updates"), list) else []
+    when = feed_when(cache)
+    if not ups:
+        return result(cid, cat, title, "pass", "No firmware updates waiting (%s)." % when, why, weight=2)
+    lines = ["%s: %s -> %s%s" % (clean(u.get("device"), 80), clean(u.get("from"), 40), clean(u.get("to"), 40),
+                                 " (security fix)" if u.get("security") is True else "") for u in ups]
+    security = [u for u in ups if u.get("security") is True]
+    upd = fix("terminal", "update-firmware", "Update firmware")
+    howto = ("Press Update firmware: Omarchy's updater installs it. Keep the laptop plugged in; some updates "
+             "finish during a restart.")
+    if security:
+        return result(cid, cat, title, "warn", "%d firmware security update%s waiting (%s)." % (
+            len(security), "" if len(security) == 1 else "s", when), why, clean_block(lines), fix=upd,
+            weight=2, howto=howto)
+    return result(cid, cat, title, "info", "%d firmware update%s waiting (%s)." % (
+        len(ups), "" if len(ups) == 1 else "s", when), why, clean_block(lines), fix=upd, weight=0, howto=howto)
+
+
 FEED_REFRESH = {"arch-audit": refresh_arch_audit, "osv": refresh_osv, "aur": refresh_aur}
-FEED_LABELS = {"arch-audit": "the Arch vulnerability database", "osv": "the OSV malicious-package database",
+FEED_REFRESH["pending-updates"] = refresh_pending_updates
+FEED_LABELS = {"pending-updates": "the list of waiting updates", "firmware": "the firmware check",
+               "arch-audit": "the Arch vulnerability database", "osv": "the OSV malicious-package database",
                "aur": "your AUR package status", "virus-scan": "the virus scan", "bumblebee": "the Bumblebee scan",
                "bumblebee-list": "the Bumblebee list of compromised packages",
                "password-check": "the password check", "signatures": "the ClamAV virus signatures"}
@@ -2580,6 +2722,8 @@ STEP_TEXT = {"arch-audit": "Updating the Arch vulnerability database",
              "virus-scan": "Scanning your home folder for viruses",
              "bumblebee": "Checking your packages with Bumblebee",
              "bumblebee-list": "Updating Bumblebee's list of compromised packages",
+             "pending-updates": "Checking for system and Omarchy updates",
+             "firmware": "Checking for firmware updates",
              "password-check": "Checking for accounts without a password (Omarchy asks for your password)",
              "signatures": "Updating ClamAV virus signatures (Omarchy asks for your password)"}
 
@@ -2599,6 +2743,8 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
         + (["signatures"] if sources_only and can_update_signatures() else []) + list(sources)
     if run_full and bumblebee_ok():
         steps.append("bumblebee")
+    if run_full and feed_available("firmware"):
+        steps.append("firmware")
     if (run_full or scan_only) and feed_available("virus-scan"):
         steps.append("virus-scan")                    # last: it takes longest
     
@@ -2612,6 +2758,8 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
                 refresh_virus_scan(lambda n, of, i=i: progress(i, len(steps), STEP_TEXT["virus-scan"], n, of))
             elif name == "bumblebee":
                 refresh_bumblebee()
+            elif name == "firmware":
+                refresh_firmware()
             elif name == "password-check":
                 refresh_no_password()
             elif name == "signatures":
@@ -3934,6 +4082,8 @@ CHECK_HELP = {
     "aur-packages": ("Keep only the ones you recognise and still use; remove the rest with "
                      "omarchy pkg drop <name>.",
                      ("docs", "arch-aur", "Learn more")),
+    "firmware": ("The Full scan checks for firmware updates. The Arch Wiki explains fwupd and LVFS.",
+                 ("docs", "arch-fwupd", "Learn more")),
     "virus-scan": ("Install ClamUI, which sets up ClamAV; Vigil then scans Downloads every week.",
                    ("terminal", "install-clamui", "Install ClamUI")),
     "bumblebee": ("Bumblebee runs with the Full scan. Perplexity explains what it checks and how its list "
@@ -4006,6 +4156,7 @@ def audit(peek=False):
         "warn" if any(c["status"] == "warn" for c in scored) else "ok")
     tools = {}
     for name in ("omarchy-launch-floating-terminal-with-presentation", "omarchy-setup-security-fido2",
+                 "omarchy-update-firmware",
                  "omarchy-remove-security-fido2", "omarchy-setup-security-fingerprint",
                  "omarchy-remove-security-fingerprint",
                  "omarchy-sudo-passwordless", "omarchy-remove-security-sudoless-docker", "omarchy-update",

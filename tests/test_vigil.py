@@ -1685,8 +1685,9 @@ def test_signature_update_wakes_clamavs_service_and_explains_failures(v):
 
 
 def test_missing_helpers_listed_in_order(v):
-    assert v.missing_helpers() == ["clamav", "arch-audit", "osv-scanner", "clamui", "bumblebee"]
-    v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan", v.ROOT + "/usr/bin/freshclam", v.ROOT + "/usr/bin/arch-audit"}
+    assert v.missing_helpers() == ["clamav", "arch-audit", "osv-scanner", "fwupd", "clamui", "bumblebee"]
+    v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan", v.ROOT + "/usr/bin/freshclam", v.ROOT + "/usr/bin/arch-audit",
+                  v.ROOT + "/usr/bin/fwupdmgr"}
     assert v.missing_helpers() == ["osv-scanner", "clamui", "bumblebee"]
     assert v.audit(peek=True)["missing"] == ["osv-scanner", "clamui", "bumblebee"]
 
@@ -2192,3 +2193,117 @@ def test_ignoring_does_not_raise_a_new_finding_notification(v):
     assert "virus-scan" not in v.audit()["new"]
     v.set_ignored(did, False)
     assert "virus-scan" not in v.audit()["new"]
+
+
+# --------------------------------------------------------------------------
+# Waiting updates (checkupdates) and firmware (fwupd)
+
+CHECKUPDATES_OUT = ("linux 6.18.1.arch1-1 -> 6.18.2.arch1-1\n"
+                    "omarchy 4.0.2-1 -> 4.1.0-1\n"
+                    "firefox 140.0-1 -> 140.0.1-1\n"
+                    "weird line\n")
+
+
+def updates_tools(v):
+    v.TRUSTED |= {v.ROOT + "/usr/bin/checkupdates", v.ROOT + "/usr/bin/pacman"}
+
+
+def test_parse_checkupdates():
+    mod = load_vigil()
+    assert mod.parse_checkupdates(CHECKUPDATES_OUT) == [
+        ("linux", "6.18.1.arch1-1", "6.18.2.arch1-1"), ("omarchy", "4.0.2-1", "4.1.0-1"),
+        ("firefox", "140.0-1", "140.0.1-1")]
+    assert mod.parse_checkupdates("x; rm -rf / 1 -> 2\n\x1b[31mred 1 -> 2\n") == []
+
+
+def test_an_omarchy_update_waiting_asks_to_update(v):
+    updates_tools(v)
+    two_days_ago = time.strftime("%Y-%m-%d", time.localtime(time.time() - 2 * 86400))
+    sysfile(v, "/var/log/pacman.log", "[%sT10:00:00+0000] [PACMAN] starting full system upgrade\n" % two_days_ago)
+    v.COMMANDS[("/usr/bin/checkupdates", "--nocolor")] = (0, CHECKUPDATES_OUT)
+    assert v.refresh_pending_updates() == "3 updates waiting."
+    c = v.check_updates()
+    assert c["status"] == "warn" and c["fix"]["action"] == "update"
+    assert c["summary"] == "Omarchy 4.1.0-1 is out; you have 4.0.2-1. 2 other updates waiting too."
+    v.COMMANDS[("/usr/bin/checkupdates", "--nocolor")] = (0, "linux 1-1 -> 2-1\n")
+    v.refresh_pending_updates()
+    c = v.check_updates()
+    assert c["status"] == "pass" and c["summary"].endswith("1 update waiting.")
+    v.COMMANDS[("/usr/bin/checkupdates", "--nocolor")] = (2, "")              # 2: nothing waiting
+    v.refresh_pending_updates()
+    assert v.check_updates()["status"] == "pass"
+    v.COMMANDS[("/usr/bin/checkupdates", "--nocolor")] = (1, "")              # offline: an error, kept as before
+    with pytest.raises(v.Refused):
+        v.refresh_pending_updates()
+
+
+def test_an_update_check_from_before_the_last_update_is_ignored(v):
+    updates_tools(v)
+    v.COMMANDS[("/usr/bin/checkupdates", "--nocolor")] = (0, CHECKUPDATES_OUT)
+    v.refresh_pending_updates()
+    later = time.strftime("%Y-%m-%d", time.localtime(time.time() + 86400))
+    sysfile(v, "/var/log/pacman.log", "[%sT10:00:00+0000] [PACMAN] starting full system upgrade\n" % later)
+    assert v.check_updates()["status"] == "pass"                               # you updated since: no nag
+
+
+FWUPD_JSON = json.dumps({"Devices": [
+    {"Name": "System Firmware", "Version": "1.10.0", "Releases": [
+        {"Version": "1.12.0", "Urgency": "high", "Issues": ["CVE-2026-1111"]}, {"Version": "1.11.0"}]},
+    {"Name": "SSD", "Version": "3B2QGXA7", "Releases": [{"Version": "3B4QGXA7", "Urgency": "low"}]},
+    {"Name": "Touchpad", "Version": "1.0"}]})
+FWUPD_GET = ("/usr/bin/fwupdmgr", "get-updates", "--json", "--no-unreported-check", "--no-metadata-check")
+
+
+def test_parse_fwupd_updates():
+    mod = load_vigil()
+    assert mod.parse_fwupd_updates(FWUPD_JSON) == [
+        {"device": "System Firmware", "from": "1.10.0", "to": "1.12.0", "security": True},
+        {"device": "SSD", "from": "3B2QGXA7", "to": "3B4QGXA7", "security": False}]
+    assert mod.parse_fwupd_updates("nope") is None
+    assert mod.parse_fwupd_updates('{"Devices": "x"}') is None
+
+
+def test_firmware_states(v):
+    c = v.check_firmware()
+    assert c["status"] == "info" and c["fix"]["action"] == "install-helpers"
+    v.TRUSTED.add(v.ROOT + "/usr/bin/fwupdmgr")
+    assert v.check_firmware()["summary"] == "Checked in the next Full scan."
+    v.COMMANDS[FWUPD_GET] = (0, FWUPD_JSON)
+    v.refresh_firmware()
+    c = v.check_firmware()
+    assert c["status"] == "warn" and c["weight"] == 2 and c["fix"]["action"] == "update-firmware"
+    assert "System Firmware: 1.10.0 -> 1.12.0 (security fix)" in c["detail"]
+    v.COMMANDS[FWUPD_GET] = (0, json.dumps({"Devices": [{"Name": "SSD", "Version": "1",
+                                                         "Releases": [{"Version": "2"}]}]}))
+    v.refresh_firmware()
+    c = v.check_firmware()
+    assert c["status"] == "info" and c["weight"] == 0
+    v.COMMANDS[FWUPD_GET] = (2, "No updatable devices")                    # 2: nothing to do
+    v.refresh_firmware()
+    assert v.check_firmware()["status"] == "pass"
+    v.COMMANDS[FWUPD_GET] = (1, "")
+    with pytest.raises(v.Refused):
+        v.refresh_firmware()
+    assert v.check_firmware()["status"] == "pass"                           # the last good result stays
+
+
+def test_full_scan_checks_firmware_before_the_virus_scan(v, capsys, monkeypatch):
+    v.PROGRESS["on"] = True
+    v.TRUSTED.add(v.ROOT + "/usr/bin/fwupdmgr")
+    monkeypatch.setattr(v, "refresh_firmware", lambda: "ok")
+    clamscan_ok(v)
+    v.refresh_due_feeds(full=True)
+    steps = [json.loads(l)["progress"]["doing"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
+    assert steps.index("Checking for firmware updates") < steps.index("Scanning your home folder for viruses")
+    v.PROGRESS["on"] = False
+
+
+def test_update_sources_checks_for_waiting_updates(v, capsys):
+    updates_tools(v)
+    v.COMMANDS[("/usr/bin/checkupdates", "--nocolor")] = (2, "")
+    v.PROGRESS["on"] = True
+    v.refresh_due_feeds(sources_only=True)
+    steps = [json.loads(l)["progress"]["doing"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
+    assert "Checking for system and Omarchy updates" in steps
+    v.PROGRESS["on"] = False
+    assert any(s["id"] == "pending-updates" and s["state"] == "ok" for s in v.source_status())
