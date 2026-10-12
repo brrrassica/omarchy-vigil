@@ -55,6 +55,19 @@ These hold for every pillar, now and in later phases:
 Nothing from the plugin folder ever runs as root. There is no sudoers rule,
 no polkit policy, no service, no timer and no daemon.
 
+One scan or update at a time: `refresh-feeds` takes an exclusive,
+non-blocking `flock` on `~/.local/state/omarchy-vigil/busy/` (a directory
+opened with the usual no-follow walk, so there is no lock file to plant a
+link at) and exits at once if another run holds it. The kernel releases the
+lock when the last holder ends, so a crash or a shell restart cannot leave
+it stuck. The programs a run starts (clamscan, Bumblebee, the scanners)
+inherit the descriptor, so a virus scan left running after the helper is
+gone still blocks a second one. If the panel goes away mid-run, the helper
+stops writing to it and finishes instead of dying halfway. Its current step
+is kept in `progress.json`; `vigil running` (no arguments) reports it, and
+the panel accepts it only while the lock is held and only with a step text
+from the helper's fixed list.
+
 ## Input is untrusted
 
 - The helper's stdout is read in raw chunks (`SplitParser` with an empty
@@ -193,9 +206,14 @@ by itself, and only once the relevant tool is installed:
   fixed address, Perplexity's repository archive on `codeload.github.com`.
   The archive is never unpacked to disk: Vigil reads it in memory and takes
   only `threat_intel/*.json` members (at most 5,000 members, 8 MiB each,
-  64 MiB in total, 20 seconds), keeps the catalogs of the most common
-  schema version, at most 50,000 entries, and writes them as one JSON file
-  with mode 0600. Bumblebee then reads that file as data
+  64 MiB in total, 20 seconds). Each entry is checked the way Bumblebee
+  checks it (id, ecosystem, package and a list of versions; no control
+  characters), since one bad entry would make Bumblebee refuse the whole
+  list, and only those fields plus name, severity and source are kept, at
+  most 50,000 entries. They are written as one JSON file with mode 0600 in
+  catalog schema 0.1.0, which every Bumblebee release reads (Perplexity's
+  lists moved to 0.2.0, which the released program does not read yet; 0.2.0
+  only adds "any version" entries, which are left out). Bumblebee then reads that file as data
   (`--exposure-catalog`).
 - Bumblebee's scan is `/usr/local/bin/bumblebee scan --profile baseline
   --exposure-catalog <file> --findings-only --output stdout --max-duration

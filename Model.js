@@ -236,7 +236,9 @@ function actionPlan(id, tools, home) {
   if (body === "") return []
   if (mode === "user") return [{ argv: [BASH, "-c", "set -e\n" + body], asRoot: false }]
   if (toolDir(tools, "pkexec") === "" || typeof home !== "string" || !/^\/[^\0\n]{0,200}$/.test(home)) return []
-  var steps = [{ argv: [PKEXEC, "/usr/bin/env", "HOME=" + home, BASH, "-c", "set -e\n" + stripSudo(body)], asRoot: true }]
+  // The first line says the password was accepted, for the progress bar.
+  var steps = [{ argv: [PKEXEC, "/usr/bin/env", "HOME=" + home, BASH, "-c",
+                        "set -e\necho VIGIL-STEP 0\n" + stripSudo(body)], asRoot: true }]
   if (a.then) steps.push({ argv: [BASH, "-c", "set -e\n" + a.then], asRoot: false })
   return steps
 }
@@ -473,10 +475,19 @@ var TERMINAL_ACTIONS = {
            "Bumblebee comes from Perplexity on GitHub and is installed only if it matches the checksum",
            "Perplexity publishes with it. The rest come from the Arch mirrors, Flathub and ClamAV.",
            "Technical: pacman -S --needed clamav arch-audit osv-scanner flatpak, enable clamav-freshclam, bumblebee v" + BUMBLEBEE_VERSION + " to /usr/local/bin, flatpak install ClamUI"],
-    run: "/usr/bin/pacman -S --needed --noconfirm clamav arch-audit osv-scanner flatpak "
-      + "&& /usr/bin/systemctl enable --now clamav-freshclam.service && echo 'Packages installed.'\n"
+    // What the progress bar says at each "VIGIL-STEP n" line the script prints.
+    stages: ["Installing ClamAV, arch-audit and osv-scanner from the Arch mirrors",
+             "Turning on automatic virus signature updates",
+             "Downloading Bumblebee from Perplexity and checking it",
+             "Installing ClamUI from Flathub (the longest step)"],
+    run: "echo VIGIL-STEP 1\n"
+      + "/usr/bin/pacman -S --needed --noconfirm clamav arch-audit osv-scanner flatpak\necho 'Packages installed.'\n"
+      + "echo VIGIL-STEP 2\n"
+      + "/usr/bin/systemctl enable --now clamav-freshclam.service\n"
+      + "echo VIGIL-STEP 3\n"
       + BUMBLEBEE_INSTALL,
-    then: "/usr/bin/flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo "
+    then: "echo VIGIL-STEP 4\n"
+      + "/usr/bin/flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo "
       + "&& /usr/bin/flatpak install --user --noninteractive --or-update flathub io.github.linx_systems.ClamUI "
       + "&& echo 'ClamUI is installed.'"
   },
@@ -929,13 +940,61 @@ function parseProgress(line) {
            fraction: Math.min(1, (p.step - 1 + part) / p.of) }
 }
 
+// A scan or update started elsewhere (another monitor, or before the shell
+// restarted): its progress, step 0 when it has not said yet, null when none
+// runs, undefined when the value is not valid.
+function parseRunningValue(r) {
+  if (r === undefined || r === null) return null
+  if (typeof r !== "object" || Array.isArray(r)) return undefined
+  if (r.step === 0 && r.of === 0) return { step: 0, of: 0, doing: "", done: 0, total: 0, fraction: 0 }
+  var p = parseProgress(JSON.stringify({ progress: r }))
+  return p === null ? undefined : p
+}
+
+// The `vigil running` answer: { ok, running } or null.
+function parseRunning(text) {
+  if (typeof text !== "string" || text.length === 0 || text.length > 2048) return null
+  var d
+  try { d = JSON.parse(text) } catch (e) { return null }
+  if (!d || typeof d !== "object") return null
+  var r = parseRunningValue(d.running)
+  return r === undefined ? null : { running: r }
+}
+
 // What the progress line under the bar says.
 function progressText(p) {
   if (!p) return ""
+  if (p.step === 0) return "Working\u2026"
   var s = "Step " + p.step + " of " + p.of + ": " + p.doing
   if (p.total > 0) s += " (" + p.done.toLocaleString() + " of " + p.total.toLocaleString() + " files)"
   else if (p.done > 0) s += " (" + p.done.toLocaleString() + " files)"
   return s
+}
+
+// How far an action running in the panel is. Its scripts print lines
+// "VIGIL-STEP n"; only the number is read from the output, and the text shown
+// comes from the action's own `stages`.
+function actionStage(output) {
+  var re = /^VIGIL-STEP ([0-9])$/gm, m, n = -1
+  while ((m = re.exec(String(output))) !== null) n = Math.max(n, Number(m[1]))
+  return n
+}
+
+function actionProgress(id, stage, stepIndex, steps) {
+  var a = terminalAction(id)
+  var stages = a && a.stages ? a.stages : []
+  var count = Array.isArray(steps) ? steps.length : 0
+  if (count > 0 && steps[0].asRoot && stepIndex === 0 && stage < 0)
+    return { fraction: 0.02, text: "Waiting for your password\u2026" }
+  if (stages.length > 0 && stage >= 1 && stage <= stages.length)
+    return { fraction: (stage - 0.5) / stages.length,
+             text: "Step " + stage + " of " + stages.length + ": " + stages[stage - 1] }
+  return { fraction: count > 0 ? (stepIndex + 0.5) / count : 0.5, text: "Working\u2026" }
+}
+
+// What an action printed, without its progress lines.
+function actionOutputText(output) {
+  return String(output).replace(/^VIGIL-STEP [0-9]\n?/gm, "")
 }
 
 // What the red Install button lists, by id from the report's "missing".
@@ -1069,7 +1128,10 @@ function parseReport(text) {
     }
   }
   if (nextUpdate === null || nextFullScan === null) return null
+  var running = parseRunningValue(d.running)
+  if (running === undefined) return null
   return {
+    running: running,
     sources: sources,
     lastRun: lastRun,
     nextUpdate: nextUpdate,
@@ -1225,7 +1287,8 @@ if (typeof module !== "undefined") {
     howTo: howTo, docsUrl: docsUrl, docsCommand: docsCommand, DOCS: DOCS, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
     shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
     relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine, countdown: countdown, scheduleLines: scheduleLines,
-    parseProgress: parseProgress, progressText: progressText, lastRunRows: lastRunRows, missingLabel: missingLabel,
+    parseProgress: parseProgress, parseRunning: parseRunning, actionStage: actionStage, actionProgress: actionProgress,
+    actionOutputText: actionOutputText, progressText: progressText, lastRunRows: lastRunRows, missingLabel: missingLabel,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,
     SYSCTL_LINES: SYSCTL_LINES
   }

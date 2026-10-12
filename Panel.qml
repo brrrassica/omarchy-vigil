@@ -97,6 +97,15 @@ Panel {
 
   readonly property var visibleChecks: tab === "overview" ? [] : Model.checksFor(report, tab)
   readonly property bool busy: auditProc.running || fixProc.running || actionProc.running
+  // A scan or update this copy did not start (another monitor's, or one left
+  // running when the shell restarted). The helper allows one at a time.
+  property var otherRun: null
+  readonly property bool runElsewhere: !feedProc.running && otherRun !== null
+  readonly property var runProgress: feedProc.running ? scanProgress : otherRun
+  property string actionId: ""
+  property int actionStageNow: -1
+  readonly property var actionNow: actionProc.running
+    ? Model.actionProgress(actionId, actionStageNow, actionIndex, actionSteps) : null
 
   function localPath(url) {
     var value = String(url)
@@ -129,10 +138,11 @@ Panel {
     var parsed = Model.parseReport(text.trim())
     if (!parsed) { setStatus("The check returned something Vigil could not read.", true); return }
     report = parsed
+    otherRun = feedProc.running ? null : parsed.running
     if (statusIsError) setStatus("", false)
     if (rowIndex >= visibleChecks.length) rowIndex = Math.max(0, visibleChecks.length - 1)
     if (root.isPrimary && root.notifyOnNew && parsed.fresh.length > 0) notifyNew(parsed.fresh.length)
-    if (root.isPrimary && root.autoUpdate && parsed.feedsDue) refreshFeeds("")
+    if (root.isPrimary && root.autoUpdate && parsed.feedsDue && parsed.running === null) refreshFeeds("")
   }
 
   // Runs `bin/vigil refresh-feeds` in the background. With no mode (the
@@ -140,7 +150,7 @@ Panel {
   // next day; "sources" (Update sources) refreshes every database and list;
   // "full" (Full scan) also scans Downloads for viruses.
   function refreshFeeds(mode) {
-    if (feedProc.running) return
+    if (feedProc.running || runElsewhere) return
     feedBuffer = ""
     feedResult = ""
     scanProgress = null
@@ -164,19 +174,19 @@ Panel {
   // Update sources asks first too: it may ask for your password (ClamAV's
   // signatures live in a system folder), so it explains itself on the card.
   function requestUpdate() {
-    if (!report || busy || feedProc.running) return
+    if (!report || busy || feedProc.running || runElsewhere) return
     pendingKind = "update-sources"
     pendingAction = "all"
   }
 
   function requestInstallHelpers() {
-    if (!report || busy || actionProc.running) return
+    if (!report || busy || feedProc.running || runElsewhere) return
     pendingKind = "terminal"
     pendingAction = "install-helpers"
   }
 
   function requestFullScan() {
-    if (!report || busy || feedProc.running) return
+    if (!report || busy || feedProc.running || runElsewhere) return
     pendingKind = "full-scan"
     pendingAction = "all"
   }
@@ -273,11 +283,13 @@ Panel {
     actionIndex = 0
     actionOutput = ""
     actionTitle = a ? a.title : ""
+    actionId = id
+    actionStageNow = -1
     actionResult = null
     actionProc.command = steps[0].argv
     actionProc.running = true
     actionDeadline.restart()
-    setStatus(steps[0].asRoot ? "Waiting for your password\u2026" : "Working\u2026", false)
+    setStatus("", false)
   }
 
   function finishAction(code) {
@@ -295,7 +307,7 @@ Panel {
       verdict: code === 0 ? "Done." : (cancelled ? "Cancelled: no password was given, so nothing changed."
                                                   : "Did not finish. What it printed is below."),
       ok: code === 0,
-      output: Model.plain(actionOutput, 6000)
+      output: Model.plain(Model.actionOutputText(actionOutput), 6000)
     }
     setStatus("", false)
     runAudit()
@@ -426,6 +438,36 @@ Panel {
     }
   }
 
+  // Follows a run this copy did not start, cheaply, until it ends; then the
+  // full check shows its results.
+  Process {
+    id: runningProc
+    clearEnvironment: true
+    environment: root.helperEnv
+    command: ["/usr/bin/python3", "-I", "-S", root.helperPath, "running"]
+    property string buffer: ""
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { runningProc.buffer = (runningProc.buffer + data).slice(-4096) }
+    }
+    onExited: function(exitCode, exitStatus) {
+      var r = exitCode === 0 ? Model.parseRunning(runningProc.buffer.trim()) : null
+      runningProc.buffer = ""
+      if (!r || feedProc.running) return
+      if (r.running === null) { root.otherRun = null; root.runAudit() }
+      else {
+        if (root.otherRun && r.running.step !== root.otherRun.step) root.runAudit()
+        root.otherRun = r.running
+      }
+    }
+  }
+  Timer {
+    interval: 4000
+    repeat: true
+    running: root.runElsewhere
+    onTriggered: if (!runningProc.running) runningProc.running = true
+  }
+
   Process {
     id: actionProc
     clearEnvironment: true
@@ -433,8 +475,9 @@ Panel {
     stdout: SplitParser {
       splitMarker: ""
       onRead: function(data) {
-        // Keep the last 8 KiB of what the action printed.
+        // Keep the last 8 KiB of what the action printed, and how far it got.
         root.actionOutput = (root.actionOutput + data).slice(-8192)
+        root.actionStageNow = Math.max(root.actionStageNow, Model.actionStage(root.actionOutput))
       }
     }
     onExited: function(exitCode, exitStatus) { root.finishAction(exitCode) }
@@ -791,6 +834,44 @@ Panel {
             }
           }
 
+          // While a fix, Clean all or an install runs: what it is doing.
+          Column {
+            visible: root.actionNow !== null
+            width: parent.width
+            spacing: Style.space(4)
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: root.actionTitle
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+              wrapMode: Text.WordWrap
+            }
+            Rectangle {
+              width: parent.width
+              height: Style.space(6)
+              radius: height / 2
+              color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
+              Rectangle {
+                width: parent.width * (root.actionNow ? Math.max(0.02, Math.min(1, root.actionNow.fraction)) : 0.02)
+                height: parent.height
+                radius: parent.radius
+                color: root.foreground
+              }
+            }
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: root.actionNow ? root.actionNow.text : ""
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+          }
+
           Text {
             textFormat: Text.PlainText
             visible: root.statusMessage !== ""
@@ -850,18 +931,19 @@ Panel {
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 bordered: true
-                enabled: !feedProc.running && !root.busy && root.pending === null
+                enabled: !feedProc.running && !root.runElsewhere && !root.busy && root.pending === null
                 onClicked: root.requestFullScan()
               }
               // When tools Vigil works with are missing, installing them comes first.
               Button {
                 visible: Model.missingLabel(root.report) !== ""
-                text: Model.missingLabel(root.report)
+                text: actionProc.running && root.actionId === "install-helpers" ? "Installing\u2026"
+                                                                                  : Model.missingLabel(root.report)
                 tooltipText: "Install everything Vigil works with that is missing, in one go"
                 foreground: root.urgent
                 fontFamily: root.fontFamily
                 bordered: true
-                enabled: !root.busy && root.pending === null
+                enabled: !root.busy && !feedProc.running && !root.runElsewhere && root.pending === null
                 onClicked: root.requestInstallHelpers()
               }
               Button {
@@ -870,13 +952,13 @@ Panel {
                 tooltipText: "Download the latest virus signatures and lists Vigil checks against. No scan"
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                enabled: !feedProc.running && !root.busy && root.pending === null
+                enabled: !feedProc.running && !root.runElsewhere && !root.busy && root.pending === null
                 onClicked: root.requestUpdate()
               }
             }
             // While an update or scan runs: what it is doing, and how far along.
             Column {
-              visible: feedProc.running
+              visible: feedProc.running || root.runElsewhere
               width: parent.width
               spacing: Style.space(4)
               Rectangle {
@@ -885,7 +967,7 @@ Panel {
                 radius: height / 2
                 color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
                 Rectangle {
-                  width: parent.width * (root.scanProgress ? Math.max(0.02, root.scanProgress.fraction) : 0.02)
+                  width: parent.width * (root.runProgress ? Math.max(0.02, root.runProgress.fraction) : 0.02)
                   height: parent.height
                   radius: parent.radius
                   color: root.foreground
@@ -894,7 +976,8 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 width: parent.width
-                text: root.scanProgress ? Model.progressText(root.scanProgress) : "Starting\u2026"
+                text: (root.runElsewhere ? "Already running. " : "")
+                      + (root.runProgress ? Model.progressText(root.runProgress) : "Starting\u2026")
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption

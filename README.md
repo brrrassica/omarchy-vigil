@@ -27,7 +27,7 @@ the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.17.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.17.1.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -98,6 +98,12 @@ The Overview has two buttons:
   holes, malicious packages and AUR status. No scan runs. The automatic
   weekly update never asks for a password: it skips the signatures, which
   ClamAV's own service keeps current several times a day.
+
+Only one scan or update runs at a time. Pressing a button while one runs
+(on another monitor, or one still going after the shell restarted) starts
+nothing new: the panel shows "Already running" with that run's progress
+instead. Fixes, Clean all and installs show their own progress bar while
+they run, so you can close the panel and come back to it.
 
 Under the buttons, two lines count down to the next automatic update and the
 next automatic full scan (everything but the password check), with the time
@@ -345,6 +351,8 @@ service (ClamAV's servers), and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/full-scan.json` | the helper, mode 0600 | after each Full scan, automatic or not: its date and time, for the countdown |
 | `~/.local/state/omarchy-vigil/bumblebee-catalog.json` | the helper, mode 0600 | weekly and on Update sources: Perplexity's list of compromised packages, for Bumblebee |
 | `~/.local/state/omarchy-vigil/bumblebee.json` | the helper, mode 0600 | each Full scan: the compromised packages Bumblebee found, if any |
+| `~/.local/state/omarchy-vigil/progress.json` | the helper, mode 0600 | during a scan or update: its current step, so a panel that did not start it can show it |
+| `~/.local/state/omarchy-vigil/busy/` | the helper, mode 0700, empty | once: the folder Vigil locks so only one scan or update runs at a time |
 | `~/.local/state/omarchy-vigil/last-run.json` | the helper, mode 0600 | after each weekly or button update: its date, time and whether every source updated |
 | `/usr/local/bin/bumblebee` | the Install button, as root | only when you install Bumblebee: Perplexity's program, checked against its published checksum |
 | `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` | the helper | only when you set the opt-out variables |
@@ -371,7 +379,8 @@ nothing keeps running. These stay behind until you remove them:
 
 - `~/.local/state/omarchy-vigil/` (seen findings, score history, the file
   baseline and the cached results of the weekly checks). Remove it with
-  `rm ~/.local/state/omarchy-vigil/*.json` and `rmdir ~/.local/state/omarchy-vigil`.
+  `rm ~/.local/state/omarchy-vigil/*.json` and
+  `rmdir ~/.local/state/omarchy-vigil/busy ~/.local/state/omarchy-vigil`.
 - The opt-out file, if you set it. Remove it from the Privacy tab before
   uninstalling, or delete `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out`.
 - Settings you applied in `/etc`. They are your system settings now and keep

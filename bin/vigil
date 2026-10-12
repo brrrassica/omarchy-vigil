@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta
 
-VERSION = "0.17.0"
+VERSION = "0.17.1"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -300,6 +300,7 @@ def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False):
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, env=dict(SAFE_ENV, HOME=HOME),
             start_new_session=True, close_fds=True,
+            pass_fds=(RUN_LOCK["fd"],) if RUN_LOCK["fd"] is not None else (),
         )
     except OSError:
         return None, ""
@@ -2296,7 +2297,7 @@ def catalog_from_tarball(data):
     except (tarfile.TarError, OSError, EOFError):
         return None
     deadline = time.monotonic() + 20
-    by_schema, seen_bytes, members = {}, 0, 0
+    entries, seen_bytes, members = [], 0, 0
     try:
         for m in tf:
             members += 1
@@ -2313,15 +2314,43 @@ def catalog_from_tarball(data):
             if not isinstance(doc, dict) or not isinstance(doc.get("schema_version"), str) \
                     or not isinstance(doc.get("entries"), list):
                 continue
-            entries = [e for e in doc["entries"] if isinstance(e, dict)]
-            by_schema.setdefault(clean(doc["schema_version"], 20), []).extend(entries)
+            if doc["schema_version"] in CATALOG_SCHEMAS and len(entries) < 200000:
+                entries.extend(e for e in doc["entries"][:50000] if isinstance(e, dict))
     except (tarfile.TarError, OSError, EOFError):
         return None
-    if not by_schema:
+    out, ids = [], set()
+    for e in entries:
+        entry = catalog_entry(e)
+        if entry and entry["id"] not in ids and len(out) < 50000:
+            ids.add(entry["id"])
+            out.append(entry)
+    # Written as 0.1.0, which every Bumblebee release reads (0.2.0 only adds
+    # "any version", which is left out). One bad entry would make Bumblebee
+    # refuse the whole list, so each entry is checked first.
+    return {"schema_version": "0.1.0", "entries": out} if out else None
+
+
+CATALOG_SCHEMAS = ("0.1.0", "0.2.0")
+_CATALOG_TEXT = re.compile(r"^[^\x00-\x1f\x7f]{1,300}$")
+
+
+def catalog_entry(e):
+    """The fields Bumblebee matches on, checked; None for an entry it would refuse."""
+    def text(v, n=300):
+        return v if isinstance(v, str) and len(v) <= n and _CATALOG_TEXT.match(v) and v.strip() == v else None
+    versions = e.get("versions")
+    if not isinstance(versions, list) or not 1 <= len(versions) <= 2000:
         return None
-    # Bumblebee merges only catalogs that share a schema version: keep the largest set.
-    schema, entries = max(by_schema.items(), key=lambda kv: len(kv[1]))
-    return {"schema_version": schema, "entries": entries[:50000]}
+    if any(text(v, 100) is None or v == "*" for v in versions):
+        return None
+    out = {k: text(e.get(k)) for k in ("id", "ecosystem", "package")}
+    if None in out.values():
+        return None
+    out["versions"] = list(versions)
+    for k in ("name", "severity", "source"):
+        if text(e.get(k)) is not None:
+            out[k] = e[k]
+    return out
 
 
 def refresh_bumblebee_list():
@@ -3652,6 +3681,7 @@ def audit(peek=False):
                  "omarchy-plugin-list", "xdg-open", "pkexec"):
         p = find_tool(name)
         tools[name] = p.rsplit("/", 1)[0] if p else ""
+    running = run_in_progress()
     report = {
         "schema": SCHEMA, "version": VERSION,
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -3659,13 +3689,14 @@ def audit(peek=False):
         "score": score_of(checks), "level": level, "counts": counts,
         "checks": checks, "tools": tools, "apps": {"clamui": clamui_install()},
         "new": [], "stateSaved": False, "history": state_history(state),
-        "feedsDue": any(feed_due(n) for n in SOURCE_FEEDS) or feed_due("full-scan"),
+        "feedsDue": running is None and (any(feed_due(n) for n in SOURCE_FEEDS) or feed_due("full-scan")),
         "feedsUpdated": feeds_updated(),
         "sources": source_status(),
         "lastRun": last_run(),
         "nextUpdate": next_update(),
         "nextFullScan": next_full_scan(),
         "missing": missing_helpers(),
+        "running": running,
     }
     if not peek:
         report["new"], report["stateSaved"] = update_state(report)
@@ -4063,19 +4094,96 @@ def run_fix(action):
 
 # ---------------------------------------------------------------------------
 
-PROGRESS = {"on": False}
+PROGRESS = {"on": False, "saved": 0.0}
+RUN_LOCK = {"fd": None}
+BUSY_DIR = "busy"
+PROGRESS_FILE = "progress.json"
+
+
+def take_run_lock():
+    """One scan or update at a time, across panels, monitors and shell
+    restarts: an exclusive flock on a directory of our own (no lock file to
+    plant a link at). The kernel drops it when the last process holding it
+    ends. The programs a run starts (clamscan, Bumblebee, the scanners)
+    inherit it, so a scan left running after the helper is gone still counts."""
+    try:
+        fd = _open_home_dir(list(STATE_DIR) + [BUSY_DIR], create=True)
+    except (OSError, Refused):
+        return False
+    for _ in range(5):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            RUN_LOCK["fd"] = fd
+            return True
+        except OSError:
+            time.sleep(0.1)              # an audit may be checking the lock at this moment
+    os.close(fd)
+    return False
+
+
+def run_in_progress():
+    """What a scan or update started elsewhere is doing, or None if none runs."""
+    try:
+        fd = _open_home_dir(list(STATE_DIR) + [BUSY_DIR])
+    except (OSError, Refused):
+        return None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            return None
+        except OSError:
+            pass
+    finally:
+        os.close(fd)
+    p = _state_json(PROGRESS_FILE)
+    p = p.get("progress") if isinstance(p, dict) else None
+    ok = isinstance(p, dict) and all(isinstance(p.get(k), int) and not isinstance(p.get(k), bool)
+                                     and 0 <= p[k] <= 10 ** 8 for k in ("step", "of", "done", "total")) \
+        and p["of"] <= 20 and 1 <= p["step"] <= p["of"] and p.get("doing") in STEP_TEXT.values()
+    if not ok:
+        return {"step": 0, "of": 0, "doing": "", "done": 0, "total": 0}
+    return {k: p[k] for k in ("step", "of", "doing", "done", "total")}
+
+
+def save_progress(body, force=False):
+    """The latest progress, for a panel that did not start the run (after a
+    shell restart, or on another monitor). At most once a second."""
+    now = time.monotonic()
+    if not force and now - PROGRESS["saved"] < 1.0:
+        return
+    PROGRESS["saved"] = now
+    try:
+        dirfd = _state_dir()
+    except (OSError, Refused):
+        return
+    try:
+        write_atomic(dirfd, PROGRESS_FILE, json.dumps({"progress": body}, separators=(",", ":")).encode())
+    except OSError:
+        pass
+    finally:
+        os.close(dirfd)
 
 
 def progress(step, of, doing, done=0, total=0):
     """One progress line for the panel while a long refresh runs (only when asked for)."""
+    body = {"step": step, "of": of, "doing": doing, "done": int(done), "total": int(total)}
+    if RUN_LOCK["fd"] is not None:
+        save_progress(body, force=done == 0)
     if PROGRESS["on"]:
-        emit({"progress": {"step": step, "of": of, "doing": doing, "done": int(done), "total": int(total)}})
+        emit({"progress": body})
 
 
 def emit(obj):
+    """One JSON line to the panel. If the panel is gone (the shell restarted),
+    the run carries on quietly instead of dying halfway."""
+    if PROGRESS.get("gone"):
+        return
     data = json.dumps(obj, separators=(",", ":"), ensure_ascii=True)
-    sys.stdout.write(data + "\n")
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(data + "\n")
+        sys.stdout.flush()
+    except (BrokenPipeError, OSError):
+        PROGRESS["gone"] = True
 
 
 def main(argv):
@@ -4095,13 +4203,21 @@ def main(argv):
             [], ["--force"], ["--sources"], ["--full"], ["--scan"]):
         PROGRESS["on"] = True
         flag = argv[2] if len(argv) == 3 else ""
+        if not take_run_lock():
+            emit({"ok": True, "busy": True, "action": "",
+                  "message": "Vigil is already running a scan or update. This one was not started."})
+            return 0
         emit(refresh_due_feeds(force=flag == "--force", sources_only=flag == "--sources", full=flag == "--full",
                                scan_only=flag == "--scan"))
+        return 0
+    if len(argv) == 2 and argv[1] == "running":
+        # Cheap: lets a panel follow a scan it did not start, without a full check.
+        emit({"running": run_in_progress()})
         return 0
     if len(argv) == 2 and argv[1] == "version":
         emit({"version": VERSION})
         return 0
-    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil refresh-feeds [--force|--sources|--full|--scan] | vigil version\n")
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil refresh-feeds [--force|--sources|--full|--scan] | vigil running | vigil version\n")
     return 2
 
 

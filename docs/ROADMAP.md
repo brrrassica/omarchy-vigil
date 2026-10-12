@@ -111,7 +111,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.17 (this release): Bumblebee from Perplexity
+## 0.17 (this release): Bumblebee from Perplexity, one run at a time
 
 - [x] Bumblebee comes straight from Perplexity: **Install** fetches a pinned
       release and installs it only if it matches the release's published
@@ -122,6 +122,15 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       place of **Update sources** and installs all of them at once.
 - [x] Full scan runs Bumblebee before the long virus scan, and the Last run
       list updates as each step finishes.
+- [x] Bumblebee scans work with Perplexity's current lists: they moved to a
+      newer format the released program does not read, so Vigil converts
+      them, checking each entry.
+- [x] One scan or update at a time, even across monitors and shell
+      restarts (a lock the kernel drops when the run ends, held by clamscan
+      too). A panel that did not start the run shows "Already running" with
+      its progress.
+- [x] Installs, fixes and Clean all show a progress bar while they run;
+      the install says which of its four steps it is on.
 
 ## 0.16: no terminal pop-ups
 

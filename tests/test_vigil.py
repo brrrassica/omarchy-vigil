@@ -1717,15 +1717,34 @@ def bumblebee_installed(v):
 
 
 def test_catalog_reads_only_threat_intel_json(v):
+    old = json.dumps({"schema_version": "0.1.0", "entries": [
+        {"id": "c", "ecosystem": "go", "package": "x/y", "versions": ["v1.0.0"]},
+        {"id": "a", "ecosystem": "npm", "package": "dup", "versions": ["9"]}]})
+    future = json.dumps({"schema_version": "9.0.0", "entries": [
+        {"id": "f", "ecosystem": "npm", "package": "f", "versions": ["1"]}]})
     data = tarball({"bumblebee-main/threat_intel/a.json": CAT_A, "bumblebee-main/threat_intel/b.json": CAT_B,
                     "bumblebee-main/threat_intel/README.md": "x", "bumblebee-main/cmd/x.json": CAT_A,
-                    "bumblebee-main/threat_intel/old.json": json.dumps({"schema_version": "0.1.0", "entries": []}),
+                    "bumblebee-main/threat_intel/old.json": old, "bumblebee-main/threat_intel/future.json": future,
                     "bumblebee-main/threat_intel/bad.json": "{not json"})
     cat = v.catalog_from_tarball(data)
-    assert cat["schema_version"] == "0.2.0"
-    assert sorted(e["id"] for e in cat["entries"]) == ["a", "b"]
+    # Written as 0.1.0, which every Bumblebee release reads; 0.1.0 and 0.2.0 lists merged,
+    # unknown schemas left out, the first of two entries with one id kept.
+    assert cat["schema_version"] == "0.1.0"
+    assert sorted(e["id"] for e in cat["entries"]) == ["a", "b", "c"]
+    assert [e["package"] for e in cat["entries"] if e["id"] == "a"] == ["evil"]
     assert v.catalog_from_tarball(b"garbage") is None
     assert v.catalog_from_tarball(tarball({"x/README.md": "x"})) is None
+
+
+def test_catalog_entries_bumblebee_would_refuse_are_dropped(v):
+    good = {"id": "g", "ecosystem": "npm", "package": "p", "versions": ["1.0.0"], "severity": "critical",
+            "name": "p 1.0.0", "source": "https://example.org", "indicators": [{"x": 1}], "references": ["r"]}
+    assert v.catalog_entry(good) == {"id": "g", "ecosystem": "npm", "package": "p", "versions": ["1.0.0"],
+                                     "name": "p 1.0.0", "severity": "critical", "source": "https://example.org"}
+    for bad in ({"versions": ["*"]}, {"versions": []}, {"versions": "1.0.0"}, {"versions": ["1", 2]},
+                {"versions": [""]}, {"id": ""}, {"package": None}, {"ecosystem": "npm\n"}, {"id": " g"},
+                {"versions": ["1"] * 2001}):
+        assert v.catalog_entry(dict(good, **bad)) is None, bad
 
 
 def test_bumblebee_list_and_scan(v):
@@ -1778,3 +1797,86 @@ def test_full_scan_runs_bumblebee_before_the_long_virus_scan(v, capsys, monkeypa
     steps = [json.loads(l)["progress"]["doing"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
     assert steps.index("Checking your packages with Bumblebee") < steps.index("Scanning your home folder for viruses")
     assert steps[-1] == "Scanning your home folder for viruses"
+
+
+# --------------------------------------------------------------------------
+# One scan or update at a time
+
+import fcntl as _fcntl
+
+
+def hold_lock_elsewhere(v):
+    """Another Vigil run, as the kernel sees it: its own open of the busy folder, locked."""
+    busy = Path(v.HOME, ".local/state/omarchy-vigil/busy")
+    busy.mkdir(parents=True, exist_ok=True)
+    fd = os.open(busy, os.O_RDONLY | os.O_DIRECTORY)
+    _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+    return fd
+
+
+def test_only_one_run_at_a_time(v, capsys, monkeypatch):
+    calls = []
+    monkeypatch.setattr(v, "refresh_due_feeds", lambda **kw: calls.append(kw) or {"ok": True, "action": "", "message": "x"})
+    monkeypatch.setattr(v.time, "sleep", lambda s: None)
+    fd = hold_lock_elsewhere(v)
+    try:
+        assert v.main(["vigil", "refresh-feeds", "--full"]) == 0
+        out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert out["busy"] is True and "already running" in out["message"] and calls == []
+    finally:
+        os.close(fd)                          # the other run ends: the kernel drops its lock
+    assert v.main(["vigil", "refresh-feeds", "--full"]) == 0
+    assert calls == [{"force": False, "sources_only": False, "full": True, "scan_only": False}]
+    os.close(v.RUN_LOCK["fd"])
+    v.RUN_LOCK["fd"] = None
+
+
+def test_a_run_started_elsewhere_shows_in_the_report(v):
+    assert v.run_in_progress() is None
+    fd = hold_lock_elsewhere(v)
+    try:
+        assert v.run_in_progress() == {"step": 0, "of": 0, "doing": "", "done": 0, "total": 0}
+        put(Path(v.HOME, ".local/state/omarchy-vigil/progress.json"), json.dumps({"progress": {
+            "step": 2, "of": 3, "doing": "Scanning your home folder for viruses", "done": 5, "total": 10}}))
+        assert v.run_in_progress()["doing"] == "Scanning your home folder for viruses"
+        report = v.audit(peek=True)
+        assert report["running"]["step"] == 2 and report["feedsDue"] is False
+        for bad in ({"doing": "rm -rf ~"}, {"step": 4}, {"step": True}, {"done": -1}, {"of": 99, "step": 50}):
+            body = dict({"step": 2, "of": 3, "doing": "Scanning your home folder for viruses", "done": 5, "total": 10}, **bad)
+            put(Path(v.HOME, ".local/state/omarchy-vigil/progress.json"), json.dumps({"progress": body}))
+            assert v.run_in_progress()["step"] == 0, bad
+    finally:
+        os.close(fd)
+    assert v.run_in_progress() is None                 # a stale progress file means nothing on its own
+
+
+def test_programs_a_run_starts_keep_the_lock(tmp_path):
+    mod = load_vigil()
+    mod.HOME = str(tmp_path)
+    os.chmod(tmp_path, 0o700)
+    assert mod.take_run_lock()
+    fd = mod.RUN_LOCK["fd"]
+    try:
+        rc, out = mod.run(["/bin/sh", "-c", "ls /proc/self/fd"])
+        assert rc == 0 and str(fd) in out.split()
+    finally:
+        os.close(fd)
+
+
+def test_progress_goes_to_a_file_while_the_lock_is_held(v, monkeypatch):
+    v.RUN_LOCK["fd"] = 99999                           # held (never used as a real descriptor here)
+    v.progress(1, 2, "Checking your AUR packages")
+    p = json.loads(Path(v.HOME, ".local/state/omarchy-vigil/progress.json").read_text())["progress"]
+    assert p == {"step": 1, "of": 2, "doing": "Checking your AUR packages", "done": 0, "total": 0}
+    v.RUN_LOCK["fd"] = None
+
+
+def test_a_closed_panel_does_not_stop_the_run(v, monkeypatch):
+    class Gone:
+        def write(self, s): raise BrokenPipeError()
+        def flush(self): raise BrokenPipeError()
+    monkeypatch.setattr(v.sys, "stdout", Gone())
+    v.emit({"x": 1})
+    v.emit({"x": 2})                                   # no exception: the run carries on
+    assert v.PROGRESS["gone"] is True
+    v.PROGRESS.pop("gone")
