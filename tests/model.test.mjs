@@ -503,8 +503,8 @@ test("actions run without a terminal unless the tool asks questions", () => {
   assert.deepEqual(fw[0].argv.slice(0, 5), ["/usr/bin/pkexec", "/usr/bin/env", "HOME=/home/marc", "/usr/bin/bash", "-c"])
   assert.ok(!fw[0].argv[5].includes("sudo ") && fw[0].argv[5].includes("/usr/bin/ufw --force enable"))
   const ui = M.actionPlan("install-clamui", TOOLS, "/home/marc")
-  assert.equal(ui.length, 2)
-  assert.ok(ui[0].asRoot && !ui[1].asRoot && ui[1].argv[0] === "/usr/bin/bash" && ui[1].argv[2].includes("flatpak install --user"))
+  assert.equal(ui.length, 1)                                                   // from the Arch repositories, as root
+  assert.ok(ui[0].asRoot && ui[0].argv[5].includes("pacman -S --needed --noconfirm clamav clamui"))
   assert.deepEqual(M.actionPlan("update", TOOLS, "/home/marc"), [])           // terminal tools have no plan
   assert.deepEqual(M.actionPlan("firewall-on", Object.assign({}, TOOLS, { pkexec: "" }), "/home/marc"), [])
   assert.deepEqual(M.actionPlan("firewall-on", TOOLS, "relative"), [])
@@ -551,9 +551,10 @@ test("missing helpers: a red Install button that names them, and one plan for al
   const card = M.confirmation("terminal", "install-helpers", r)
   assert.equal(card.lines[0], "Missing now: ClamAV, ClamUI.")
   const plan = M.actionPlan("install-helpers", TOOLS, "/home/marc")
-  assert.equal(plan.length, 2)
-  assert.match(plan[0].argv[5], /pacman -S --needed --noconfirm clamav arch-audit osv-scanner fwupd flatpak/)
-  assert.ok(!plan[1].asRoot && plan[1].argv[2].includes("flatpak install --user --noninteractive --or-update"))
+  assert.equal(plan.length, 1)
+  assert.match(plan[0].argv[5], /pacman -S --needed --noconfirm clamav \$c arch-audit osv-scanner fwupd\n/)
+  assert.match(plan[0].argv[5], /c=clamui; \[ -d "\$HOME\/\.local\/share\/flatpak\/app\/io\.github\.linx_systems\.ClamUI" \] && c=/)
+  assert.ok(!plan[0].argv[5].includes("flathub"))
   assert.equal(M.missingLabel(parse(report({ missing: ["bumblebee"] }))), "MISSING Bumblebee. INSTALL")
 })
 
@@ -632,15 +633,15 @@ test("an action in the panel shows how far it got; the words come from Vigil, no
   assert.equal(M.actionStage("VIGIL-STEP 0\nresolving dependencies\nVIGIL-STEP 2\n"), 2)
   assert.equal(M.actionStage("VIGIL-STEP 7 rm -rf\n VIGIL-STEP 9\nVIGIL-STEP 12\n"), -1)
   const p = M.actionProgress("install-helpers", 3, 0, steps)
-  assert.equal(p.text, "Step 3 of 4: Downloading Bumblebee from Perplexity and checking it")
-  assert.ok(p.fraction > 0.5 && p.fraction < 0.75)
+  assert.equal(p.text, "Step 3 of 3: Downloading Bumblebee from Perplexity and checking it")
+  assert.ok(p.fraction > 0.75 && p.fraction < 0.9)
   assert.equal(M.actionProgress("install-helpers", 0, 0, steps).text, "Working…")
   assert.equal(M.actionProgress("install-helpers", 9, 0, steps).text, "Working…")
   assert.equal(M.actionOutputText("VIGIL-STEP 0\nPackages installed.\nVIGIL-STEP 2\n"), "Packages installed.\n")
   // Every stage is announced, in order, and a failed pacman stops the script.
   const all = steps.map(s => s.argv[s.argv.length - 1]).join("\n")
-  assert.deepEqual([...all.matchAll(/^echo VIGIL-STEP ([0-9])$/gm)].map(m => Number(m[1])), [0, 1, 2, 3, 4])
-  assert.match(all, /^\/usr\/bin\/pacman -S --needed --noconfirm clamav arch-audit osv-scanner fwupd flatpak$/m)
+  assert.deepEqual([...all.matchAll(/^echo VIGIL-STEP ([0-9])$/gm)].map(m => Number(m[1])), [0, 1, 2, 3])
+  assert.match(all, /^\/usr\/bin\/pacman -S --needed --noconfirm clamav \$c arch-audit osv-scanner fwupd$/m)
 })
 
 test("a scan started elsewhere is followed, and anything odd is refused", () => {

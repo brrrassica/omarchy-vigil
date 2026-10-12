@@ -226,7 +226,7 @@ lower it. A warning you mark as reviewed stops counting.
 | Changes to important files | Records a fingerprint of accounts, PAM, SSH settings, `~/.ssh/authorized_keys`, system and user services, autostart entries and your startup files, and lists anything changed, added or removed since. Changes that match exactly what a package update shipped (from pacman's own records) are not reported, nor are system users that packages add. Changes to who can log in or what runs at start are warnings; changes to your own shell files are information. **Accept these changes** records the current state as the new normal. |
 | Virus scan | ClamAV scans your home folder once a week and in every Full scan, as you, with signatures ClamAV keeps current. Infected files are listed with **Open ClamUI** to quarantine them. If ClamAV is wrong about a file you know is safe (a game's DLL, say), press **False positive** next to it: Vigil records that exact file's SHA-256 and stops counting it, and reports it again if the file ever changes. **Not a false positive** counts it again. Only ClamAV's published signatures count; its guess-based "potentially unwanted" rules stay off. |
 | Scans scheduled twice | Finds other apps that repeat what Vigil already runs every week: a scheduled scan in ClamUI whose folders are all inside your home folder, and the older Bumblebee plugin (once Vigil runs Bumblebee itself). **Let Vigil run them** turns those off the way you would in each app: ClamUI's timer and its own Scheduled scans setting, and `omarchy plugin disable` for the plugin. Undo turns back on exactly what it turned off. A ClamUI schedule that also covers folders outside your home folder, and the Security Scan plugin (it runs AUR-Malware, which Vigil does not), are listed but left on. Nothing is offered when Vigil's own weekly run is off. |
-| ClamUI | Vigil hands virus scanning to [ClamUI](https://github.com/linx-systems/clamui): file and folder scans, scheduled scans, USB drive scans and quarantine. When it is installed, **Open ClamUI** starts it; otherwise Vigil offers to install it from Flathub. |
+| ClamUI | Vigil hands virus scanning to [ClamUI](https://github.com/linx-systems/clamui): file and folder scans, scheduled scans, USB drive scans and quarantine. When it is installed, **Open ClamUI** starts it; otherwise Vigil installs it from the Arch repositories (`clamui`), so the Omarchy update keeps it current, and it uses the system's ClamAV. A ClamUI you installed from Flathub keeps working. |
 | ClamAV virus engine | Whether ClamAV is installed and its signatures keep themselves up to date. Vigil turns on ClamAV's own update service (`clamav-freshclam`) when it installs ClamAV or ClamUI, and offers to if it is off. |
 
 ### Supply
@@ -368,7 +368,7 @@ week Vigil also:
 
 Each happens only once the tool is installed, and turning `autoUpdate` off
 limits it to when you press **Update sources** or **Full scan**. Actions you start yourself also use
-the network and say so first: installing ClamUI (Arch mirrors, dl.flathub.org,
+the network and say so first: installing ClamUI (Arch mirrors,
 ClamAV's servers), installing a tool (Arch mirrors), ClamAV's signature
 service (ClamAV's servers), and `omarchy-update`.
 
@@ -433,7 +433,8 @@ nothing keeps running. These stay behind until you remove them:
   `sudo mv /etc/avahi/avahi-daemon.conf.vigil-backup /etc/avahi/avahi-daemon.conf`.
   Easier: use **Undo** on each finding before you remove Vigil.
 - Apps and scanners you installed through Vigil. Remove ClamUI with
-  `flatpak uninstall --user io.github.linx_systems.ClamUI`, and `clamav`,
+  `omarchy pkg drop clamui` (or `flatpak uninstall --user io.github.linx_systems.ClamUI`
+  if you installed it from Flathub), and `clamav`,
   `arch-audit` or `osv-scanner` with `omarchy pkg drop <name>` (and `lynis`
   or `rkhunter`, if an earlier Vigil installed them). Remove Bumblebee with
   `sudo rm /usr/local/bin/bumblebee`.

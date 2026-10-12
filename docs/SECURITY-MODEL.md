@@ -130,8 +130,10 @@ accepted) cannot be signalled; the panel then says so.
   writable by anyone else, in a root-owned directory.
 - **Install** (shown in red as "MISSING … INSTALL" when a helper is
   missing) is one constant root script: `pacman -S --needed --noconfirm`
-  for ClamAV, arch-audit, osv-scanner, fwupd and Flatpak, then Bumblebee,
-  then ClamUI from Flathub as you. Bumblebee is installed and updated by
+  for ClamAV, ClamUI (skipped when you already have it from Flathub),
+  arch-audit, osv-scanner and fwupd, then Bumblebee. Everything except
+  Bumblebee comes from the Arch repositories, so `omarchy-update` keeps it
+  current. Bumblebee is installed and updated by
   one constant root script (`BUMBLEBEE_SCRIPT` in `bin/vigil`, identical
   to `BUMBLEBEE_INSTALL` in `Model.js`; a test checks), used by Install,
   Update Bumblebee and Update sources. It takes no data from the report:

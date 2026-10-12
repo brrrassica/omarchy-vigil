@@ -533,13 +533,10 @@ var TERMINAL_ACTIONS = {
     title: "Install ClamUI",
     what: ["Installs ClamUI, an app for virus scans and quarantine, with ClamAV and its virus signatures,",
            "and turns on the service that keeps the signatures up to date.",
-           "Downloads from the Arch mirrors, Flathub and the ClamAV servers.",
-           "Technical: pacman -S flatpak clamav, freshclam service, then as you: flatpak install --user ClamUI"],
-    run: "/usr/bin/pacman -S --needed --noconfirm flatpak clamav && /usr/bin/freshclam "
-      + "&& /usr/bin/systemctl enable --now clamav-freshclam.service",
-    // Then, as you: ClamUI goes into your own Flatpak installation.
-    then: "/usr/bin/flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo "
-      + "&& /usr/bin/flatpak install --user --noninteractive flathub io.github.linx_systems.ClamUI && echo 'ClamUI is installed.'"
+           "Both come from the Arch repositories, so the Omarchy update keeps them current.",
+           "Technical: pacman -S clamav clamui, freshclam, enable clamav-freshclam"],
+    run: "/usr/bin/pacman -S --needed --noconfirm clamav clamui && /usr/bin/freshclam "
+      + "&& /usr/bin/systemctl enable --now clamav-freshclam.service && echo 'ClamUI is installed.'"
   },
 
 
@@ -559,25 +556,23 @@ var TERMINAL_ACTIONS = {
            "(malicious packages), fwupd (firmware updates), ClamUI (virus scans and quarantine) and Bumblebee by Perplexity",
            "(known-compromised packages). Ones you already have are left alone.",
            "Bumblebee comes from Perplexity on GitHub: the newest release that has been out for a week,",
-           "installed only if it matches the checksum Perplexity published. The rest come from the Arch mirrors, Flathub and ClamAV.",
-           "Technical: pacman -S --needed clamav arch-audit osv-scanner fwupd flatpak, enable clamav-freshclam, bumblebee to /usr/local/bin, flatpak install ClamUI"],
+           "installed only if it matches the checksum Perplexity published. The rest come from the Arch repositories,",
+           "so the Omarchy update keeps them current.",
+           "Technical: pacman -S --needed clamav clamui arch-audit osv-scanner fwupd, enable clamav-freshclam, bumblebee to /usr/local/bin"],
     // What the progress bar says at each "VIGIL-STEP n" line the script prints.
-    stages: ["Installing ClamAV, arch-audit, osv-scanner and fwupd from the Arch mirrors",
+    stages: ["Installing ClamAV, ClamUI, arch-audit, osv-scanner and fwupd from the Arch repositories",
              "Turning on automatic virus signature updates",
-             "Downloading Bumblebee from Perplexity and checking it",
-             "Installing ClamUI from Flathub (the longest step)"],
+             "Downloading Bumblebee from Perplexity and checking it"],
+    // ClamUI from the Arch repositories, unless you already have it as a Flatpak.
     run: "echo VIGIL-STEP 1\n"
-      + "/usr/bin/pacman -S --needed --noconfirm clamav arch-audit osv-scanner fwupd flatpak\necho 'Packages installed.'\n"
+      + "c=clamui; [ -d \"$HOME/.local/share/flatpak/app/io.github.linx_systems.ClamUI\" ] && c=\n"
+      + "/usr/bin/pacman -S --needed --noconfirm clamav $c arch-audit osv-scanner fwupd\necho 'Packages installed.'\n"
       + "echo VIGIL-STEP 2\n"
       + "/usr/bin/systemctl enable --now clamav-freshclam.service\n"
       + "echo VIGIL-STEP 3\n"
       + "if [ ! -x /usr/local/bin/bumblebee ]; then\n"
       + "  ( set -e\n" + BUMBLEBEE_INSTALL + ") || echo 'Bumblebee could not be installed now; press Install again later.'\n"
-      + "fi\n",
-    then: "echo VIGIL-STEP 4\n"
-      + "/usr/bin/flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo "
-      + "&& /usr/bin/flatpak install --user --noninteractive --or-update flathub io.github.linx_systems.ClamUI "
-      + "&& echo 'ClamUI is installed.'"
+      + "fi\n"
   },
   "restart": {
     title: "Restart the computer",

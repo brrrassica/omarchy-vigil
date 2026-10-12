@@ -22,11 +22,12 @@ the specialised plugins where they go deeper.
 
 ## ClamUI
 
-[ClamUI](https://github.com/linx-systems/clamui) (MIT, Flathub
-`io.github.linx_systems.ClamUI`) is an actively maintained GTK4 front end for
+[ClamUI](https://github.com/linx-systems/clamui) (MIT, in Arch's extra repository as `clamui`,
+and on Flathub as `io.github.linx_systems.ClamUI`) is an actively maintained GTK4 front end for
 ClamAV: scan profiles, scheduled scans, removable-drive scans, quarantine with
 SHA-256 checks on restore, and an advisory audit. Rather than rebuild it, Vigil
-detects it under Detect, opens it, and offers to install it from Flathub.
+detects it under Detect, opens it, and installs it from the Arch repositories, so Omarchy's
+updater keeps it current.
 
 ## Plugins that already aim to be "the security plugin"
 
