@@ -7,6 +7,10 @@
 // for type, range and length before the panel shows it. A report that does
 // not match the shape is rejected whole rather than trimmed into shape.
 
+// Must match manifest.json and VERSION in bin/vigil (a test checks). The
+// helper runs from disk every time, but this file stays loaded until the
+// shell restarts, so after an update the two can differ for a while.
+var VERSION = "0.20.1"
 var MAX_REPORT_CHARS = 512 * 1024
 var MAX_CHECKS = 160
 var MAX_STR = 400
@@ -924,11 +928,13 @@ var DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
 function parseSources(list) {
   if (list === undefined) return []
-  if (!Array.isArray(list) || list.length > SOURCE_IDS.length) return null
+  if (!Array.isArray(list) || list.length > 40) return null
   var out = []
   for (var i = 0; i < list.length; i++) {
     var e = list[i]
-    if (!e || typeof e !== "object" || !inList(e.id, SOURCE_IDS) || !inList(e.state, SOURCE_STATES)) return null
+    if (!e || typeof e !== "object") return null
+    if (isString(e.id, 40) && !inList(e.id, SOURCE_IDS)) continue      // from a newer helper: skipped
+    if (!inList(e.id, SOURCE_IDS) || !inList(e.state, SOURCE_STATES)) return null
     if (!isString(e.label, 40) || !isString(e.date, 10) || !isString(e.tried, 10)) return null
     if ((e.date !== "" && !DATE_RE.test(e.date)) || (e.tried !== "" && !DATE_RE.test(e.tried))) return null
     var time = e.time === undefined ? "" : e.time
@@ -1177,6 +1183,36 @@ function parseHistory(h) {
   return out
 }
 
+// The version a report says it came from, without trusting anything else in it.
+function reportVersion(text) {
+  if (typeof text !== "string" || text.length === 0 || text.length > MAX_REPORT_CHARS) return ""
+  var d
+  try { d = JSON.parse(text) } catch (e) { return "" }
+  return d && typeof d === "object" && isString(d.version, 20) && /^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(d.version)
+    ? d.version : ""
+}
+
+// Which part of a rejected report failed, in a few words, for the status line.
+function reportProblem(text) {
+  if (typeof text !== "string" || text.length === 0) return "it was empty"
+  if (text.length > MAX_REPORT_CHARS) return "it was too large"
+  var d
+  try { d = JSON.parse(text) } catch (e) { return "it was not JSON" }
+  if (!d || typeof d !== "object" || d.schema !== 1) return "unknown format"
+  if (!Array.isArray(d.checks)) return "no checks"
+  for (var i = 0; i < d.checks.length; i++) {
+    if (!validCheck(d.checks[i])) {
+      var id = d.checks[i] && isString(d.checks[i].id, 40) && /^[a-z0-9-]+$/.test(d.checks[i].id) ? d.checks[i].id : "?"
+      return "the " + id + " check"
+    }
+  }
+  if (parseSources(d.sources) === null) return "the Last run list"
+  if (parseLastRun(d.lastRun) === null) return "the last update"
+  if (parseHistory(d.history) === null) return "the score history"
+  if (d.running !== undefined && parseRunningValue(d.running) === undefined) return "the running scan"
+  return "the report"
+}
+
 function parseReport(text) {
   if (typeof text !== "string" || text.length === 0 || text.length > MAX_REPORT_CHARS) return null
   var d
@@ -1242,9 +1278,12 @@ function parseReport(text) {
   var nextFullScan = optionalDate(d.nextFullScan)
   var missing = []
   if (d.missing !== undefined) {
-    if (!Array.isArray(d.missing) || d.missing.length > 6) return null
+    if (!Array.isArray(d.missing) || d.missing.length > 20) return null
     for (var mi = 0; mi < d.missing.length; mi++) {
-      if (!Object.prototype.hasOwnProperty.call(HELPER_NAMES, d.missing[mi]) || missing.indexOf(d.missing[mi]) !== -1) return null
+      if (!isString(d.missing[mi], 40)) return null
+      // A helper this panel does not know yet (a newer helper) is skipped.
+      if (!Object.prototype.hasOwnProperty.call(HELPER_NAMES, d.missing[mi])) continue
+      if (missing.indexOf(d.missing[mi]) !== -1) return null
       missing.push(d.missing[mi])
     }
   }
@@ -1416,7 +1455,8 @@ function tooltip(report, running) {
 // Exported for the Node tests; the QML engine has no `module`.
 if (typeof module !== "undefined") {
   module.exports = {
-    plain: plain, parseReport: parseReport, parseFixResult: parseFixResult, terminalScript: terminalScript,
+    plain: plain, parseReport: parseReport, reportVersion: reportVersion, reportProblem: reportProblem,
+    VERSION: VERSION, parseFixResult: parseFixResult, terminalScript: terminalScript,
     terminalAction: terminalAction, actionPlan: actionPlan, runMode: runMode, stripSudo: stripSudo, launcherPath: launcherPath, canRun: canRun, checksFor: checksFor, withSettings: withSettings,
     topFindings: topFindings, countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
     tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,

@@ -83,6 +83,7 @@ Panel {
   property bool fixOverflow: false
   property string fixAction: ""
   property string statusMessage: ""
+  property bool updatePending: false
   property bool statusIsError: false
 
   property string tab: "overview"
@@ -136,10 +137,19 @@ Panel {
     if (auditOverflow) { setStatus("The check produced too much output and was stopped.", true); return }
     if (code !== 0) { setStatus("The check did not finish (exit " + code + ").", true); return }
     var parsed = Model.parseReport(text.trim())
-    if (!parsed) { setStatus("The check returned something Vigil could not read.", true); return }
+    // After an update the helper on disk is new but this panel is the one the
+    // shell loaded at start; only a shell restart loads the new panel.
+    var helperVersion = Model.reportVersion(text.trim())
+    updatePending = helperVersion !== "" && helperVersion !== Model.VERSION
+    if (!parsed) {
+      if (updatePending) setStatus("Vigil was updated to " + helperVersion + ". Restart the shell to load the new panel.", true)
+      else setStatus("The check returned something Vigil could not read (" + Model.reportProblem(text.trim()) + ").", true)
+      return
+    }
     report = Model.withSettings(parsed, root.autoUpdate)
     otherRun = feedProc.running ? null : parsed.running
     if (statusIsError) setStatus("", false)
+    if (updatePending) setStatus("Vigil was updated to " + helperVersion + ". Restart the shell to load the new panel.", false)
     if (rowIndex >= visibleChecks.length) rowIndex = Math.max(0, visibleChecks.length - 1)
     if (root.isPrimary && root.notifyOnNew && parsed.fresh.length > 0) notifyNew(parsed.fresh.length)
     if (root.isPrimary && root.autoUpdate && parsed.feedsDue && parsed.running === null) refreshFeeds("")
@@ -523,6 +533,14 @@ Panel {
     repeat: true
     running: root.runElsewhere
     onTriggered: if (!runningProc.running) runningProc.running = true
+  }
+
+  // Omarchy's own shell restart, after Vigil was updated on disk.
+  Process {
+    id: restartProc
+    clearEnvironment: true
+    environment: root.actionEnv
+    command: ["/usr/bin/bash", "-c", "omarchy-restart-shell"]
   }
 
   Process {
@@ -930,6 +948,17 @@ Panel {
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
+          }
+
+          Button {
+            visible: root.updatePending
+            text: restartProc.running ? "Restarting\u2026" : "Restart shell"
+            tooltipText: "Loads the updated Vigil. The bar and panels come back after a moment"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            bordered: true
+            enabled: !restartProc.running
+            onClicked: restartProc.running = true
           }
 
           Text {

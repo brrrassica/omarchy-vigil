@@ -27,7 +27,7 @@ the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.20.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.20.1.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -36,6 +36,10 @@ the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 ```sh
 omarchy plugin add https://github.com/keasbeexd/omarchy-vigil --enable
 ```
+
+After updating Vigil, restart the shell so the new panel loads (the panel
+offers a **Restart shell** button when it notices the update); until then
+the old panel keeps running against the new helper.
 
 The shield appears on the right of the bar. Nothing else is needed: Vigil
 uses Python and commands Omarchy already ships. ClamUI, ClamAV, the

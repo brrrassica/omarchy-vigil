@@ -118,6 +118,11 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 - [x] Firmware updates: the Full scan asks fwupd (LVFS); a firmware
       security fix is a warning, with Omarchy's `omarchy-update-firmware`.
       fwupd joins the red Install button.
+- [x] 0.20.1: after an update, the panel no longer fails with "could not
+      read": the shell keeps the old panel loaded until it restarts, so the
+      panel compares versions and offers **Restart shell**. Names it does
+      not know yet (a new source or helper) are skipped, and any other
+      rejection says which part failed.
 
 ## 0.19: false positives
 

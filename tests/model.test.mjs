@@ -323,7 +323,9 @@ test("sources and last run are validated and worded plainly", () => {
   assert.equal(r.lastRun.at, "2026-10-12 09:41")
   assert.deepEqual(parse(report()).sources, [])
   assert.equal(parse(report()).lastRun.at, "")
-  assert.equal(parse(report({ sources: [Object.assign({}, good, { id: "evil" })] })), null)
+  // A source a newer helper reports is skipped, not a reason to reject everything.
+  assert.deepEqual(parse(report({ sources: [Object.assign({}, good, { id: "some-new-source" }), good] })).sources.map(x => x.id), [good.id])
+  assert.equal(parse(report({ sources: [Object.assign({}, good, { id: { evil: 1 } })] })), null)
   assert.equal(parse(report({ sources: [Object.assign({}, good, { state: "great" })] })), null)
   assert.equal(parse(report({ sources: [Object.assign({}, good, { date: "<img>" })] })), null)
   assert.equal(parse(report({ lastRun: { at: "now", ok: true } })), null)
@@ -541,7 +543,8 @@ test("missing helpers: a red Install button that names them, and one plan for al
   assert.equal(M.missingLabel(parse(report())), "")
   const r = parse(report({ missing: ["clamav", "clamui"] }))
   assert.equal(M.missingLabel(r), "MISSING ClamAV, ClamUI. INSTALL")
-  assert.equal(parse(report({ missing: ["evil"] })), null)
+  assert.deepEqual(parse(report({ missing: ["some-new-helper", "clamav"] })).missing, ["clamav"])
+  assert.equal(parse(report({ missing: [{ evil: 1 }] })), null)
   assert.equal(parse(report({ missing: ["clamav", "clamav"] })), null)
   const card = M.confirmation("terminal", "install-helpers", r)
   assert.equal(card.lines[0], "Missing now: ClamAV, ClamUI.")
@@ -694,4 +697,25 @@ test("virus detections each carry an id for Ignore, and the card says what ignor
   for (const bad of [{ id: "XYZ", text: "x", ignored: false }, { id: "", text: "x" },
                      { id: "../../etc/passwd", text: "x", ignored: true }])
     assert.equal(parse(report({ checks: [check({ items: [bad] })] })), null)
+})
+
+
+test("after an update, the panel names the new version instead of failing", () => {
+  const manifest = JSON.parse(readFileSync(path.join(here, "..", "manifest.json"), "utf8"))
+  assert.equal(M.VERSION, manifest.version)
+  const helper = readFileSync(path.join(here, "..", "bin", "vigil"), "utf8")
+  assert.match(helper, new RegExp('^VERSION = "' + M.VERSION.replaceAll(".", "\\.") + '"$', "m"))
+  const text = JSON.stringify(report({ version: "9.9.9" }))
+  assert.equal(M.reportVersion(text), "9.9.9")
+  assert.equal(M.reportVersion('{"version": "<b>1</b>"}'), "")
+  assert.equal(M.reportVersion("nope"), "")
+})
+
+test("a rejected report says which part failed", () => {
+  const bad = report({ checks: [check({ id: "firmware", status: "superb" })] })
+  assert.equal(parse(bad), null)
+  assert.equal(M.reportProblem(JSON.stringify(bad)), "the firmware check")
+  assert.equal(M.reportProblem(JSON.stringify(report({ lastRun: { at: "now", ok: true } }))), "the last update")
+  assert.equal(M.reportProblem("{"), "it was not JSON")
+  assert.equal(M.reportProblem(JSON.stringify(report({ checks: [check({ id: "<script>" , status: "x"})] }))), "the ? check")
 })
