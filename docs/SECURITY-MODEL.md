@@ -68,6 +68,17 @@ is kept in `progress.json`; `vigil running` (no arguments) reports it, and
 the panel accepts it only while the lock is held and only with a step text
 from the helper's fixed list.
 
+**Stop** sends TERM to the panel's own run; the helper then signals the
+program it is running (its own process group) and skips the remaining
+steps, and `run()` starts nothing more. For a run the panel did not start,
+`vigil stop` (no arguments) reads `run.json`: the helper's PID and the PID
+of the program it is running, each with its start time from
+`/proc/<pid>/stat`. It signals a PID only if that process still runs as
+you with the recorded start time, so a reused PID is never hit, and the
+program by its process group. TERM first, KILL after 15 seconds if the
+lock is still held. A step running as root (a password prompt that was
+accepted) cannot be signalled; the panel then says so.
+
 ## Input is untrusted
 
 - The helper's stdout is read in raw chunks (`SplitParser` with an empty

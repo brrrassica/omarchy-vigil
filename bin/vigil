@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta
 
-VERSION = "0.17.3"
+VERSION = "0.17.4"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -293,8 +293,8 @@ def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False):
     With `on_line`, each output line is handed to it as it arrives and only
     the lines it returns True for are kept (and counted against `limit`).
     """
-    if not argv or not argv[0].startswith("/"):
-        return None, ""
+    if not argv or not argv[0].startswith("/") or STOP["on"]:
+        return None, b"" if raw else ""
     try:
         proc = subprocess.Popen(
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -303,7 +303,10 @@ def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False):
             pass_fds=(RUN_LOCK["fd"],) if RUN_LOCK["fd"] is not None else (),
         )
     except OSError:
-        return None, ""
+        return None, b"" if raw else ""
+    CURRENT["proc"] = proc
+    if RUN_LOCK["fd"] is not None:
+        save_run_info(proc.pid)
     buf = bytearray()
     pending = b""
     deadline = time.monotonic() + timeout
@@ -345,11 +348,12 @@ def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False):
                 ok = False
         if proc.poll() is None:
             _kill_group(proc)
+        CURRENT["proc"] = None
         try:
             proc.stdout.close()
         except OSError:
             pass
-    if not ok or len(buf) > limit:
+    if not ok or len(buf) > limit or STOP["on"]:
         return None, b"" if raw else ""
     return proc.returncode, bytes(buf) if raw else buf.decode("utf-8", "replace")
 
@@ -2439,6 +2443,8 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
     
     done, failed, why = [], [], {}
     for i, name in enumerate(steps, 1):
+        if STOP["on"]:
+            break
         progress(i, len(steps), STEP_TEXT[name])
         try:
             if name == "virus-scan":
@@ -2457,11 +2463,20 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
             why[name] = str(e)
         except OSError:
             failed.append(name)
+    stopped = STOP["on"]
+    if stopped:
+        # What was stopped or never ran counts as tried today, so the weekly run
+        # does not start it again straight away; it tries again tomorrow.
+        for name in steps:
+            if name in FEED_FILES and name not in done:
+                save_feed(name, {}, ok=False)
     if sources:
-        save_last_run(not [n for n in failed if n in SOURCE_FEEDS], force or full or sources_only)
+        save_last_run(not stopped and not [n for n in failed if n in SOURCE_FEEDS], force or full or sources_only)
     if run_full:
-        save_feed("full-scan", {}, ok=not [n for n in failed if n in ("virus-scan", "bumblebee")])
+        save_feed("full-scan", {}, ok=not stopped and not [n for n in failed if n in ("virus-scan", "bumblebee")])
     no_pkexec = " The password check could not run: pkexec is missing." if full and not can_ask_password() else ""
+    if stopped and not done:
+        return {"ok": True, "stopped": True, "action": "", "message": "Stopped."}
     if not done and not failed:
         if run_full:
             return {"ok": True, "action": "", "message": "Checked every setting. Install ClamUI (Detect tab) "
@@ -2491,7 +2506,9 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
     found = feed_findings()
     msg += (" On this machine: %s. See the tabs for details." % "; ".join(found)) if found \
         else " Nothing on this machine needs attention."
-    return {"ok": not failed, "action": "", "message": clean(msg.strip())}
+    if stopped:
+        msg = "Stopped." + (" Done before that: %s." % _and(parts) if parts else "")
+    return {"ok": not failed or stopped, "stopped": stopped, "action": "", "message": clean(msg.strip())}
 
 
 CLAMUI_APP_ID = "io.github.linx_systems.ClamUI"
@@ -4104,6 +4121,91 @@ PROGRESS = {"on": False, "saved": 0.0}
 RUN_LOCK = {"fd": None}
 BUSY_DIR = "busy"
 PROGRESS_FILE = "progress.json"
+RUN_FILE = "run.json"
+STOP = {"on": False}
+CURRENT = {"proc": None}
+
+
+def proc_start(pid):
+    """A process's start time (clock ticks since boot) if it runs as us, else None.
+    With the pid it names one process, even after the pid is reused."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+        return None
+    try:
+        if os.stat("/proc/%d" % pid).st_uid != os.geteuid():
+            return None
+        with open("/proc/%d/stat" % pid, "rb") as f:
+            stat_line = f.read(4096).decode("ascii", "replace")
+        return int(stat_line.rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def save_run_info(child=None):
+    """Who to stop: this helper, and the program it is running now (in its own
+    process group, so stopping it also stops what it started, like clamscan
+    under nice)."""
+    info = {"pid": os.getpid(), "pidStart": proc_start(os.getpid())}
+    if child:
+        info.update(child=child, childStart=proc_start(child))
+    try:
+        dirfd = _state_dir()
+    except (OSError, Refused):
+        return
+    try:
+        write_atomic(dirfd, RUN_FILE, json.dumps(info, separators=(",", ":")).encode())
+    except OSError:
+        pass
+    finally:
+        os.close(dirfd)
+
+
+def _on_stop(signum, frame):
+    """SIGTERM while a run goes: stop the program it is running now and skip
+    the remaining steps. Only signals here; run() waits for the program."""
+    STOP["on"] = True
+    proc = CURRENT["proc"]
+    if proc is not None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+
+def stop_run():
+    """`vigil stop`: stop the scan or update that holds the run lock, whoever
+    started it. Only processes recorded by that run, still running as you with
+    the start time recorded, are signalled."""
+    if run_in_progress() is None:
+        return {"ok": True, "action": "", "message": "Nothing is running."}
+    info = _state_json(RUN_FILE) or {}
+    targets = []
+    for key, group in (("pid", False), ("child", True)):
+        pid, start = info.get(key), info.get(key + "Start")
+        if isinstance(start, int) and proc_start(pid) == start:
+            targets.append((pid, start, group))
+
+    def send(sig):
+        for pid, start, group in targets:
+            if proc_start(pid) == start:
+                try:
+                    os.killpg(pid, sig) if group else os.kill(pid, sig)
+                except OSError:
+                    pass
+
+    if not targets:
+        return {"ok": False, "action": "", "message": "Could not find the run to stop."}
+    send(signal.SIGTERM)
+    for sig in (None, signal.SIGKILL):
+        if sig:
+            send(sig)
+        deadline = time.monotonic() + (15 if sig is None else 5)
+        while time.monotonic() < deadline:
+            if run_in_progress() is None:
+                return {"ok": True, "action": "", "message": "Stopped."}
+            time.sleep(0.25)
+    return {"ok": False, "action": "", "message": "It did not stop. A step that asked for your password "
+            "may still be waiting: cancel that dialog."}
 
 
 def take_run_lock():
@@ -4213,8 +4315,13 @@ def main(argv):
             emit({"ok": True, "busy": True, "action": "",
                   "message": "Vigil is already running a scan or update. This one was not started."})
             return 0
+        signal.signal(signal.SIGTERM, _on_stop)
+        save_run_info()
         emit(refresh_due_feeds(force=flag == "--force", sources_only=flag == "--sources", full=flag == "--full",
                                scan_only=flag == "--scan"))
+        return 0
+    if len(argv) == 2 and argv[1] == "stop":
+        emit(stop_run())
         return 0
     if len(argv) == 2 and argv[1] == "running":
         # Cheap: lets a panel follow a scan it did not start, without a full check.
@@ -4223,7 +4330,7 @@ def main(argv):
     if len(argv) == 2 and argv[1] == "version":
         emit({"version": VERSION})
         return 0
-    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil refresh-feeds [--force|--sources|--full|--scan] | vigil running | vigil version\n")
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil refresh-feeds [--force|--sources|--full|--scan] | vigil running | vigil stop | vigil version\n")
     return 2
 
 

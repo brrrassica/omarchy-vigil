@@ -55,10 +55,10 @@ def v(tmp_path, monkeypatch):
     commands = {}
     mod.COMMANDS = commands
 
-    def fake_run(argv, timeout=8, limit=0, on_line=None):
+    def fake_run(argv, timeout=8, limit=0, on_line=None, raw=False):
         key = tuple(argv)
         if key not in commands:
-            return None, ""
+            return None, b"" if raw else ""
         rc, out = commands[key]
         if on_line is not None and rc is not None:      # stream like the real run(): keep what on_line wants
             out = "".join(l + "\n" for l in out.splitlines() if on_line(l))
@@ -1921,3 +1921,111 @@ def test_set_up_methods_offer_omarchys_removal_as_undo(v):
     assert "_undo" not in c
     put(Path(v.ROOT, "etc/pam.d/sudo"), "auth sufficient pam_u2f.so cue\nauth include system-auth\n")
     assert strong_auth(v)["undo"] == {"action": "undo-fido2", "label": "Stop using a security key"}
+
+
+# --------------------------------------------------------------------------
+# Stop
+
+def test_stop_skips_the_rest_and_keeps_what_finished(v, monkeypatch):
+    clamscan_ok(v)
+    bumblebee_installed(v)
+    order = []
+
+    def bumblebee():
+        order.append("bumblebee")
+        v.STOP["on"] = True                       # Stop pressed while Bumblebee runs
+        raise v.Refused("it was stopped")
+    monkeypatch.setattr(v, "refresh_bumblebee", bumblebee)
+    monkeypatch.setattr(v, "refresh_virus_scan", lambda cb: order.append("virus-scan"))
+    try:
+        out = v.refresh_due_feeds(scan_only=False, full=False, force=True)
+    finally:
+        v.STOP["on"] = False
+    assert "virus-scan" not in order                              # the step after the stop never ran
+    assert out["stopped"] is True and out["ok"] is True and out["message"].startswith("Stopped.")
+    for name in ("virus-scan", "bumblebee", "full-scan"):
+        cache = json.loads(Path(v.HOME, ".local/state/omarchy-vigil", v.FEED_FILES[name]).read_text())
+        assert cache["attempted"] and "at" not in cache, name    # tried today: the weekly run waits a day
+
+
+def test_nothing_new_starts_after_a_stop(tmp_path):
+    mod = load_vigil()
+    mod.STOP["on"] = True
+    assert mod.run(["/bin/true"]) == (None, "")
+    assert mod.run(["/bin/true"], raw=True) == (None, b"")
+
+
+def test_stop_with_nothing_running(v):
+    assert v.stop_run() == {"ok": True, "action": "", "message": "Nothing is running."}
+
+
+def test_process_identity_is_pid_and_start_time(v):
+    me = v.proc_start(os.getpid())
+    assert isinstance(me, int) and me == v.proc_start(os.getpid())
+    for bad in (1, 0, -5, True, "12", None, 2 ** 40):
+        assert v.proc_start(bad) is None
+
+
+STOP_CHILD = r"""
+import importlib.util, importlib.machinery, json, signal, sys, time
+l = importlib.machinery.SourceFileLoader("vigil", sys.argv[1])
+s = importlib.util.spec_from_loader("vigil", l); v = importlib.util.module_from_spec(s); l.exec_module(v)
+v.HOME = sys.argv[2]
+assert v.take_run_lock()
+signal.signal(signal.SIGTERM, v._on_stop)
+v.save_run_info()
+print("ready", flush=True)
+rc, out = v.run(["/usr/bin/sleep", "60"], timeout=120)
+print(json.dumps({"rc": rc, "stopped": v.STOP["on"]}), flush=True)
+"""
+
+
+def test_stop_ends_a_real_run_and_its_program(tmp_path):
+    import subprocess as sp
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    script = tmp_path / "child.py"
+    script.write_text(STOP_CHILD)
+    child = sp.Popen(["/usr/bin/python3", "-I", str(script), str(REPO / "bin" / "vigil"), str(home)],
+                     stdout=sp.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "ready"
+        mod = load_vigil()
+        mod.HOME = str(home)
+        for _ in range(50):                                 # until the sleep is recorded
+            info = mod._state_json(mod.RUN_FILE) or {}
+            if info.get("child"):
+                break
+            time.sleep(0.05)
+        sleeper = info["child"]
+        assert mod.run_in_progress() is not None
+        assert mod.stop_run()["message"] == "Stopped."
+        assert json.loads(child.stdout.readline()) == {"rc": None, "stopped": True}
+        assert mod.proc_start(sleeper) is None              # the program it ran is gone too
+        assert mod.run_in_progress() is None
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_stop_ends_a_program_left_behind_by_a_killed_run(tmp_path):
+    import subprocess as sp
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    script = tmp_path / "child.py"
+    script.write_text(STOP_CHILD)
+    child = sp.Popen(["/usr/bin/python3", "-I", str(script), str(REPO / "bin" / "vigil"), str(home)],
+                     stdout=sp.PIPE, text=True)
+    assert child.stdout.readline().strip() == "ready"
+    mod = load_vigil()
+    mod.HOME = str(home)
+    for _ in range(50):
+        info = mod._state_json(mod.RUN_FILE) or {}
+        if info.get("child"):
+            break
+        time.sleep(0.05)
+    child.kill()                                            # the shell went away hard
+    child.wait()
+    assert mod.run_in_progress() is not None                # the sleep still holds the lock
+    assert mod.stop_run()["message"] == "Stopped."
+    assert mod.run_in_progress() is None

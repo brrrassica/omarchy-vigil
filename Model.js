@@ -1159,7 +1159,7 @@ function parseFixResult(text) {
   var d
   try { d = JSON.parse(text) } catch (e) { return null }
   if (!d || typeof d !== "object" || typeof d.ok !== "boolean" || !isString(d.message, 400)) return null
-  return { ok: d.ok, message: plain(d.message, 240) }
+  return { ok: d.ok, message: plain(d.message, 240), stopped: d.stopped === true }
 }
 
 // ---------------------------------------------------------------------------

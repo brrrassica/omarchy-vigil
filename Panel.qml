@@ -438,6 +438,45 @@ Panel {
     }
   }
 
+  // Stop: `vigil stop` stops whichever scan or update holds the lock, this
+  // copy's own or one left from before a shell restart.
+  property bool stopRequested: false
+  function stopRun() {
+    if (stopProc.running || stopRequested) return
+    if (feedProc.running) {
+      // This copy's own run: the helper stops its current step on TERM,
+      // keeps what finished and reports on the result card.
+      stopRequested = true
+      feedProc.signal(15)
+      feedKill.restart()
+      return
+    }
+    if (!runElsewhere) return
+    stopProc.buffer = ""
+    stopProc.running = true
+  }
+
+  Process {
+    id: stopProc
+    clearEnvironment: true
+    environment: root.helperEnv
+    command: ["/usr/bin/python3", "-I", "-S", root.helperPath, "stop"]
+    property string buffer: ""
+    stdout: SplitParser {
+      splitMarker: ""
+      onRead: function(data) { stopProc.buffer = (stopProc.buffer + data).slice(-4096) }
+    }
+    onExited: function(exitCode, exitStatus) {
+      var r = exitCode === 0 ? Model.parseFixResult(stopProc.buffer.trim()) : null
+      stopProc.buffer = ""
+      // This copy's own run reports on its result card when it exits.
+      if (!r || !r.ok) root.setStatus(r ? r.message : "Could not stop it.", true)
+      else root.setStatus(r.message, false)
+      root.otherRun = null
+      root.runAudit()
+    }
+  }
+
   // Follows a run this copy did not start, cheaply, until it ends; then the
   // full check shows its results.
   Process {
@@ -546,6 +585,7 @@ Panel {
     onExited: function(exitCode, exitStatus) {
       feedKill.stop()
       feedDeadline.stop()
+      root.stopRequested = false
       var parsed = (!root.feedOverflow && exitCode === 0)
         ? Model.parseFixResult((root.feedResult !== "" ? root.feedResult : root.feedBuffer).trim()) : null
       root.feedBuffer = ""
@@ -564,7 +604,8 @@ Panel {
       }
       if (root.feedFull)
         Quickshell.execDetached(["/usr/bin/notify-send", "--app-name=Vigil", "--", "Vigil",
-          parsed ? "Full scan finished. Open the shield in the bar for the results." : "The Full scan did not finish."])
+          parsed && parsed.stopped ? "The Full scan was stopped."
+            : (parsed ? "Full scan finished. Open the shield in the bar for the results." : "The Full scan did not finish.")])
       root.feedForced = false
       root.feedFull = false
       root.runAudit()
@@ -577,7 +618,8 @@ Panel {
   Timer { id: fixDeadline; interval: 120000; onTriggered: if (fixProc.running) { fixProc.signal(15); fixKill.restart() } }
   Timer { id: fixKill; interval: 2000; onTriggered: if (fixProc.running) fixProc.signal(9) }
   Timer { id: feedDeadline; interval: 1200000; onTriggered: if (feedProc.running) { feedProc.signal(15); feedKill.restart() } }
-  Timer { id: feedKill; interval: 2000; onTriggered: if (feedProc.running) feedProc.signal(9) }
+  // Time for the helper to stop its current program and save what finished.
+  Timer { id: feedKill; interval: 15000; onTriggered: if (feedProc.running) feedProc.signal(9) }
 
   // First check shortly after login, then every refreshMinutes on the
   // primary monitor's copy. Secondary copies check when their panel opens.
@@ -982,6 +1024,15 @@ Panel {
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WordWrap
+              }
+              Button {
+                text: stopProc.running || root.stopRequested ? "Stopping\u2026" : "Stop"
+                tooltipText: "Stop this scan or update. What already finished is kept; the rest runs next time"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                bordered: true
+                enabled: !stopProc.running && !root.stopRequested
+                onClicked: root.stopRun()
               }
             }
             Repeater {

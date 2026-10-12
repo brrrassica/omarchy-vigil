@@ -140,6 +140,9 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       offers **Set up fingerprint** (Omarchy's setup, in a terminal, since you
       touch the sensor). Once a fingerprint or security key is set up, the row
       offers Omarchy's removal command as its Undo.
+- [x] 0.17.4: **Stop** under the progress bar ends a Full scan or update,
+      including one left running after a shell restart. Finished steps are
+      kept; the rest waits a day before the weekly run tries again.
 
 ## 0.16: no terminal pop-ups
 

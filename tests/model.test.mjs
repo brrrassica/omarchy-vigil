@@ -607,3 +607,10 @@ test("fingerprint setup and removal are Omarchy's own commands, in a terminal", 
   assert.equal(r.checks[0].undo.action, "undo-fingerprint")
   assert.equal(parse(report({ checks: [check({ undo: { action: "fingerprint", label: "x" } })] })), null)
 })
+
+test("a stopped run says so", () => {
+  assert.deepEqual(M.parseFixResult('{"ok":true,"stopped":true,"message":"Stopped."}'),
+                   { ok: true, message: "Stopped.", stopped: true })
+  assert.equal(M.parseFixResult('{"ok":true,"message":"Done."}').stopped, false)
+  assert.equal(M.parseFixResult('{"ok":true,"stopped":"yes","message":"Done."}').stopped, false)
+})

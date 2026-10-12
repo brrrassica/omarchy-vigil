@@ -27,7 +27,7 @@ the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.17.3.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.17.4.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -98,6 +98,11 @@ The Overview has two buttons:
   holes, malicious packages and AUR status. No scan runs. The automatic
   weekly update never asks for a password: it skips the signatures, which
   ClamAV's own service keeps current several times a day.
+
+While a Full scan or update runs, **Stop** under the progress bar ends it:
+the step it is on stops, what already finished is kept, and the rest is
+tried again the next day (or when you press the button again). Stop also
+ends a run left going after the shell restarted.
 
 Only one scan or update runs at a time. Pressing a button while one runs
 (on another monitor, or one still going after the shell restarted) starts
@@ -350,6 +355,7 @@ service (ClamAV's servers), and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/bumblebee-catalog.json` | the helper, mode 0600 | weekly and on Update sources: Perplexity's list of compromised packages, for Bumblebee |
 | `~/.local/state/omarchy-vigil/bumblebee.json` | the helper, mode 0600 | each Full scan: the compromised packages Bumblebee found, if any |
 | `~/.local/state/omarchy-vigil/progress.json` | the helper, mode 0600 | during a scan or update: its current step, so a panel that did not start it can show it |
+| `~/.local/state/omarchy-vigil/run.json` | the helper, mode 0600 | during a scan or update: the process IDs and start times of the run and the program it is running, so **Stop** can end it |
 | `~/.local/state/omarchy-vigil/busy/` | the helper, mode 0700, empty | once: the folder Vigil locks so only one scan or update runs at a time |
 | `~/.local/state/omarchy-vigil/last-run.json` | the helper, mode 0600 | after each weekly or button update: its date, time and whether every source updated |
 | `/usr/local/bin/bumblebee` | the Install button, as root | only when you install Bumblebee: Perplexity's program, checked against its published checksum |
