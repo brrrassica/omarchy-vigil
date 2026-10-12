@@ -1696,3 +1696,21 @@ def test_signatures_update_with_update_sources_only(v):
     v.COMMANDS[tuple(v.FRESHCLAM_ARGV)] = (126, "")                        # dialog dismissed
     res = v.refresh_due_feeds(sources_only=True)
     assert "virus signatures were not updated" in res["message"] and "tries again" not in res["message"]
+
+
+def test_clamui_activity_counts_in_the_last_run_list(v):
+    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
+    idx = {"version": 1, "entries": [
+        {"id": "a", "timestamp": "2026-10-10T09:00:00.1", "type": "scan"},
+        {"id": "b", "timestamp": "2026-10-11T21:30:00.5", "type": "scan"},
+        {"id": "c", "timestamp": "2026-10-11T08:15:00", "type": "update"},
+        {"id": "d", "timestamp": "<b>bad</b>", "type": "scan"}]}
+    put(Path(v.HOME, ".var/app/io.github.linx_systems.ClamUI/data/clamui/logs/log_index.json"), json.dumps(idx))
+    assert v.clamui_last("scan") == ("2026-10-11", "21:30")
+    assert v.clamui_last("update") == ("2026-10-11", "08:15")
+    src = {s["id"]: s for s in v.source_status()}
+    assert src["virus-scan"]["date"] == "2026-10-11" and src["virus-scan"]["by"] == "ClamUI"
+    assert src["signatures"]["time"] == "08:15" and src["signatures"]["by"] == "ClamUI"
+    sysfile(v, "/var/lib/clamav/freshclam.dat", "x")                     # ClamAV's own check, just now
+    src = {s["id"]: s for s in v.source_status()}
+    assert src["signatures"]["by"] == "" and src["signatures"]["state"] == "ok"

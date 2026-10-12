@@ -202,6 +202,11 @@ say where they connect before they run.
   privileges. Vigil runs it only if the plugin folder, its `bin` folder and
   the script are not links, belong to you (or root) and cannot be changed by
   anyone else.
+- For the Last run list Vigil reads ClamUI's log index
+  (`clamui/logs/log_index.json` in its data folder, Flatpak or not) with
+  the no-follow reader and a 2 MiB cap, and keeps only the newest
+  timestamp of each kind ("scan", "update"), matched against a strict date
+  pattern. It never reads ClamUI's logs themselves.
 - File-change alerts store SHA-256 fingerprints, never contents; symlinks
   are recorded by their target path and never followed.
 - Secrets found in shell history are reported by file, line and kind. The

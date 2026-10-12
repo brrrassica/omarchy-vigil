@@ -44,7 +44,7 @@ import time
 from base64 import b64decode
 from datetime import date, timedelta
 
-VERSION = "0.16.0"
+VERSION = "0.16.1"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1731,13 +1731,48 @@ def _mtime_date(paths):
     return _mtime_stamp(paths)[0]
 
 
+CLAMUI_LOG_INDEXES = ((".local", "share", "clamui", "logs", "log_index.json"),
+                      (".var", "app", "io.github.linx_systems.ClamUI", "data", "clamui", "logs", "log_index.json"))
+_ISO_STAMP = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})")
+
+
+def clamui_last(kind):
+    """(date, HH:MM) of ClamUI's newest "scan" or "update" log entry, or ("", "").
+    ClamUI keeps an index of its scans and signature updates; Vigil only reads it."""
+    best = ""
+    for parts in CLAMUI_LOG_INDEXES:
+        try:
+            raw = read_file(home_path(*parts), 2 * 1024 * 1024)
+        except Refused:
+            continue
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        entries = data.get("entries") if isinstance(data, dict) else None
+        for e in (entries if isinstance(entries, list) else [])[:20000]:
+            if isinstance(e, dict) and e.get("type") == kind and isinstance(e.get("timestamp"), str):
+                m = _ISO_STAMP.match(e["timestamp"])
+                if m and m.group(1) + " " + m.group(2) > best:
+                    best = m.group(1) + " " + m.group(2)
+    return (best[:10], best[11:]) if best else ("", "")
+
+
+def _newer(a, b):
+    """The later of two (date, time) pairs."""
+    return a if (a[0], a[1]) >= (b[0], b[1]) else b
+
+
 def source_status():
     """When each scan last ran and each source last updated, for the Overview.
     Scans first (virus scan, Bumblebee, the password check), then updates."""
     out = []
 
-    def add(sid, label, date_, time_, state, tried=""):
-        out.append({"id": sid, "label": label, "date": date_, "time": time_, "state": state, "tried": tried})
+    def add(sid, label, date_, time_, state, tried="", by=""):
+        out.append({"id": sid, "label": label, "date": date_, "time": time_, "state": state, "tried": tried,
+                    "by": by})
 
     def fresh(d, days):
         age = _days_since(d)
@@ -1758,6 +1793,11 @@ def source_status():
 
     if feed_available("virus-scan"):
         feed("virus-scan", "Virus scan (home folder)")
+        ext = clamui_last("scan")                       # a scan you ran in ClamUI counts too
+        mine = out[-1]
+        if ext[0] and _newer(ext, (mine["date"], mine["time"])) == ext and ext != (mine["date"], mine["time"]):
+            out[-1] = dict(mine, date=ext[0], time=ext[1], state=fresh(ext[0], FEED_DAYS + FEED_RETRY_DAYS),
+                           tried="", by="ClamUI")
     if exists(home_path(".config", "omarchy", "plugins", BUMBLEBEE_ID)):
         d, t = _mtime_stamp([home_path(".local", "state", "omarchy", "bumblebee", "last-scan.json")])
         add("bumblebee", "Bumblebee scan", d, t, fresh(d, FEED_DAYS))
@@ -1765,9 +1805,15 @@ def source_status():
     _, t = _mtime_stamp([home_path(*STATE_DIR, NO_PASSWORD_NAME)]) if d else ("", "")
     add("password-check", "Password check (Full scan button only)", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
     if is_trusted_executable(sys_path("/usr/bin/clamscan")):
-        # freshclam.dat changes on every check, even when nothing new came out.
-        d, t = _mtime_stamp([sys_path("/var/lib/clamav/" + n) for n in ("daily.cld", "daily.cvd", "freshclam.dat")])
-        add("signatures", "ClamAV virus signatures", d, t, fresh(d, FEED_DAYS))
+        # Whoever updated them: ClamAV's own service (freshclam.dat changes on
+        # every check, even when nothing new came out), Vigil, or ClamUI.
+        d, t = _mtime_stamp([sys_path("/var/lib/clamav/" + n) for n in
+                             ("daily.cld", "daily.cvd", "main.cld", "main.cvd", "bytecode.cld", "bytecode.cvd",
+                              "freshclam.dat")])
+        ext = clamui_last("update")
+        by = "ClamUI" if ext[0] and _newer(ext, (d, t)) == ext and ext != (d, t) else ""
+        d, t = _newer(ext, (d, t))
+        add("signatures", "ClamAV virus signatures", d, t, fresh(d, FEED_DAYS), by=by)
     for name, label in (("arch-audit", "Arch vulnerability database"), ("osv", "OSV malicious-package database"),
                         ("aur", "AUR package status")):
         if feed_available(name):

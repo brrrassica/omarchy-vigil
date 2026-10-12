@@ -522,3 +522,9 @@ test("update sources card: lists what updates and where the password comes in", 
   const none = M.confirmation("update-sources", "all", parse(report()))
   assert.match(none.lines[0], /^Nothing to update yet/)
 })
+
+test("a scan or update done outside Vigil says so", () => {
+  const src = { id: "virus-scan", label: "Virus scan", date: "2026-10-11", time: "21:30", state: "ok", tried: "", by: "ClamUI" }
+  assert.equal(M.sourceLine(src, new Date(2026, 9, 12, 10, 0)), "ran yesterday at 21:30 (by ClamUI)")
+  assert.equal(parse(report({ sources: [Object.assign({}, src, { by: "Someone" })] })), null)
+})

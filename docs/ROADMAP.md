@@ -125,6 +125,9 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 - [x] Fixed: the Full scan password check never ran on Arch (`awk` is a
       link, which Vigil never runs as root); it now runs through bash.
 - [x] The countdowns stay visible while a scan runs.
+- [x] 0.16.1: the Last run list counts work done outside Vigil: ClamAV's own
+      signature service and ClamUI's updates and scans (from ClamUI's log
+      index), marked "by ClamUI" where it was ClamUI.
 
 ## 0.15: Full scan with progress, and a schedule you can see
 

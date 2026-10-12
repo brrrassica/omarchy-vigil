@@ -27,7 +27,7 @@ the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.16.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.16.1.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -105,6 +105,12 @@ Below the pillars, **Last run** lists when each scan last ran (the settings
 checks, the virus scan, Bumblebee, the password check) and when each source
 last updated (virus signatures, known vulnerabilities, malicious packages,
 AUR status), with the time. Anything that failed or is out of date is red.
+Work done outside Vigil counts too: the virus signatures line includes
+ClamAV's own update service and updates made in ClamUI, the virus scan line
+includes scans you ran in ClamUI (marked "by ClamUI"), and the Bumblebee
+line is Bumblebee's own last scan. The vulnerability, malicious-package and
+AUR lines can only show Vigil's own updates, since those tools keep no record
+when run by hand.
 
 ### Every finding
 

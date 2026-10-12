@@ -767,7 +767,9 @@ function parseSources(list) {
     if ((e.date !== "" && !DATE_RE.test(e.date)) || (e.tried !== "" && !DATE_RE.test(e.tried))) return null
     var time = e.time === undefined ? "" : e.time
     if (!isString(time, 5) || (time !== "" && !/^\d{2}:\d{2}$/.test(time))) return null
-    out.push({ id: e.id, label: plain(e.label, 40), date: e.date, time: time, state: e.state, tried: e.tried })
+    var by = e.by === undefined ? "" : e.by
+    if (!inList(by, ["", "ClamUI"])) return null
+    out.push({ id: e.id, label: plain(e.label, 40), date: e.date, time: time, state: e.state, tried: e.tried, by: by })
   }
   return out
 }
@@ -797,7 +799,7 @@ function sourceLine(src, now) {
   if (src.state === "never") return scan ? "not run yet" : "not updated yet"
   if (src.state === "failed")
     return (scan ? "last run failed" : "last update failed") + (src.date !== "" ? "; last good " + relativeDay(src.date, now) : "")
-  var when = relativeDay(src.date, now) + (src.time ? " at " + src.time : "")
+  var when = relativeDay(src.date, now) + (src.time ? " at " + src.time : "") + (src.by ? " (by " + src.by + ")" : "")
   return src.state === "stale" ? "out of date (" + when + ")" : (scan ? "ran " : "updated ") + when
 }
 
