@@ -2559,3 +2559,38 @@ def test_update_sources_updates_your_own_flatpak_apps(v, capsys):
     calls.clear()
     v.refresh_due_feeds(force=True)                                         # the weekly kind of run: check only
     assert ("/usr/bin/flatpak", "update", "--user", "--noninteractive") not in calls
+
+
+# --------------------------------------------------------------------------
+# Open Wi-Fi that joins by itself
+
+def saved_networks(v, nets):
+    """nets: {uuid: (name, key_mgmt, autoconnect)}"""
+    v.TRUSTED.add(v.ROOT + "/usr/bin/nmcli")
+    v.UNITS[("is-active", "NetworkManager.service")] = "active"
+    lines = "".join("%s:802-11-wireless:%s:%s\n" % (u, ac, name.replace(":", "\\:")) for u, (name, _, ac) in nets.items())
+    v.COMMANDS[("/usr/bin/nmcli", "-t", "-f", "UUID,TYPE,AUTOCONNECT,NAME", "connection", "show")] = (0, lines)
+    for u, (_, key, _) in nets.items():
+        v.COMMANDS[("/usr/bin/nmcli", "-g", "802-11-wireless-security.key-mgmt", "connection", "show", u)] = (0, key + "\n")
+
+
+def U(n):
+    return "0000000%d-0000-4000-8000-00000000000%d" % (n, n)
+
+
+def test_open_wifi_that_joins_by_itself(v):
+    assert v.check_open_wifi()["status"] == "na"
+    saved_networks(v, {U(1): ("Cafe: Free", "", "yes"), U(2): ("Home", "wpa-psk", "yes"),
+                       U(3): ("Old", "none", "yes"), U(4): ("Airport", "", "no"), U(5): ("Station", "owe", "yes")})
+    c = v.check_open_wifi()
+    assert c["status"] == "warn" and c["fix"]["action"] == "wifi-autojoin-off"
+    assert c["detail"].splitlines() == ["Cafe: Free (no password)", "Old (old WEP encryption)"]
+    assert c["summary"] == "2 saved open networks join by themselves."
+    saved_networks(v, {U(2): ("Home", "sae", "yes")})
+    c = next(x for x in v.audit(peek=True)["checks"] if x["id"] == "open-wifi")
+    assert c["status"] == "pass" and c["undo"]["action"] == ""
+    mark = Path(v.HOME, ".local/state/omarchy-vigil/wifi-autojoin-off")
+    mark.parent.mkdir(parents=True, exist_ok=True)
+    mark.write_text(U(1) + "\n")
+    c = next(x for x in v.audit(peek=True)["checks"] if x["id"] == "open-wifi")
+    assert c["undo"]["action"] == "undo-wifi-autojoin"

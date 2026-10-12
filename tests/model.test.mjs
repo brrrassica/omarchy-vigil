@@ -513,7 +513,9 @@ test("actions run without a terminal unless the tool asks questions", () => {
     for (const step of M.actionPlan(id, TOOLS, "/home/marc")) {
       const r = spawnSync("bash", ["-n", "-c", step.argv[step.argv.length - 1]])
       assert.equal(r.status, 0, id + ": " + r.stderr)
-      assert.ok(!/\bread -r/.test(step.argv[step.argv.length - 1]), id + " would wait for input")
+      // A read loop fed from a file or command is fine; any other read would wait for you.
+      const fed = step.argv[step.argv.length - 1].replace(/while IFS= read -r \w+; do[\s\S]*?\ndone < [^\n]+/g, "")
+      assert.ok(!/\bread\b/.test(fed), id + " would wait for input")
     }
   }
   const card = M.confirmation("terminal", "firewall-on", null)
@@ -803,4 +805,46 @@ test("the progress bar gives the long virus scan most of its length", () => {
   assert.ok(Math.abs(old.fraction - 8 / 9) < 1e-9)                              // no shares given: as before
   const bad = M.parseProgress(JSON.stringify({ progress: { step: 1, of: 2, doing: "x", done: 0, total: 0, at: 0.9, span: 0.9 } }))
   assert.equal(bad.fraction, 0)                                                // shares that do not fit are ignored
+})
+
+test("Stop auto-joining touches only open and WEP networks, and Undo only those", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "vigil-wifi-"))
+  const home = path.join(dir, "home"); mkdirSync(home)
+  const log = path.join(dir, "log"); writeFileSync(log, "")
+  const U = (n) => `0000000${n}-0000-4000-8000-00000000000${n}`
+  // A stand-in for nmcli: four saved networks.
+  const nets = { [U(1)]: ["Cafe", "", "yes"], [U(2)]: ["Home", "wpa-psk", "yes"], [U(3)]: ["Old router", "none", "yes"],
+                 [U(4)]: ["Airport", "", "no"], [U(5)]: ["Station", "owe", "yes"] }
+  const fake = path.join(dir, "nmcli")
+  writeFileSync(fake, `#!/bin/bash
+case "$*" in
+  "-t -f UUID,TYPE,AUTOCONNECT connection show")
+${Object.entries(nets).map(([u, n]) => `    echo "${u}:802-11-wireless:${n[2]}"`).join("\n")}
+    echo "not-a-uuid:802-11-wireless:yes"; echo "${U(6)}:ethernet:yes" ;;
+  "-g 802-11-wireless-security.key-mgmt connection show "*)
+    case "$5" in
+${Object.entries(nets).map(([u, n]) => `      ${u}) echo "${n[1]}" ;;`).join("\n")}
+    esac ;;
+  *) echo "nmcli $*" >> "${log}" ;;
+esac
+`, { mode: 0o755 })
+  const run = (id) => {
+    const body = M.actionPlan(id, TOOLS, home)[0].argv[2].replaceAll("/usr/bin/nmcli", fake)
+    return spawnSync("/usr/bin/bash", ["-c", body], { env: { HOME: home, PATH: "/usr/bin:/bin" }, encoding: "utf8" })
+  }
+  let r = run("wifi-autojoin-off")
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(readFileSync(log, "utf8"),
+    `nmcli connection modify ${U(1)} connection.autoconnect no\nnmcli connection modify ${U(3)} connection.autoconnect no\n`)
+  assert.match(r.stdout, /Stopped auto-joining 2 open network/)
+  writeFileSync(log, "")
+  r = run("undo-wifi-autojoin")
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(readFileSync(log, "utf8"),
+    `nmcli connection modify ${U(1)} connection.autoconnect yes\nnmcli connection modify ${U(3)} connection.autoconnect yes\n`)
+  assert.equal(existsSync(path.join(home, ".local/state/omarchy-vigil/wifi-autojoin-off")), false)
+  writeFileSync(log, "")
+  r = run("undo-wifi-autojoin")
+  assert.match(r.stdout, /Nothing to undo/); assert.equal(readFileSync(log, "utf8"), "")
+  rmSync(dir, { recursive: true, force: true })
 })

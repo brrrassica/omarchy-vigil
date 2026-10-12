@@ -224,7 +224,7 @@ function undoDropIn(name, path, afterText, after) {
 var TERMINAL_ONLY = ["update", "update-firmware", "fido2", "undo-fido2", "fingerprint", "undo-fingerprint", "sudo-passwordless-off",
                      "docker-group-off", "clean-orphans", "ssh-passphrase"]
 var USER_MODE = ["allow-idle", "restart", "run-arch-audit", "show-ld-preload", "show-plugins", "screen-lock-default",
-                 "hand-over-schedules", "undo-schedules", "update-flatpaks"]
+                 "hand-over-schedules", "undo-schedules", "update-flatpaks", "wifi-autojoin-off", "undo-wifi-autojoin"]
 var PKEXEC = "/usr/bin/pkexec"
 var BASH = "/usr/bin/bash"
 
@@ -434,6 +434,39 @@ var TERMINAL_ACTIONS = {
            "Omarchy also deletes your saved fingerprints from this computer and removes the reader driver.",
            "Technical: runs omarchy-remove-security-fingerprint"],
     tool: "omarchy-remove-security-fingerprint", args: ""
+  },
+  // Finds the networks itself (open or WEP, joining by themselves) and records
+  // each one it changed, so Undo puts back exactly those. Must match WIFI_MARK
+  // and open_autojoin_networks in bin/vigil.
+  "wifi-autojoin-off": {
+    title: "Stop joining open Wi-Fi by itself",
+    what: ["Saved Wi-Fi networks without a password stop joining by themselves. They stay saved,",
+           "and you can still join one by hand when you mean to. NetworkManager may ask for your password.",
+           "Technical: nmcli connection modify <network> connection.autoconnect no, for open and WEP networks only"],
+    run: "s=\"$HOME/.local/state/omarchy-vigil\"; /usr/bin/mkdir -p -m 0700 -- \"$s\"; m=\"$s/wifi-autojoin-off\"; n=0\n"
+      + "while IFS= read -r line; do\n"
+      + "  u=${line%%:*}; rest=${line#*:}; t=${rest%%:*}; a=${rest#*:}\n"
+      + "  [[ $u =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || continue\n"
+      + "  [ \"$t\" = 802-11-wireless ] && [ \"$a\" = yes ] || continue\n"
+      + "  k=$(/usr/bin/nmcli -g 802-11-wireless-security.key-mgmt connection show \"$u\" 2>/dev/null) || continue\n"
+      + "  if [ -z \"$k\" ] || [ \"$k\" = none ]; then\n"
+      + "    /usr/bin/nmcli connection modify \"$u\" connection.autoconnect no\n"
+      + "    echo \"$u\" >> \"$m\"; n=$((n+1))\n"
+      + "  fi\n"
+      + "done < <(/usr/bin/nmcli -t -f UUID,TYPE,AUTOCONNECT connection show)\n"
+      + "echo \"Stopped auto-joining $n open network(s). They stay saved.\""
+  },
+  "undo-wifi-autojoin": {
+    title: "Let those Wi-Fi networks join by themselves again",
+    what: ["The open networks Vigil stopped from joining by themselves join by themselves again.",
+           "Technical: nmcli connection modify <network> connection.autoconnect yes, for the networks Vigil recorded"],
+    run: "m=\"$HOME/.local/state/omarchy-vigil/wifi-autojoin-off\"\n"
+      + "if [ ! -f \"$m\" ] || [ -L \"$m\" ]; then echo 'Nothing to undo.'; exit 0; fi\n"
+      + "while IFS= read -r u; do\n"
+      + "  [[ $u =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || continue\n"
+      + "  /usr/bin/nmcli connection modify \"$u\" connection.autoconnect yes || true\n"
+      + "done < \"$m\"\n"
+      + "/usr/bin/rm -f -- \"$m\"; echo 'Those networks join by themselves again.'"
   },
   "update-flatpaks": {
     title: "Update your Flatpak apps",

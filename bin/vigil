@@ -3831,6 +3831,67 @@ def check_connectivity_check():
                   fix=fix("terminal", "connectivity-off", "Turn it off"), weight=0)
 
 
+# --- Open Wi-Fi networks that join by themselves -----------------------------
+
+NMCLI = "/usr/bin/nmcli"
+WIFI_MARK = "wifi-autojoin-off"
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _nm_unescape(text):
+    return re.sub(r"\\(.)", r"\1", text)
+
+
+def open_autojoin_networks():
+    """[(name, "open" | "WEP")] for saved Wi-Fi networks that join by themselves
+    without real encryption, or None if NetworkManager could not be asked.
+    Enhanced Open (OWE), WPA and WPA3 networks never count."""
+    rc, out = run([NMCLI, "-t", "-f", "UUID,TYPE,AUTOCONNECT,NAME", "connection", "show"], timeout=6,
+                  limit=256 * 1024)
+    if rc != 0:
+        return None
+    found = []
+    for line in out.splitlines()[:500]:
+        parts = line.split(":", 3)
+        if len(parts) != 4 or not _UUID.match(parts[0]) or parts[1] != "802-11-wireless" or parts[2] != "yes":
+            continue
+        rc2, key = run([NMCLI, "-g", "802-11-wireless-security.key-mgmt", "connection", "show", parts[0]],
+                       timeout=4, limit=4096)
+        if rc2 != 0:
+            continue
+        key = (key or "").strip()
+        if key in ("", "none"):
+            found.append((clean(_nm_unescape(parts[3]), 80) or "(no name)", "open" if not key else "WEP"))
+        if len(found) >= 50:
+            break
+    return found
+
+
+@check
+def check_open_wifi():
+    cid, cat, title = "open-wifi", "harden", "Open Wi-Fi that joins by itself"
+    why = ("A network without a password can be imitated by anyone nearby: name a hotspot after the café you "
+           "once used, and laptops that remember it join it by themselves, sending their traffic through the "
+           "imitator. Joining such networks only when you choose closes that door.")
+    if systemctl("is-active", "NetworkManager.service") != "active" or not is_trusted_executable(sys_path(NMCLI)):
+        return result(cid, cat, title, "na", "NetworkManager is not running.", why, weight=0)
+    nets = open_autojoin_networks()
+    undo = ("undo-wifi-autojoin", "Let them join by themselves again") \
+        if _lexists(home_path(*STATE_DIR, WIFI_MARK)) else None
+    if nets is None:
+        return result(cid, cat, title, "unknown", "Could not ask NetworkManager about saved networks.", why,
+                      weight=1, undo=undo)
+    if not nets:
+        return result(cid, cat, title, "pass", "No open network joins by itself.", why, weight=1, undo=undo)
+    lines = ["%s (%s)" % (n, "no password" if kind == "open" else "old WEP encryption") for n, kind in nets]
+    return result(cid, cat, title, "warn", "%d saved open network%s join%s by %s." % (
+        len(nets), "" if len(nets) == 1 else "s", "s" if len(nets) == 1 else "", "itself" if len(nets) == 1
+        else "themselves"), why, clean_block(lines), fix=fix("terminal", "wifi-autojoin-off", "Stop auto-joining"),
+        weight=1, undo=undo,
+        howto="Press Stop auto-joining: those networks stay saved, and you can still join them by hand when you "
+              "mean to.")
+
+
 @check
 def check_mac_randomization():
     cid, cat, title = "mac-address", "privacy", "Hardware address on Wi-Fi"
