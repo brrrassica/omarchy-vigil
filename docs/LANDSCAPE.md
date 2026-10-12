@@ -58,8 +58,10 @@ rather than rebuilding them:
   SSH to Tailscale and tightens the login lockout. Its author's advice holds
   for Vigil too: read what a change does before you apply it, which is why
   every Vigil fix shows its commands first.
-- General Linux tools Vigil drives rather than reimplements: Lynis, rkhunter,
-  ClamAV and arch-audit, all in the Arch repositories.
+- General Linux tools Vigil drives rather than reimplements: Lynis (a few
+  of its account and service checks), ClamAV and arch-audit, all in the Arch
+  repositories. Rootkit Hunter was dropped in 0.12: its last release was in
+  2018 and it raises many false alarms on Arch.
 
 ## What Omarchy already ships
 

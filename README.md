@@ -26,7 +26,7 @@ root runs in a terminal you can watch.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.11.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.12.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -50,8 +50,9 @@ you ask.
 | `←` `→` or `1`–`6` | Switch tabs |
 | `↑` `↓`, `Enter` | Move through findings, open one |
 | `F` | Fix the selected finding (asks first) |
-| `D` | Mark the selected warning as reviewed, or show it again |
-| `U` | Update and check everything now |
+| `D` | Mark the selected finding as reviewed, or show it again |
+| `S` | Full scan (asks first) |
+| `U` | Update sources |
 | `C` | On the Care tab: Clean all |
 | `R` | Check again |
 | `Esc` | Cancel a confirmation, or close |
@@ -71,22 +72,27 @@ fix first.
 | Virus scan of `~/Downloads` (ClamAV, as you) | once a week |
 | ClamAV virus signatures | continuously, by ClamAV's own update service |
 | Bumblebee's catalog and scan | by the Bumblebee plugin |
-| Rootkit Hunter, Lynis | only when you run them; they need your password |
+| Password checks (Lynis: accounts, insecure servers, hidden history) | only in a **Full scan**, since they need your password |
 | Cleaning (Care) | only when you ask; Vigil only measures sizes by itself |
 
-The Overview shows when the last full update ran and whether every source
-updated, then one line per source you have set up (virus signatures, the
-virus scan, known vulnerabilities, malicious packages, AUR status,
-Bumblebee) with the date it last updated successfully. A source whose latest
-update failed or is more than a week old is shown in red, with the date it
-last worked.
+The Overview has two buttons:
 
-**Update and check everything** on the Overview (or `U`) runs all the
-weekly work at once: refreshes every source and runs the virus scan, then
-checks every pillar again. It needs no password. ClamAV's signatures are not
-part of it because they already update by themselves (and doing it by hand
-needs root); Rootkit Hunter and Lynis stay in the terminal for the same
-reason. Turning off `autoUpdate` leaves the weekly work to this button.
+- **Full scan** (or `S`) checks everything: it updates every source, scans
+  `~/Downloads` for viruses, and runs the few checks that need your password
+  (other accounts with root powers or no password, old insecure network
+  servers, hidden shell history) in one terminal, so sudo asks once. It
+  installs Lynis for those checks the first time. Every tab then shows the
+  results, and you fix what you choose from there.
+- **Update sources** (or `U`) only refreshes the lists Vigil checks against
+  (known vulnerabilities, malicious packages, AUR status), with no password
+  and no scan. ClamAV's signatures update by themselves, and Lynis updates
+  with your system updates, so neither needs a button.
+
+Below them, one line per source you have set up (virus signatures, the virus
+scan, known vulnerabilities, malicious packages, AUR status, the last Full
+scan, Bumblebee) shows the date it last updated or ran. A source whose
+latest update failed or is out of date is shown in red. Turning off
+`autoUpdate` leaves the weekly updates and scan to these buttons.
 
 ### Every finding
 
@@ -136,7 +142,7 @@ settings:
 |---|---|---|
 | `refreshMinutes` | `30` | How often to check in the background (5 to 1440). |
 | `notifyOnNew` | `true` | One desktop notification when a check that was fine starts failing. It only says how many. |
-| `autoUpdate` | `true` | The weekly work: refresh the maintained sources (see [Where the data comes from](#where-the-data-comes-from)) and scan `~/Downloads` for viruses. Off means only with **Update and check everything**. |
+| `autoUpdate` | `true` | The weekly work: refresh the maintained sources (see [Where the data comes from](#where-the-data-comes-from)) and scan `~/Downloads` for viruses. Off means only when you press **Update sources** or **Full scan**. |
 
 ## What Vigil checks
 
@@ -158,10 +164,10 @@ lower it. A warning you mark as reviewed stops counting.
 | GnuPG folder | `~/.gnupg` is readable by others | Makes it private (no root) |
 | Automatic screen lock | Stay Awake is on, the lock is off, or it takes over 15 minutes | Turns Stay Awake off; sets `idle.lock` to 300 seconds, Omarchy's default, with Omarchy's own `omarchy-shell-config` helper (terminal, no root) |
 | Disk encryption | The system disk is not on LUKS | Cannot be added after install; Arch Wiki guide |
-| Secure Boot | Off (information only) | Arch Wiki guide |
+| Restart after updates | A newer kernel is installed than the one running | **Restart now** (terminal, after a confirmation) |
+| Secure Boot | Shown for information only; Vigil does not suggest setting it up, since a mistake can stop the computer starting | |
 | Wrong-password lockout | `pam_faillock` is missing or never locks | Arch Wiki guide |
-| Rarely used network protocols | dccp, sctp, rds or tipc can load (information; Lynis NETW-3200) | `/etc/modprobe.d/90-omarchy-vigil-protocols.conf` (terminal, sudo) |
-| FireWire | The machine has a FireWire port and its driver can load (information; Lynis STRG-1846) | `/etc/modprobe.d/90-omarchy-vigil-firewire.conf` (terminal, sudo) |
+| FireWire | The machine has a FireWire port and its driver can load (information; shown only on machines with the port) | `/etc/modprobe.d/90-omarchy-vigil-firewire.conf` (terminal, sudo) |
 | Passwordless sudo | Omarchy's passwordless sudo is on | `omarchy-sudo-passwordless --disable` (terminal) |
 | Docker group | You are in the docker group, which equals root | `omarchy-remove-security-sudoless-docker` (terminal) |
 | USB authorization | New USB devices are trusted automatically (information) | `omarchy-setup-security-usb-authorization` (terminal) |
@@ -170,7 +176,7 @@ lower it. A warning you mark as reviewed stops counting.
 | System updates | No full update in 14 days (warning) or 30 days (failure) | `omarchy-update` (terminal) |
 | Open network ports | Programs listen on the network with no firewall in front | **Show listeners** runs `sudo ss -tulpn` (read-only) |
 | Exposed secrets | API keys and tokens in the formats their providers publish (AWS, GitHub, GitLab, Slack, Stripe, Anthropic, OpenAI, Google, private keys) in your shell histories, or credential files such as `~/.aws/credentials`, `~/.netrc` and `~/.git-credentials` readable by other accounts. Shows the file and line, never the secret. | Makes credential files private (no root); revoke leaked keys with their provider |
-| Lynis | Installs Lynis and runs `lynis audit system --quick --quiet`; its findings join the pillars (see [Lynis](#lynis)) | |
+| Password checks | From a Full scan (see [Lynis](#lynis)) | |
 
 ### Detect
 
@@ -182,7 +188,6 @@ lower it. A warning you mark as reviewed stops counting.
 | Weekly virus scan | ClamAV scans `~/Downloads` once a week, as you, with signatures ClamAV keeps current. Infected files are listed with **Open ClamUI** to quarantine them. Only ClamAV's published signatures count; its guess-based "potentially unwanted" rules stay off. |
 | ClamUI | Vigil hands virus scanning to [ClamUI](https://github.com/linx-systems/clamui): file and folder scans, scheduled scans, USB drive scans and quarantine. When it is installed, **Open ClamUI** starts it; otherwise Vigil offers to install it from Flathub. |
 | ClamAV virus engine | Whether ClamAV is installed and its signatures keep themselves up to date. Vigil turns on ClamAV's own update service (`clamav-freshclam`) when it installs ClamAV or ClamUI, and offers to if it is off. Quick scan of `~/Downloads` in a terminal. |
-| Rootkit Hunter | Installs rkhunter, records a baseline, and runs `rkhunter --check` after updating its data files from its maintainers. |
 
 ### Supply
 
@@ -225,18 +230,25 @@ can take away something you use, so that stays a separate, reviewed step.
 
 ### Lynis
 
-Lynis prints a long report. Vigil's Lynis action runs it quietly, then copies
-just the score, warning and suggestion lines (and its kernel-setting details)
-from `/var/log/lynis-report.dat`, which only root can read, to Vigil's state
-folder. Each finding then becomes its own row in the pillar its Lynis test
-group belongs to, named from the installed Lynis's own test list, with
-Lynis's fix where its report gives one, **Learn more** (Lynis's page for that
-test) and **Mark as reviewed**. Findings that a Vigil check already covers
-(firewall, SSH, kernel and network settings Vigil manages, disk encryption,
-malware scanners, arch-audit, file integrity, USB authorization, rarely used
-protocols, FireWire) are left out and named on the Lynis row, so nothing
-shows twice and the Vigil row's own fix and undo apply. Lynis is written for
-servers too, so its findings are information and never change the score.
+Lynis runs hundreds of checks, most written for servers or already covered
+by Vigil in a way a newcomer can act on. A Full scan runs only three of its
+test groups (accounts, insecure network services, home folders), which
+takes seconds, and Vigil shows only the results that matter on a personal
+computer, each in plain words with how to fix it:
+
+| Lynis test | Shown as |
+|---|---|
+| AUTH-9204 | Another account with root powers |
+| AUTH-9208 | Accounts sharing one ID |
+| AUTH-9283 | Accounts without a password |
+| HOME-9310 | Hidden shell history (Detect) |
+| INSE-8116, 8316, 8320, 8322 | Old network services in xinetd, NIS, TFTP or a telnet server installed |
+
+The terminal copies just the warning and suggestion lines of
+`/var/log/lynis-report.dat`, which only root can read, into Vigil's state
+folder. Each finding has **Learn more** (Lynis's page for the test) and
+**Mark as reviewed**; a review lasts through later Full scans unless Lynis
+reports something new.
 
 ## How actions run
 
@@ -274,11 +286,10 @@ Vigil keeps no threat lists of its own.
 | What | Maintained by | How it stays current |
 |---|---|---|
 | Virus signatures | ClamAV (Cisco Talos) | ClamAV's own `clamav-freshclam` service, several times a day |
-| Known vulnerabilities in Arch packages | Arch Linux security team | arch-audit, once a week (and **Check now**) |
-| Known-malicious npm, Bun and other packages | OSV.dev and the OpenSSF Malicious Packages project | osv-scanner, once a week (and **Check now**) |
-| AUR package status | the AUR | AUR lookup, once a week (and **Check now**) |
+| Known vulnerabilities in Arch packages | Arch Linux security team | arch-audit, once a week (and **Update sources**) |
+| Known-malicious npm, Bun and other packages | OSV.dev and the OpenSSF Malicious Packages project | osv-scanner, once a week (and **Update sources**) |
+| AUR package status | the AUR | AUR lookup, once a week (and **Update sources**) |
 | Known-compromised components | Bumblebee (Perplexity threat intel) | the Bumblebee plugin refreshes its own catalog |
-| Rootkit signatures | rkhunter | updated each time you run it |
 
 There is no maintained feed of malicious AUR packages; Arch's own list for
 the 2026 attacks was a one-off document. Vigil covers the AUR through what
@@ -303,7 +314,8 @@ Each happens only once the tool is installed, and turning `autoUpdate` off
 limits it to when you press **Check now**. Actions you start yourself also use
 the network and say so first: installing ClamUI (Arch mirrors, dl.flathub.org,
 ClamAV's servers), installing a tool (Arch mirrors), ClamAV's signature
-service (ClamAV's servers), rkhunter's data update, and `omarchy-update`.
+service (ClamAV's servers), and `omarchy-update`. Lynis, in a Full scan,
+works offline.
 
 ## Files Vigil writes
 
@@ -354,7 +366,8 @@ nothing keeps running. These stay behind until you remove them:
   Easier: use **Undo** on each finding before you remove Vigil.
 - Apps and scanners you installed through Vigil. Remove ClamUI with
   `flatpak uninstall --user io.github.linx_systems.ClamUI`, and `clamav`,
-  `rkhunter`, `lynis`, `arch-audit` or `osv-scanner` with `omarchy pkg drop <name>`.
+  `lynis`, `arch-audit` or `osv-scanner` with `omarchy pkg drop <name>` (and
+  `rkhunter`, if an earlier Vigil installed it).
   ClamAV's update service stops with `sudo systemctl disable --now clamav-freshclam.service`.
 
 ## Requirements

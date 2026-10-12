@@ -18,16 +18,16 @@ These hold for every pillar, now and in later phases:
    never put into a command or a notification.
 3. **Virus scans run as you.** ClamAV scans (Vigil's quick scan and ClamUI)
    never run as root: malware scanners have had parser bugs, and running
-   them unprivileged limits what a malicious file can do. Rootkit Hunter and
-   Lynis need root to inspect the system; they run only when you start them,
-   in the visible terminal.
+   them unprivileged limits what a malicious file can do. Lynis needs root
+   to read account data; it runs only in a Full scan you start, in the
+   visible terminal, limited to three test groups.
 4. **Hand off, don't absorb.** ClamUI keeps quarantine, Bumblebee keeps its
    catalog, Black Ops keeps telemetry blocking. Vigil reads their results and
    opens them; it does not run their code or write their files.
 5. **Maintained sources, never executed.** Vigil keeps no threat lists. Data
    comes from the tools of the people who maintain it (arch-audit,
    osv-scanner, ClamAV's freshclam) and one fixed AUR lookup, once a week
-   (the `autoUpdate` setting) or when you press Check now. Nothing fetched is
+   (the `autoUpdate` setting) or when you press Update sources or Full scan. Nothing fetched is
    ever run; results are size-capped and validated like any other input.
 6. **Nothing automatic.** Every change is confirmed; notifications carry
    counts only; IPC methods take no parameters.
@@ -141,7 +141,7 @@ no polkit policy, no service, no timer and no daemon.
 
 ## Network
 
-The weekly refresh (and **Check now**) is the only network use Vigil starts
+The weekly refresh (and **Update sources** or **Full scan**) is the only network use Vigil starts
 by itself, and only once the relevant tool is installed:
 
 - `arch-audit --json --upgradable` and `osv-scanner --format json

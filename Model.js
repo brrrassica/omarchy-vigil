@@ -121,6 +121,7 @@ function howTo(check) {
 // Title and lines for the confirmation card of any runnable action.
 function confirmation(kind, id, report) {
   if (kind === "clean-all") return cleanAllConfirmation(report)
+  if (kind === "full-scan") return fullScanConfirmation(report)
   var a = kind === "helper" ? helperInfo(id) : (kind === "terminal" ? terminalAction(id) : null)
   if (!a) return null
   var lines = a.what.slice(0)
@@ -340,36 +341,28 @@ var TERMINAL_ACTIONS = {
     what: ["Runs: clamscan --recursive --infected ~/Downloads", "Only infected files are listed. Nothing is deleted."],
     run: "/usr/bin/clamscan --recursive --infected -- \"$HOME/Downloads\""
   },
-  "install-rkhunter": {
-    title: "Install Rootkit Hunter",
-    what: ["Installs rkhunter with omarchy pkg add and records what this system looks like now (--propupd)."],
-    tool: "omarchy-pkg-add", args: " rkhunter && sudo /usr/bin/rkhunter --propupd"
+  "lynis-scan": {
+    title: "Full scan: password-protected checks",
+    what: ["Runs Lynis for the checks that need your password: accounts with root powers or no password,",
+           "old insecure network servers and hidden shell history. Only those three Lynis groups run,",
+           "so it takes seconds. Installs Lynis with omarchy pkg add first if it is missing.",
+           "Then copies the warning and suggestion lines of its report to ~/.local/state/omarchy-vigil/lynis.dat."],
+    tool: "omarchy-pkg-add",
+    run: "umask 077; d=\"$HOME/.local/state/omarchy-vigil\"; "
+      + "if [ ! -x /usr/bin/lynis ]; then echo 'Installing Lynis first.'; @TOOL@ lynis; fi; "
+      + "echo 'Checking accounts and network services. This takes a few seconds.'; "
+      + "sudo /usr/bin/lynis audit system --quick --quiet --no-colors "
+      + "--tests-from-group 'authentication insecure_services homedirs' >/dev/null; "
+      + "/usr/bin/mkdir -p \"$d\"; "
+      + "sudo /usr/bin/grep -E '^(report_datetime_end|warning\\[\\]|suggestion\\[\\])=' "
+      + "/var/log/lynis-report.dat > \"$d/lynis.dat.new\"; "
+      + "/usr/bin/mv -f \"$d/lynis.dat.new\" \"$d/lynis.dat\"; "
+      + "echo 'Done. The rest of the Full scan finishes in the background; open Vigil to see the results.'"
   },
-  "run-rkhunter": {
-    title: "Check for rootkits",
-    what: ["Updates the rkhunter data files from its maintainers, then runs",
-           "sudo rkhunter --check --skip-keypress --report-warnings-only",
-           "Warnings need reading: after updates, changed system files are expected."],
-    run: "sudo /usr/bin/rkhunter --update; sudo /usr/bin/rkhunter --check --skip-keypress --report-warnings-only"
-  },
-  "install-lynis": {
-    title: "Install Lynis",
-    what: ["Installs lynis with omarchy pkg add."],
-    tool: "omarchy-pkg-add", args: " lynis"
-  },
-  "run-lynis": {
-    title: "Run a Lynis audit",
-    what: ["Runs: sudo lynis audit system --quick --quiet, which takes a minute or two.",
-           "Then copies the score, warning and suggestion lines (and its kernel-setting details) of its report",
-           "(/var/log/lynis-report.dat, readable only by root) to ~/.local/state/omarchy-vigil/lynis.dat,",
-           "so Vigil can list them in the panel instead of a wall of text here."],
-    run: "umask 077; echo 'Lynis is checking hundreds of settings. This takes a minute or two.'; "
-      + "sudo /usr/bin/lynis audit system --quick --quiet --no-colors >/dev/null; "
-      + "/usr/bin/mkdir -p \"$HOME/.local/state/omarchy-vigil\"; "
-      + "sudo /usr/bin/grep -E '^((hardening_index|report_datetime_end|warning\\[\\]|suggestion\\[\\])=|details\\[\\]=KRNL-6000[|])' "
-      + "/var/log/lynis-report.dat > \"$HOME/.local/state/omarchy-vigil/lynis.dat.new\"; "
-      + "/usr/bin/mv -f \"$HOME/.local/state/omarchy-vigil/lynis.dat.new\" \"$HOME/.local/state/omarchy-vigil/lynis.dat\"; "
-      + "echo 'Done. Open Vigil to see what Lynis found, under Harden.'"
+  "restart": {
+    title: "Restart the computer",
+    what: ["Restarts now so the updated kernel takes over. Save your work and close your apps first."],
+    run: "/usr/bin/systemctl reboot"
   },
   "install-arch-audit": {
     title: "Install arch-audit",
@@ -438,14 +431,6 @@ var TERMINAL_ACTIONS = {
     run: "commit \"$NORMALIZE | .idle = ((.idle | if type == \\\"object\\\" then . else {} end) + {lock: 300})\" "
       + "&& echo 'The screen now locks after 5 minutes idle.'"
   },
-  "protocols-off": {
-    title: "Turn off rarely used network protocols",
-    what: ["Writes /etc/modprobe.d/90-omarchy-vigil-protocols.conf so dccp, sctp, rds and tipc never load.",
-           "One already loaded stays until the next restart. Undo: delete that file."],
-    run: "sudo /usr/bin/install -d -m 0755 /etc/modprobe.d && "
-      + dropIn("/etc/modprobe.d/90-omarchy-vigil-protocols.conf", [VIGIL_MARK,
-          "install dccp /bin/false", "install sctp /bin/false", "install rds /bin/false", "install tipc /bin/false"])
-  },
   "firewire-off": {
     title: "Turn off FireWire",
     what: ["Writes /etc/modprobe.d/90-omarchy-vigil-firewire.conf so the FireWire drivers never load.",
@@ -508,7 +493,6 @@ var DOCS = {
   "arch-ssh-keys": "https://wiki.archlinux.org/title/SSH_keys",
   "arch-gnupg": "https://wiki.archlinux.org/title/GnuPG",
   "arch-dm-crypt": "https://wiki.archlinux.org/title/Dm-crypt",
-  "arch-secure-boot": "https://wiki.archlinux.org/title/Unified_Extensible_Firmware_Interface/Secure_Boot",
   "arch-faillock": "https://wiki.archlinux.org/title/Security#Lock_out_user_after_three_failed_login_attempts",
   "arch-autostart": "https://wiki.archlinux.org/title/Autostarting",
   "arch-aur": "https://wiki.archlinux.org/title/Arch_User_Repository",
@@ -565,7 +549,11 @@ function terminalScript(id, tools) {
   var a = terminalAction(id)
   if (!a) return ""
   var body = ""
-  if (a.tool) {
+  if (a.tool && a.run) {
+    var tdir = toolDir(tools, a.tool)
+    if (tdir === "") return ""
+    body = a.run.split("@TOOL@").join(tdir + "/" + a.tool)
+  } else if (a.tool) {
     var dir = toolDir(tools, a.tool)
     if (dir === "") return ""
     body = dir + "/" + a.tool + a.args
@@ -685,7 +673,7 @@ function validCheck(c) {
   }
 }
 
-var SOURCE_IDS = ["signatures", "virus-scan", "arch-audit", "osv", "aur", "bumblebee"]
+var SOURCE_IDS = ["signatures", "virus-scan", "arch-audit", "osv", "aur", "lynis", "bumblebee"]
 var SOURCE_STATES = ["ok", "stale", "never", "failed"]
 var DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
@@ -724,7 +712,7 @@ function relativeDay(date, now) {
 
 function sourceLine(src, now) {
   // Scans "ran"; databases and signatures are "updated".
-  var scan = src.id === "virus-scan" || src.id === "bumblebee"
+  var scan = src.id === "virus-scan" || src.id === "bumblebee" || src.id === "lynis"
   if (src.state === "never") return scan ? "not run yet" : "not updated yet"
   if (src.state === "failed")
     return (scan ? "last run failed" : "last update failed") + (src.date !== "" ? "; last good " + relativeDay(src.date, now) : "")
@@ -733,10 +721,25 @@ function sourceLine(src, now) {
 }
 
 function lastRunLine(run, now) {
-  if (!run || run.at === "") return "No full update yet. It runs within a day, or press the button."
+  if (!run || run.at === "") return "No update yet. It runs within a day, or press Update sources."
   var time = run.at.substring(11, 16)
-  return "Last full update " + relativeDay(run.at, now) + " at " + time
+  return "Last update " + relativeDay(run.at, now) + " at " + time
     + (run.ok ? ". Every source refreshed." : ". Some sources did not refresh; Vigil tries again tomorrow.")
+}
+
+// The Full scan card: what runs in the background and what needs the terminal.
+function fullScanConfirmation(report) {
+  if (!report) return null
+  var lines = ["Updates every source, as Update sources does.",
+               "Scans your Downloads folder for viruses, if ClamAV is installed (Detect tab).",
+               "Runs Lynis for the few checks that need your password: other accounts with root powers or "
+               + "no password, old insecure network servers and hidden shell history. Installs Lynis first "
+               + "if needed.",
+               "A terminal opens for that part; sudo asks for your password once.",
+               "Then every tab is checked again."]
+  if (launcherPath(report.tools) === "" || terminalScript("lynis-scan", report.tools) === "")
+    lines.splice(2, 2, "The password checks need the Omarchy terminal tools, which were not found; the rest still runs.")
+  return { title: "Full scan", lines: lines }
 }
 
 function parseHistory(h) {

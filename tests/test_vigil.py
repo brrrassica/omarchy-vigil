@@ -1288,7 +1288,7 @@ def test_aur_refresh_failure_is_retried(v):
 
 
 # --------------------------------------------------------------------------
-# Weekly virus scan and the Update and check everything button
+# Weekly virus scan, Update sources and Full scan
 
 def scan_argv(v):
     return ("/usr/bin/clamscan", "--recursive", "--infected", "--no-summary", "--stdout", "--",
@@ -1447,161 +1447,108 @@ def test_warnings_cost_less_than_failures(v):
 
 
 # --------------------------------------------------------------------------
-# Lynis: the terminal action copies a few report lines; Vigil lists them.
+# Lynis (Full scan): only the shortlisted, newcomer-relevant tests become rows.
 
-LYNIS_DAT = """hardening_index=64
-report_datetime_end=2026-10-12 10:00:03
-warning[]=NETW-2705|Couldn't find 2 responsive nameservers|-|-|
+LYNIS_DAT = """report_datetime_end=2026-10-12 10:00:03
+warning[]=AUTH-9283|Found accounts without password|-|-|
+warning[]=AUTH-9204|Multiple users with UID 0 found in passwd file|-|-|
+suggestion[]=AUTH-9204|Use vipw to delete the 'toor' user if not used.|-|-|
 suggestion[]=AUTH-9262|Install a PAM module for password strength testing|-|-|
-suggestion[]=AUTH-9262|Install a PAM module for password strength testing|-|-|
-suggestion[]=KRNL-6000|One or more sysctl values differ|net.ipv4.conf.all.send_redirects (exp: 0)|-|
+suggestion[]=INSE-8322|Removing the telnet server package and replace with SSH when possible|-|-|
 suggestion[]=not an id|Should be dropped|-|-|
-suggestion[]=BOOT-5122|\x1b[31mcolour\u202e and bidi|-|-|
-hostname=should-not-matter
+warning[]=HOME-9310|\x1b[31mIncorrect\u202e file type found for shell history file|-|-|
 """
 
 
-def lynis_check(v):
-    return v._scanner_check(*[s for s in v.SCANNERS if s[0] == "lynis"][0])
+def lynis_state(v, text):
+    put(Path(v.HOME, ".local/state/omarchy-vigil/lynis.dat"), text, 0o600)
 
 
 def test_parse_lynis(v):
     d = v.parse_lynis(LYNIS_DAT)
-    assert d["index"] == 64 and d["date"] == "2026-10-12"
-    assert [w["id"] for w in d["warnings"]] == ["NETW-2705"]
-    assert [s["id"] for s in d["suggestions"]] == ["AUTH-9262", "KRNL-6000", "BOOT-5122"]
-    assert d["suggestions"][1]["detail"] == "net.ipv4.conf.all.send_redirects (exp: 0)"
-    assert "\x1b" not in d["suggestions"][2]["text"] and "\u202e" not in d["suggestions"][2]["text"]
-    assert v.parse_lynis("hardening_index=250\nfoo=bar\n") is None
-    assert v.parse_lynis("") is None
+    assert d["date"] == "2026-10-12"
+    assert [i["id"] for i in d["items"]] == ["AUTH-9283", "AUTH-9204", "AUTH-9204", "AUTH-9262", "INSE-8322",
+                                             "HOME-9310"]
+    assert "\x1b" not in d["items"][-1]["text"] and "\u202e" not in d["items"][-1]["text"]
+    assert v.parse_lynis("foo=bar\n") is None and v.parse_lynis("") is None
 
 
-CATALOG = """AUTH-9262:test:security:authentication::Checking presence password strength testing tools (PAM):
-NETW-2705:test:security:networking::Check availability two nameservers:
-KRNL-6000:test:security:kernel_hardening::Check sysctl key pairs in scan profile:
-MALW-3280:test:security:malware::Check if anti-virus tool is installed:
-PKGS-7398:test:security:ports_packages::Check for package audit tool:
-"""
+def test_only_shortlisted_lynis_tests_become_rows(v):
+    lynis_state(v, LYNIS_DAT)
+    rows = {r["id"]: r for r in v.lynis_rows()}
+    assert set(rows) == {"lynis-auth-9283", "lynis-auth-9204", "lynis-inse-8322", "lynis-home-9310"}
+    r = rows["lynis-auth-9204"]
+    assert r["title"] == "Another account with root powers" and r["status"] == "warn" and r["weight"] == 1
+    assert r["summary"] == "Multiple users with UID 0 found in passwd file"
+    assert "toor" in r["detail"] and "2026" not in r["detail"]
+    assert r["fix"] == {"kind": "docs", "action": "lynis-auth-9204", "label": "Learn more"}
+    assert r["howto"] and r["why"].count(". ") <= 1
+    assert rows["lynis-home-9310"]["category"] == "detect"
+    for tid, (pillar, title, why, howto) in v.LYNIS_TESTS.items():
+        assert re.fullmatch(r"[A-Z]{4}-[0-9]{4}", tid) and pillar in ("harden", "detect") and title and howto
 
 
-def test_lynis_catalog_names_and_pillars(v):
-    sysfile(v, "/usr/share/lynis/db/tests.db", CATALOG + "garbage line\nX:y\n")
-    cat = v.lynis_catalog()
-    assert cat["AUTH-9262"] == ("authentication", "Presence password strength testing tools (PAM)")
-    assert cat["NETW-2705"] == ("networking", "Availability two nameservers")
-    shown = {"warnings": [], "suggestions": [
-        {"id": "MALW-3280", "text": "Install an antivirus", "detail": "", "solution": ""},
-        {"id": "PKGS-7398", "text": "Install a package audit tool", "detail": "", "solution": ""},
-        {"id": "AUTH-9262", "text": "Install a PAM module", "detail": "", "solution": "Install libpwquality"},
-        {"id": "LYNIS", "text": "Lynis is old", "detail": "", "solution": ""}]}
-    rows = {r["id"]: r for r in v._lynis_rows(shown, cat)}
-    assert rows["lynis-malw-3280"]["category"] == "detect"
-    assert rows["lynis-pkgs-7398"]["category"] == "supply"
-    auth = rows["lynis-auth-9262"]
-    assert auth["category"] == "harden" and auth["status"] == "info" and auth["weight"] == 0
-    assert auth["title"] == "Presence password strength testing tools (PAM)"
-    assert auth["summary"] == "Lynis suggestion: Install a PAM module"
-    assert "Fix: Install libpwquality" in auth["detail"]
-    assert "cisofy.com/lynis/controls/AUTH-9262/" in auth["detail"]
-    assert auth["fix"] == {"kind": "docs", "action": "lynis-auth-9262", "label": "Learn more"}
-    assert auth["howto"]
-    assert rows["lynis-lynis"]["fix"]["kind"] == "none"           # no page for a test without a number
-
-
-def test_lynis_row_and_findings_in_a_full_audit(v):
-    v.TRUSTED.add(v.sys_path("/usr/bin/lynis"))
-    sysfile(v, "/usr/share/lynis/db/tests.db", CATALOG)
-    c = lynis_check(v)
-    assert c["status"] == "info" and "Run it once" in c["summary"] and c["fix"]["action"] == "run-lynis"
-    put(Path(v.HOME, ".local/state/omarchy-vigil/lynis.dat"), LYNIS_DAT, 0o600)
+def test_lynis_rows_in_a_full_audit_and_reviews_persist(v):
+    lynis_state(v, LYNIS_DAT)
     checks = {c["id"]: c for c in v.audit(peek=True)["checks"]}
-    row = checks["scanner-lynis"]
-    assert row["summary"].startswith("Hardening index 64 of 100.") and row["fix"]["label"] == "Run again"
-    assert "lynis-netw-2705" in checks and "lynis-auth-9262" in checks and "lynis-boot-5122" in checks
-    assert checks["lynis-auth-9262"]["dismissible"] and checks["lynis-auth-9262"]["weight"] == 0
-    # Marking a Lynis finding as reviewed survives the next Lynis run.
-    assert v.set_dismissed("lynis-auth-9262", True)["ok"]
-    put(Path(v.HOME, ".local/state/omarchy-vigil/lynis.dat"), LYNIS_DAT.replace("64", "66"), 0o600)
-    assert {c["id"]: c for c in v.audit(peek=True)["checks"]}["lynis-auth-9262"]["dismissed"]
+    assert "lynis-auth-9283" in checks and "lynis-auth-9262" not in checks
+    assert "scanner-lynis" not in checks and "scanner-rkhunter" not in checks
+    assert v.set_dismissed("lynis-auth-9283", True)["ok"]
+    lynis_state(v, LYNIS_DAT.replace("10-12", "10-19"))           # next Full scan, same finding
+    assert {c["id"]: c for c in v.audit(peek=True)["checks"]}["lynis-auth-9283"]["dismissed"]
+    lynis_state(v, LYNIS_DAT.replace("Found accounts without password", "Found accounts without password|bob"))
+    assert not {c["id"]: c for c in v.audit(peek=True)["checks"]}["lynis-auth-9283"]["dismissed"]  # new evidence
 
 
-def test_lynis_rows_are_capped(v):
-    lines = "".join("suggestion[]=TEST-%04d|Suggestion number %d|-|-|\n" % (i, i) for i in range(60))
-    shown, _ = v._lynis_fold(v.parse_lynis(lines), None)
-    assert len(v._lynis_rows(shown, {})) == v.LYNIS_MAX_ROWS
-
-
-LYNIS_OVERLAP = """hardening_index=70
-warning[]=FIRE-4590|No firewall found|-|-|
-suggestion[]=SSH-7408|Consider hardening SSH configuration|MaxAuthTries (6 --> 3)|-|
-suggestion[]=AUTH-9262|Install a PAM module for password strength testing|-|Install libpam-passwdqc|
-suggestion[]=NETW-3200|Determine if protocol 'dccp' is really needed on this system|-|-|
-suggestion[]=NETW-3200|Determine if protocol 'sctp' is really needed on this system|-|-|
-suggestion[]=KRNL-6000|One or more sysctl values differ from the scan profile and could be tweaked||Change sysctl value or disable test (skip-test=KRNL-6000:<sysctl-key>)|
-details[]=KRNL-6000|sysctl|desc:Disable sending of redirects;field:net.ipv4.conf.all.send_redirects;prefval:0;value:1;|
-details[]=KRNL-6000|sysctl|desc:Log martians;field:net.ipv4.conf.all.log_martians;prefval:1;value:0;|
-details[]=SSH-7408|sshd|field:MaxAuthTries;prefval:3;value:6;|
-"""
-
-
-def test_lynis_leaves_out_what_vigil_checks(v):
-    shown, covered = v._lynis_fold(v.parse_lynis(LYNIS_OVERLAP), {
-        "firewall": "Firewall", "network-hardening": "Network stack",
-        "rare-protocols": "Rarely used network protocols"})        # SSH server did not run
-    assert covered == ["Firewall", "Rarely used network protocols", "Network stack"]
-    assert shown["warnings"] == []
-    assert [s["id"] for s in shown["suggestions"]] == ["SSH-7408", "AUTH-9262", "KRNL-6000"]
-    krnl = shown["suggestions"][2]
-    assert "net.ipv4.conf.all.log_martians (Lynis prefers 1, now 0)" in krnl["detail"]
-    assert "send_redirects" not in krnl["detail"] and krnl["solution"] == ""
-
-
-def test_lynis_sysctl_item_disappears_when_vigil_manages_every_setting(v):
-    text = LYNIS_OVERLAP.replace("net.ipv4.conf.all.log_martians", "net.ipv4.tcp_syncookies")
-    shown, covered = v._lynis_fold(v.parse_lynis(text), {"network-hardening": "Network stack"})
-    assert "KRNL-6000" not in [s["id"] for s in shown["suggestions"]]
-    assert covered == ["Network stack"]
-
-
-def test_audit_folds_lynis_into_vigil_checks(v):
+def test_lynis_is_a_source_on_the_overview(v):
+    assert not [s for s in v.source_status() if s["id"] == "lynis"]
     v.TRUSTED.add(v.sys_path("/usr/bin/lynis"))
-    put(Path(v.HOME, ".local/state/omarchy-vigil/lynis.dat"), LYNIS_OVERLAP, 0o600)
-    checks = [v.result("firewall", "harden", "Firewall", "warn", "Off."),
-              v.result("ssh-server", "harden", "SSH server", "na", "Not installed."),
-              lynis_check(v)]
-    v.fold_lynis(checks)
-    ids = [c["id"] for c in checks]
-    assert "lynis-fire-4590" not in ids                       # Vigil's firewall row covers it
-    assert "lynis-ssh-7408" in ids                            # Vigil's SSH check did not run
-    assert "Left out because Vigil already checks them: Firewall." in checks[2]["detail"]
-    netw = next(c for c in checks if c["id"] == "lynis-netw-3200")
-    assert netw["summary"].endswith("(and 1 more)")
+    assert [s for s in v.source_status() if s["id"] == "lynis"][0]["state"] == "never"
+    lynis_state(v, "report_datetime_end=%s 10:00:00\n" % time.strftime("%Y-%m-%d"))
+    src = [s for s in v.source_status() if s["id"] == "lynis"][0]
+    assert src["state"] == "ok" and src["label"] == "Full scan (password checks)"
 
 
 def test_lynis_copy_must_be_ours(v, tmp_path):
-    v.TRUSTED.add(v.sys_path("/usr/bin/lynis"))
     elsewhere = put(tmp_path / "planted.dat", LYNIS_DAT)
     state = Path(v.HOME, ".local/state/omarchy-vigil")
     state.mkdir(parents=True, mode=0o700)
     os.symlink(elsewhere, state / "lynis.dat")
-    c = lynis_check(v)
-    assert "Run it once" in c["summary"]
+    assert v.lynis_rows() == []
+
+
+def test_update_sources_skips_the_virus_scan(v, monkeypatch):
+    ran = []
+    monkeypatch.setattr(v, "FEED_REFRESH", {n: (lambda n=n: ran.append(n)) for n in ("arch-audit", "virus-scan")})
+    monkeypatch.setattr(v, "feed_available", lambda n: True)
+    v.refresh_due_feeds(force=True, sources_only=True)
+    assert ran == ["arch-audit"]
+    ran.clear()
+    v.refresh_due_feeds(force=True)
+    assert ran == ["arch-audit", "virus-scan"]
+
+
+def test_restart_needed(v, monkeypatch):
+    monkeypatch.setattr(v, "_running_kernel", lambda: "6.18.44-arch1-1")
+    assert v.check_restart()["status"] == "na"
+    Path(v.sys_path("/usr/lib/modules/6.18.44-arch1-1")).mkdir(parents=True)
+    assert v.check_restart()["status"] == "pass"
+    monkeypatch.setattr(v, "_running_kernel", lambda: "6.18.40-arch1-1")
+    c = v.check_restart()
+    assert c["status"] == "warn" and c["fix"]["action"] == "restart"
+    monkeypatch.setattr(v, "_running_kernel", lambda: "../../etc")
+    assert v.check_restart()["status"] == "na"
 
 
 # --------------------------------------------------------------------------
 # Rarely used protocols and FireWire (Vigil's answers to Lynis NETW-3200 and STRG-1846)
 
-def test_rare_protocols(v):
-    c = v.check_rare_protocols()
-    assert c["status"] == "info" and c["fix"]["action"] == "protocols-off"
-    assert c["summary"] == "dccp, sctp, rds and tipc can still load."
-    sysfile(v, "/etc/modprobe.d/90-omarchy-vigil-protocols.conf", v.ETC_MARK + "\n" + "".join(
-        "install %s /bin/false\n" % p for p in v.RARE_PROTOCOLS))
-    assert v.check_rare_protocols()["status"] == "pass"
-    assert v.undo_available("undo-protocols")
-    sysfile(v, "/etc/modprobe.d/90-omarchy-vigil-protocols.conf", "install dccp /bin/false\n")
-    assert v.check_rare_protocols()["summary"] == "sctp, rds and tipc can still load."
-    assert not v.undo_available("undo-protocols")            # no longer Vigil's file
+def test_rare_protocols_only_shown_to_undo_an_earlier_change(v):
+    assert v.check_rare_protocols() is None
+    assert "rare-protocols" not in [c["id"] for c in v.audit(peek=True)["checks"]]
+    sysfile(v, "/etc/modprobe.d/90-omarchy-vigil-protocols.conf", v.ETC_MARK + "\ninstall dccp /bin/false\n")
+    c = {c["id"]: c for c in v.audit(peek=True)["checks"]}["rare-protocols"]
+    assert c["status"] == "pass" and c["undo"]["action"] == "undo-protocols"
 
 
 def test_firewire_only_matters_with_a_port(v):

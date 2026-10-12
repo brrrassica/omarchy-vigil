@@ -104,7 +104,9 @@ test("terminal scripts: closed set, tool dirs enforced", () => {
   assert.equal(M.terminalScript("update", {}), "")
   assert.equal(M.terminalScript("update", { "omarchy-update": "/tmp" }), "")
   assert.match(M.terminalScript("update", TOOLS), /\( set -e; \/usr\/bin\/omarchy-update \)$/)
-  assert.match(M.terminalScript("install-lynis", TOOLS), /\/usr\/share\/omarchy\/bin\/omarchy-pkg-add lynis/)
+  assert.match(M.terminalScript("lynis-scan", TOOLS), /\/usr\/share\/omarchy\/bin\/omarchy-pkg-add lynis;/)
+  assert.ok(!M.terminalScript("lynis-scan", TOOLS).includes("@TOOL@"))
+  assert.equal(M.terminalScript("lynis-scan", { "omarchy-launch-floating-terminal-with-presentation": "/usr/bin" }), "")
   assert.equal(M.launcherPath({}), "")
   assert.equal(M.launcherPath(TOOLS), "/usr/bin/omarchy-launch-floating-terminal-with-presentation")
 })
@@ -331,7 +333,7 @@ test("sources and last run are validated and worded plainly", () => {
   assert.equal(M.sourceLine({ state: "ok", date: "2026-10-11" }, now), "updated yesterday")
   assert.equal(M.sourceLine({ state: "failed", date: "2026-10-03", tried: "2026-10-12" }, now), "last update failed; last good Oct 3")
   assert.equal(M.sourceLine({ state: "never", date: "" }, now), "not updated yet")
-  assert.match(M.lastRunLine({ at: "2026-10-12 09:41", ok: true }, now), /^Last full update today at 09:41\. Every source refreshed\.$/)
+  assert.match(M.lastRunLine({ at: "2026-10-12 09:41", ok: true }, now), /^Last update today at 09:41\. Every source refreshed\.$/)
   assert.match(M.lastRunLine({ at: "2026-10-05 09:41", ok: false }, now), /did not refresh/)
   assert.equal(M.sourceLine({ id: "virus-scan", state: "ok", date: "2026-10-12" }, now), "ran today")
   assert.equal(M.sourceLine({ id: "virus-scan", state: "never", date: "" }, now), "not run yet")
@@ -386,10 +388,11 @@ test("clean all and the Lynis copy are fixed scripts with absolute paths", () =>
   const sys = M.terminalScript("clean-system", TOOLS)
   assert.match(sys, /sudo \/usr\/bin\/paccache -rk2/)
   assert.match(sys, /sudo \/usr\/bin\/journalctl --vacuum-time=2weeks/)
-  const lynis = M.terminalScript("run-lynis", TOOLS)
+  const lynis = M.terminalScript("lynis-scan", TOOLS)
   assert.match(lynis, /umask 077;/)
-  assert.match(lynis, /sudo \/usr\/bin\/lynis audit system --quick --quiet/)
-  assert.match(lynis, /sudo \/usr\/bin\/grep -E .*\/var\/log\/lynis-report\.dat > "\$HOME\/\.local\/state\/omarchy-vigil\/lynis\.dat\.new"/)
+  assert.match(lynis, /sudo \/usr\/bin\/lynis audit system --quick --quiet --no-colors --tests-from-group 'authentication insecure_services homedirs'/)
+  assert.match(lynis, /sudo \/usr\/bin\/grep -E .*\/var\/log\/lynis-report\.dat > "\$d\/lynis\.dat\.new"/)
+  assert.match(M.terminalScript("restart", TOOLS), /\/usr\/bin\/systemctl reboot \)$/)
   assert.ok(M.isHelperAction("clean-user"))
 })
 
@@ -397,7 +400,7 @@ test("clean all and the Lynis copy are fixed scripts with absolute paths", () =>
 // Learn more pages and How to fix
 
 test("learn-more pages come only from the fixed table or a Lynis test ID", () => {
-  assert.equal(M.docsUrl("arch-secure-boot"), "https://wiki.archlinux.org/title/Unified_Extensible_Firmware_Interface/Secure_Boot")
+  assert.equal(M.docsUrl("arch-dm-crypt"), "https://wiki.archlinux.org/title/Dm-crypt")
   assert.equal(M.docsUrl("lynis-auth-9262"), "https://cisofy.com/lynis/controls/AUTH-9262/")
   for (const bad of ["lynis-auth-92620", "lynis-../x", "https://evil.example", "", null, "toString", "__proto__"])
     assert.equal(M.docsUrl(bad), "", String(bad))
@@ -420,4 +423,14 @@ test("how to fix comes from the helper, or from what the fix button does", () =>
   assert.equal(M.howTo(r.checks[2]), "")
   assert.equal(M.howTo(r.checks[3]), "")
   assert.equal(parse(report({ checks: [check({ howto: 5 })] })), null)
+})
+
+test("full scan card says what runs and what needs a password", () => {
+  const card = M.confirmation("full-scan", "all", parse(report()))
+  assert.equal(card.title, "Full scan")
+  assert.ok(card.lines.some(l => l.includes("sudo asks for your password once")))
+  const noTerm = M.confirmation("full-scan", "all", parse(report({ tools: {} })))
+  assert.ok(!noTerm.lines.some(l => l.includes("sudo asks")))
+  assert.ok(noTerm.lines.some(l => l.includes("the rest still runs")))
+  assert.equal(M.confirmation("full-scan", "all", null), null)
 })

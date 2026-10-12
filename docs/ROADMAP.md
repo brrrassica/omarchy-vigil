@@ -107,7 +107,25 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.11 (this release): every finding explains itself
+## 0.12 (this release): Full scan, and only what helps a newcomer
+
+- [x] Two buttons instead of one: **Full scan** (`S`) checks everything,
+      including the checks that need a password, with one sudo prompt in a
+      terminal; **Update sources** (`U`) only refreshes the lists Vigil
+      checks against, with no password and no scan.
+- [x] Lynis cut down to three test groups and eight tests that matter on a
+      personal computer (other root accounts, accounts without a password or
+      sharing an ID, hidden shell history, old insecure network servers),
+      each in plain words with how to fix it. The overlap logic with Vigil's
+      own checks is gone: nothing Lynis shows overlaps them.
+- [x] New: **Restart after updates**, when a newer kernel is installed than
+      the one running.
+- [x] No longer suggested, because a newcomer gains too little or risks too
+      much: Rootkit Hunter (last released 2018, many false alarms on Arch),
+      setting up Secure Boot, and turning off rarely used network protocols
+      (still shown, with Undo, where an earlier Vigil turned them off).
+
+## 0.11: every finding explains itself
 
 - [x] Every finding: **Why it matters** in one or two sentences, **How to
       fix**, and a button: Fix, or Learn more / Show (a guide or a read-only

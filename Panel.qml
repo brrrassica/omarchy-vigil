@@ -110,21 +110,32 @@ Panel {
     if (statusIsError) setStatus("", false)
     if (rowIndex >= visibleChecks.length) rowIndex = Math.max(0, visibleChecks.length - 1)
     if (root.isPrimary && root.notifyOnNew && parsed.fresh.length > 0) notifyNew(parsed.fresh.length)
-    if (root.isPrimary && root.autoUpdate && parsed.feedsDue) refreshFeeds()
+    if (root.isPrimary && root.autoUpdate && parsed.feedsDue) refreshFeeds("")
   }
 
-  // Runs `bin/vigil refresh-feeds` in the background; the helper refreshes
-  // only the sources that are due and retries failures the next day.
-  function refreshFeeds(force) {
+  // Runs `bin/vigil refresh-feeds` in the background. With no mode (the
+  // weekly run) the helper refreshes only what is due and retries failures the
+  // next day; "sources" (Update sources) refreshes every database and list;
+  // "full" (Full scan) also scans Downloads for viruses.
+  function refreshFeeds(mode) {
     if (feedProc.running) return
     feedBuffer = ""
     feedOverflow = false
-    feedForced = force === true
+    feedForced = mode === "sources" || mode === "full"
     feedProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, "refresh-feeds"]
-      .concat(feedForced ? ["--force"] : [])
+      .concat(mode === "sources" ? ["--sources"] : (mode === "full" ? ["--force"] : []))
     feedProc.running = true
     feedDeadline.restart()
-    if (feedForced) setStatus("Updating every source and checking everything. This can take a few minutes.", false)
+    if (mode === "sources") setStatus("Updating sources\u2026", false)
+    else if (mode === "full") setStatus("Full scan running. Updating sources and scanning Downloads; this can take a few minutes.", false)
+  }
+
+  // Full scan: the background part (sources and the virus scan) plus the
+  // checks that need a password, in one terminal. Asks first on the usual card.
+  function requestFullScan() {
+    if (!report || busy || feedProc.running) return
+    pendingKind = "full-scan"
+    pendingAction = "all"
   }
 
   function notifyNew(count) {
@@ -170,6 +181,13 @@ Panel {
     var action = pendingAction
     cancelPending()
     if (!report) return
+    if (kind === "full-scan") {
+      var scanLauncher = Model.launcherPath(report.tools)
+      var scanScript = Model.terminalScript("lynis-scan", report.tools)
+      if (scanLauncher !== "" && scanScript !== "") Quickshell.execDetached([scanLauncher, scanScript])
+      refreshFeeds("full")
+      return
+    }
     if (kind === "clean-all") {
       var plan = Model.cleanAllPlan(report)
       if (plan.system) {
@@ -460,7 +478,8 @@ Panel {
       onTextKey: function(t) {
         if (t === "r" || t === "R") root.runAudit()
         else if (t === "f" || t === "F") root.requestFix(root.selectedCheck())
-        else if (t === "u" || t === "U") root.refreshFeeds(true)
+        else if (t === "u" || t === "U") root.refreshFeeds("sources")
+        else if (t === "s" || t === "S") root.requestFullScan()
         else if ((t === "c" || t === "C") && root.tab === "care") root.requestCleanAll()
         else if (t === "d" || t === "D") {
           var sel = root.selectedCheck()
@@ -633,29 +652,45 @@ Panel {
               wrapMode: Text.WordWrap
             }
 
-            SectionHeading { text: "UPDATES" }
-            Row {
+            SectionHeading { text: "SCANS AND UPDATES" }
+            Flow {
               width: parent.width
-              spacing: Style.space(10)
+              spacing: Style.space(8)
               Button {
-                id: updateAllButton
-                text: feedProc.running ? "Updating…" : "Update and check everything"
+                text: "Full scan"
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 bordered: true
+                enabled: !feedProc.running && !root.busy && root.pending === null
+                onClicked: root.requestFullScan()
+              }
+              Button {
+                text: feedProc.running ? "Updating\u2026" : "Update sources"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
                 enabled: !feedProc.running
-                onClicked: root.refreshFeeds(true)
+                onClicked: root.refreshFeeds("sources")
               }
-              Text {
-                textFormat: Text.PlainText
-                anchors.verticalCenter: updateAllButton.verticalCenter
-                width: parent.width - updateAllButton.width - parent.spacing
-                text: root.report ? Model.lastRunLine(root.report.lastRun, new Date()) : ""
-                color: root.report && root.report.lastRun.at !== "" && !root.report.lastRun.ok ? root.urgent : root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-              }
+            }
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: "Full scan checks everything, including the checks that need your password. Update "
+                + "sources only refreshes the lists Vigil checks against; that, and the Downloads virus "
+                + "scan, also run by themselves once a week."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: root.report ? Model.lastRunLine(root.report.lastRun, new Date()) : ""
+              color: root.report && root.report.lastRun.at !== "" && !root.report.lastRun.ok ? root.urgent : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
             // When each maintained source last updated successfully.
             Repeater {
