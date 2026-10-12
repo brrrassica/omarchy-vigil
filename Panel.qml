@@ -555,43 +555,69 @@ Panel {
             visible: root.statusMessage !== ""
             width: parent.width
             text: root.statusMessage
-            color: root.statusIsError ? root.urgent : root.dim
+            color: root.statusIsError ? root.urgent : root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
+            font.italic: true
             wrapMode: Text.WordWrap
           }
 
-          // Overview summary
+          // Overview: score, updates, history, pillars, then what to fix first.
           Column {
             visible: root.tab === "overview"
             width: parent.width
-            spacing: Style.space(6)
+            spacing: Style.space(8)
 
+            Row {
+              spacing: Style.space(6)
+              Text {
+                id: scoreText
+                textFormat: Text.PlainText
+                text: root.report ? String(root.report.score) : "–"
+                color: root.report && root.report.level === "fail" ? root.urgent : root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.displayLarge
+                font.bold: true
+              }
+              Text {
+                textFormat: Text.PlainText
+                anchors.baseline: scoreText.baseline
+                text: "/ 100"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+            }
             Text {
               textFormat: Text.PlainText
               width: parent.width
-              text: root.report ? String(root.report.score) : "–"
+              text: root.report ? Model.levelText(root.report) : "Not checked yet"
               color: root.report && root.report.level === "fail" ? root.urgent : root.foreground
               font.family: root.fontFamily
-              font.pixelSize: Style.font.displayLarge
+              font.pixelSize: Style.font.subtitle
+              font.bold: true
+              wrapMode: Text.WordWrap
             }
             Text {
               textFormat: Text.PlainText
               width: parent.width
               text: root.report
-                ? "Security score out of 100. Checked " + root.report.generatedAt.replace("T", " ").substring(0, 16) + "."
+                ? "Checked " + Model.relativeDay(root.report.generatedAt, new Date()) + " at "
+                  + root.report.generatedAt.substring(11, 16) + ". Everything is read on this computer."
                 : "Vigil reads your settings locally. Nothing leaves this computer."
               color: root.dim
               font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
+              font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
+
+            SectionHeading { text: "UPDATES" }
             Row {
               width: parent.width
               spacing: Style.space(10)
               Button {
                 id: updateAllButton
-                text: feedProc.running ? "Updating\u2026" : "Update and check everything"
+                text: feedProc.running ? "Updating…" : "Update and check everything"
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 bordered: true
@@ -614,14 +640,15 @@ Panel {
               model: root.report ? root.report.sources : []
               delegate: Item {
                 required property var modelData
+                readonly property bool problem: modelData.state === "failed" || modelData.state === "stale"
                 width: column.width
                 implicitHeight: srcValue.implicitHeight
                 Text {
                   textFormat: Text.PlainText
                   anchors.left: parent.left
-                  width: parent.width * 0.5
+                  width: parent.width * 0.55
                   text: modelData.label
-                  color: root.dim
+                  color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   elide: Text.ElideRight
@@ -630,21 +657,29 @@ Panel {
                   id: srcValue
                   textFormat: Text.PlainText
                   anchors.right: parent.right
-                  width: parent.width * 0.5
+                  width: parent.width * 0.45
                   horizontalAlignment: Text.AlignRight
                   text: Model.sourceLine(modelData, new Date())
-                  color: modelData.state === "failed" || modelData.state === "stale" ? root.urgent : root.dim
+                  color: parent.problem ? root.urgent : root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
+                  font.bold: parent.problem
                   wrapMode: Text.WordWrap
                 }
               }
+            }
+
+            SectionHeading {
+              visible: root.report !== null && root.report.history.length > 0
+              text: "LAST 30 DAYS"
             }
             ScoreHistory {
               visible: root.report !== null && root.report.history.length > 0
               width: parent.width
               history: root.report ? root.report.history : []
             }
+
+            SectionHeading { visible: root.report !== null; text: "PILLARS" }
             Repeater {
               model: root.report ? ["harden", "detect", "supply", "privacy", "care"] : []
               delegate: CategoryRow {
@@ -653,31 +688,45 @@ Panel {
                 category: String(modelData)
               }
             }
-            PanelSeparator { width: parent.width; foreground: root.foreground }
+
+            SectionHeading { visible: root.report !== null; text: "FIX THESE FIRST" }
             Text {
               textFormat: Text.PlainText
+              visible: root.report !== null && root.visibleChecks.length === 0
               width: parent.width
-              text: root.visibleChecks.length > 0 ? "Fix these first" : (root.report ? "Nothing urgent. The other tabs list optional extras." : "")
-              color: root.foreground
+              text: "Nothing urgent. The other tabs list optional improvements."
+              color: root.dim
               font.family: root.fontFamily
-              font.pixelSize: Style.font.body
+              font.pixelSize: Style.font.bodySmall
+              font.italic: true
               wrapMode: Text.WordWrap
             }
           }
 
-          Text {
-            textFormat: Text.PlainText
+          // Each pillar opens with its question in bold, then what it covers.
+          Column {
             visible: root.tab !== "overview" && root.report !== null
             width: parent.width
-            text: root.tab === "harden" ? "Can someone get in? Settings that make this machine harder to break into."
-              : root.tab === "detect" ? "Is something bad already here? Signs of malware, virus scanning with ClamUI, and rootkit checks."
-              : root.tab === "supply" ? "Can you trust what you installed? Packages, known vulnerabilities, known-compromised components and plugins."
-              : root.tab === "privacy" ? "What does this machine tell the networks it joins?"
-              : "Is the system tidy? Space you can reclaim and traces you can clear."
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
+            spacing: Style.space(2)
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: Model.tabIntro(root.tab).question
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.subtitle
+              font.bold: true
+              wrapMode: Text.WordWrap
+            }
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: Model.tabIntro(root.tab).text
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
           }
 
           Repeater {
@@ -728,7 +777,7 @@ Panel {
       width: parent.width
       text: hist.hovered >= 0 && hist.hovered < hist.history.length
         ? Model.shortDate(hist.history[hist.hovered].date) + ": " + hist.history[hist.hovered].score
-        : "Score, last " + hist.slots + " days"
+        : "Daily score. Hover a bar for its day."
       color: root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
@@ -786,6 +835,20 @@ Panel {
     }
   }
 
+  // Omarchy's own small bold section label, with a little air above it.
+  component SectionHeading: Item {
+    property alias text: heading.text
+    width: parent ? parent.width : 0
+    implicitHeight: heading.implicitHeight + Style.space(6)
+    PanelSectionHeader {
+      id: heading
+      anchors.bottom: parent.bottom
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      font.letterSpacing: 1
+    }
+  }
+
   component CategoryRow: CursorSurface {
     id: catRow
     property string category: ""
@@ -804,18 +867,26 @@ Panel {
       id: catText
       textFormat: Text.PlainText
       anchors.left: parent.left
-      anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       anchors.leftMargin: Style.space(10)
-      anchors.rightMargin: Style.space(10)
-      text: Model.categoryLabel(catRow.category) + "   "
-        + (catRow.fails + catRow.warns === 0 ? "✓ all good"
-           : (catRow.fails ? catRow.fails + " to fix" : "") + (catRow.fails && catRow.warns ? ", " : "")
-             + (catRow.warns ? catRow.warns + " to improve" : ""))
-      color: catRow.fails ? root.urgent : root.foreground
+      text: Model.categoryLabel(catRow.category)
+      color: root.foreground
       font.family: root.fontFamily
       font.pixelSize: Style.font.body
-      elide: Text.ElideRight
+      font.bold: true
+    }
+    Text {
+      textFormat: Text.PlainText
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.rightMargin: Style.space(10)
+      text: catRow.fails + catRow.warns === 0 ? "\u2713 all good"
+        : (catRow.fails ? catRow.fails + " to fix" : "") + (catRow.fails && catRow.warns ? ", " : "")
+          + (catRow.warns ? catRow.warns + " to improve" : "")
+      color: catRow.fails ? root.urgent : (catRow.warns ? root.warnColor : root.dim)
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      font.bold: catRow.fails > 0
     }
   }
 
@@ -876,14 +947,24 @@ Panel {
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
+        font.bold: true
         elide: Text.ElideRight
       }
       Text {
         textFormat: Text.PlainText
+        visible: row.check !== null && row.check.dismissed
         width: parent.width
-        text: !row.check ? ""
-          : (row.check.dismissed ? "Reviewed" + (row.check.dismissedAt !== "" ? " " + Model.shortDate(row.check.dismissedAt) : "") + ". " : "")
-            + row.check.summary
+        text: row.check && row.check.dismissed
+          ? "Reviewed" + (row.check.dismissedAt !== "" ? " on " + Model.shortDate(row.check.dismissedAt) : "") : ""
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.italic: true
+      }
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        text: row.check ? row.check.summary : ""
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
@@ -893,11 +974,36 @@ Panel {
         textFormat: Text.PlainText
         visible: row.expanded && row.check !== null && row.check.why !== ""
         width: parent.width
+        topPadding: Style.space(6)
+        text: "WHY IT MATTERS"
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: true
+        font.letterSpacing: 1
+      }
+      Text {
+        textFormat: Text.PlainText
+        visible: row.expanded && row.check !== null && row.check.why !== ""
+        width: parent.width
+        lineHeight: 1.15
         text: row.check ? row.check.why : ""
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.bodySmall
         wrapMode: Text.WordWrap
+      }
+      Text {
+        textFormat: Text.PlainText
+        visible: row.expanded && row.check !== null && row.check.detail !== ""
+        width: parent.width
+        topPadding: Style.space(6)
+        text: "DETAILS"
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: true
+        font.letterSpacing: 1
       }
       Text {
         textFormat: Text.PlainText

@@ -731,6 +731,24 @@ function categoryLabel(category) {
            privacy: "Privacy", care: "Care" }[category] || ""
 }
 
+// The question each pillar answers, and in one line what it covers.
+var TAB_INTROS = {
+  harden: { question: "Can someone get in?",
+            text: "Settings that make this machine harder to break into." },
+  detect: { question: "Is something bad already here?",
+            text: "Signs of malware, virus scanning with ClamUI, and rootkit checks." },
+  supply: { question: "Can you trust what you installed?",
+            text: "Packages with known vulnerabilities, known-malicious components, and plugins." },
+  privacy: { question: "What does this machine give away?",
+             text: "What it tells the networks it joins and the companies behind its apps." },
+  care: { question: "Is the system tidy?",
+          text: "Space you can reclaim and traces you can clear." }
+}
+
+function tabIntro(tab) {
+  return TAB_INTROS[tab] || { question: "", text: "" }
+}
+
 function tooltip(report, running) {
   if (running && !report) return "Vigil: checking"
   if (!report) return "Vigil"
@@ -749,7 +767,7 @@ if (typeof module !== "undefined") {
     terminalAction: terminalAction, launcherPath: launcherPath, canRun: canRun, checksFor: checksFor,
     topFindings: topFindings, countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
     tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
-    categoryLabel: categoryLabel, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
+    categoryLabel: categoryLabel, tabIntro: tabIntro, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
     shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
     relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,

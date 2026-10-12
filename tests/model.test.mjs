@@ -287,6 +287,15 @@ test("every pillar and tab label is one word", () => {
   }
 })
 
+test("each pillar opens with a question and a one-line explanation", () => {
+  for (const cat of ["harden", "detect", "supply", "privacy", "care"]) {
+    const intro = M.tabIntro(cat)
+    assert.match(intro.question, /^[A-Z].*\?$/, cat)
+    assert.ok(intro.text.length > 0 && intro.text.length <= 90, cat)
+  }
+  assert.deepEqual(M.tabIntro("overview"), { question: "", text: "" })
+})
+
 test("feedsDue is a strict boolean", () => {
   assert.equal(parse(report()).feedsDue, false)
   assert.equal(parse(report({ feedsDue: true })).feedsDue, true)

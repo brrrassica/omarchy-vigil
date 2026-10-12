@@ -26,7 +26,7 @@ root runs in a terminal you can watch.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.8.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.9.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 

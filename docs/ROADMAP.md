@@ -107,7 +107,19 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.8 (this release): first real-machine test
+## 0.9 (this release): easier to read
+
+- [x] The Overview leads with a large bold score and a bold one-line verdict,
+      with the check time in small dim text underneath.
+- [x] Sections (Updates, Last 30 days, Pillars, Fix these first) use
+      Omarchy's own small-caps section label.
+- [x] Each tab opens with its question in bold, then what it covers in dim
+      text. Pillar names and finding titles are bold; problem counts are
+      coloured; "Reviewed on" and status messages are in italics.
+- [x] An open finding labels its explanation and details ("Why it matters",
+      "Details").
+
+## 0.8: first real-machine test
 
 Tested on Omarchy: the widget loads, every check ran with no false alarms,
 and osv-scanner is in Arch's `extra` repository.
