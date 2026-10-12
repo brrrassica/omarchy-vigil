@@ -189,7 +189,7 @@ test("pillars are the only categories", () => {
   assert.equal(parse(report({ checks: [check({ category: "scan" })] })), null)
 })
 
-import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs"
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, mkdirSync, symlinkSync, statSync, readdirSync } from "node:fs"
 import { tmpdir } from "node:os"
 
 // Run a terminal action's body for real, with its /etc paths moved into a
@@ -613,4 +613,68 @@ test("a stopped run says so", () => {
                    { ok: true, message: "Stopped.", stopped: true })
   assert.equal(M.parseFixResult('{"ok":true,"message":"Done."}').stopped, false)
   assert.equal(M.parseFixResult('{"ok":true,"stopped":"yes","message":"Done."}').stopped, false)
+})
+
+test("hand-over turns off exactly the duplicate schedules, and Undo turns exactly those back on", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "vigil-handover-"))
+  const home = path.join(dir, "home"), bin = path.join(dir, "bin"), log = path.join(dir, "log")
+  const put = (rel, text, mode = 0o644) => {
+    const f = path.join(home, rel)
+    mkdirSync(path.dirname(f), { recursive: true })
+    writeFileSync(f, text, { mode })
+    return f
+  }
+  mkdirSync(bin, { recursive: true })
+  for (const name of ["systemctl", "omarchy-plugin-disable", "omarchy-plugin-enable"])
+    writeFileSync(path.join(bin, name), `#!/bin/bash\necho "${name} $*" >> "${log}"\n`, { mode: 0o755 })
+  const wants = ".config/systemd/user/timers.target.wants/clamui-scheduled-scan.timer"
+  put(".config/systemd/user/clamui-scheduled-scan.timer", "[Timer]\n")
+  mkdirSync(path.dirname(path.join(home, wants)), { recursive: true })
+  symlinkSync("../clamui-scheduled-scan.timer", path.join(home, wants))
+  const settings = put(".config/clamui/settings.json",
+    JSON.stringify({ scheduled_scans_enabled: true, schedule_time: "02:00", language: "de" }), 0o600)
+  mkdirSync(path.join(home, ".config/omarchy/plugins/io.github.duketopceo.bumblebee"), { recursive: true })
+  const shell = put(".config/omarchy/shell.json",
+    JSON.stringify({ bar: { layout: { right: [{ id: "io.github.duketopceo.bumblebee" }] } } }))
+  const run = (id) => {
+    const body = M.actionPlan(id, TOOLS, home)[0].argv[2].replaceAll("/usr/bin/systemctl", path.join(bin, "systemctl"))
+    return spawnSync("/usr/bin/bash", ["-c", body], { env: { HOME: home, PATH: bin + ":/usr/bin:/bin" }, encoding: "utf8" })
+  }
+  const marks = path.join(home, ".local/state/omarchy-vigil/handed-over")
+  let r = run("hand-over-schedules")
+  assert.equal(r.status, 0, r.stderr)
+  const after = JSON.parse(readFileSync(settings, "utf8"))
+  assert.deepEqual(after, { scheduled_scans_enabled: false, schedule_time: "02:00", language: "de" })
+  assert.equal(statSync(settings).mode & 0o777, 0o600)
+  assert.deepEqual(readdirSync(marks).sort(), ["bumblebee-plugin", "clamui-setting-native", "clamui-timer"])
+  assert.match(readFileSync(log, "utf8"), /systemctl --user disable --now clamui-scheduled-scan.timer\nomarchy-plugin-disable io.github.duketopceo.bumblebee\n/)
+  r = run("undo-schedules")
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(JSON.parse(readFileSync(settings, "utf8")).scheduled_scans_enabled, true)
+  assert.match(readFileSync(log, "utf8"), /systemctl --user enable --now clamui-scheduled-scan.timer\nomarchy-plugin-enable io.github.duketopceo.bumblebee\n$/)
+  assert.equal(existsSync(marks), false)
+  // A plugin you switched off yourself, and a ClamUI schedule already off, are left alone.
+  writeFileSync(log, "")
+  rmSync(path.join(home, wants))
+  writeFileSync(settings, JSON.stringify({ scheduled_scans_enabled: false }))
+  writeFileSync(shell, JSON.stringify({ disabledPlugins: ["io.github.duketopceo.bumblebee"], plugins: [{ id: "io.github.duketopceo.bumblebee" }] }))
+  r = run("hand-over-schedules")
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(readFileSync(log, "utf8"), "")
+  assert.deepEqual(readdirSync(marks), [])
+  // Undo with nothing recorded changes nothing.
+  r = run("undo-schedules")
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(readFileSync(log, "utf8"), "")
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test("with the Vigil weekly scan off, other schedules are not offered for hand-over", () => {
+  const r = parse(report({ checks: [check({ id: "other-schedules", category: "detect", status: "info", weight: 0,
+    fix: { kind: "terminal", action: "hand-over-schedules", label: "Let Vigil run them" } })] }))
+  assert.equal(M.withSettings(r, true).checks[0].status, "info")
+  const off = M.withSettings(r, false).checks[0]
+  assert.equal(off.status, "na")
+  assert.equal(off.fix.kind, "none")
+  assert.equal(r.checks[0].status, "info")                      // the parsed report itself is untouched
 })

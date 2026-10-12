@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta
 
-VERSION = "0.17.4"
+VERSION = "0.18.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -2575,6 +2575,131 @@ def check_bumblebee():
     return result(cid, cat, title, "pass", "No known-compromised packages (%s)." % when, why, weight=3)
 
 
+# --- Scans scheduled twice --------------------------------------------------
+# Other tools that schedule what Vigil's weekly run already does. Vigil only
+# reads their files here; turning them off is a confirmed panel action
+# ("hand-over-schedules" in Model.js), which leaves a marker per change in
+# HANDOVER_DIR so Undo restores exactly those.
+
+CLAMUI_TIMER_WANTS = (".config", "systemd", "user", "timers.target.wants", "clamui-scheduled-scan.timer")
+CLAMUI_SETTINGS = ((".config", "clamui", "settings.json"),
+                   (".var", "app", "io.github.linx_systems.ClamUI", "config", "clamui", "settings.json"))
+BUMBLEBEE_PLUGIN = "io.github.duketopceo.bumblebee"
+SECURITY_SCAN_WANTS = (".config", "systemd", "user", "timers.target.wants", "qs-security-scan.timer")
+HANDOVER_DIR = "handed-over"
+HANDOVER_MARKS = ("clamui-timer", "clamui-setting-native", "clamui-setting-flatpak", "bumblebee-plugin")
+_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def _lexists(path):
+    try:
+        os.lstat(path)
+        return True
+    except OSError:
+        return False
+
+
+def clamui_schedule():
+    """ClamUI's own scheduled scan, if its timer is on: (when, inside_home).
+    inside_home is None when ClamUI's settings cannot be read."""
+    if not _lexists(home_path(*CLAMUI_TIMER_WANTS)):
+        return None
+    settings = None
+    for parts in CLAMUI_SETTINGS:
+        try:
+            raw = read_file(home_path(*parts), 1024 * 1024)
+            data = json.loads(raw.decode("utf-8", "replace")) if raw else None
+        except (Refused, ValueError):
+            data = None
+        if isinstance(data, dict) and data.get("scheduled_scans_enabled") is True:
+            settings = data
+            break
+    if settings is None:
+        return ("on a schedule", None)
+    freq = settings.get("schedule_frequency")
+    at = settings.get("schedule_time") if isinstance(settings.get("schedule_time"), str) \
+        and re.fullmatch(r"\d{2}:\d{2}", settings["schedule_time"]) else ""
+    day = settings.get("schedule_day_of_week")
+    when = {"daily": "every day", "weekly": "every week", "monthly": "every month"}.get(freq, "on a schedule")
+    if freq == "weekly" and isinstance(day, int) and not isinstance(day, bool) and 0 <= day <= 6:
+        when = "every " + _WEEKDAYS[day]
+    if at:
+        when += " at " + at
+    targets = settings.get("schedule_targets")
+    if not isinstance(targets, list) or not targets or len(targets) > 100:
+        return (when, None)
+    home = os.path.normpath(HOME)
+    inside = True
+    for t in targets:
+        if not isinstance(t, str) or not t or "\x00" in t:
+            return (when, None)
+        if t == "~" or t.startswith("~/"):
+            t = HOME + t[1:]
+        if not t.startswith("/"):
+            return (when, None)                       # "~other" or relative: not something to guess at
+        path = os.path.normpath(t)
+        if not (path == home or path.startswith(home + "/")):
+            inside = False
+    return (when, inside)
+
+
+def plugin_enabled(pid):
+    """True when an installed plugin is switched on in shell.json: referenced
+    there (bar layout or plugins[]) and not in disabledPlugins[]."""
+    if not exists(home_path(".config", "omarchy", "plugins", pid)):
+        return False
+    try:
+        raw = read_file(home_path(".config", "omarchy", "shell.json"), 2 * 1024 * 1024, follow=True)
+        data = json.loads(raw.decode("utf-8", "replace")) if raw else None
+    except (Refused, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    off = data.get("disabledPlugins")
+    if isinstance(off, list) and pid in off:
+        return False
+    return ('"%s"' % pid) in json.dumps(data)
+
+
+def handover_marks():
+    """The changes an earlier hand-over made, from its marker files."""
+    base = home_path(*STATE_DIR, HANDOVER_DIR)
+    return [m for m in HANDOVER_MARKS if _lexists(os.path.join(base, m))]
+
+
+@check
+def check_other_schedules():
+    cid, cat, title = "other-schedules", "detect", "Scans scheduled twice"
+    why = ("Vigil already runs a weekly virus scan of your home folder and a Bumblebee check. When another "
+           "app runs the same scan on its own schedule, your computer does the work twice, sometimes at "
+           "the same time.")
+    twice, kept = [], []
+    clamui = clamui_schedule()
+    if clamui:
+        when, inside = clamui
+        if inside:
+            twice.append("ClamUI scans your home folder %s." % when)
+        elif inside is False:
+            kept.append("ClamUI scans %s, including folders outside your home folder, so Vigil leaves it on." % when)
+        else:
+            kept.append("ClamUI scans %s; Vigil could not read which folders, so it leaves it on." % when)
+    if plugin_enabled(BUMBLEBEE_PLUGIN) and bumblebee_ok():
+        twice.append("The Bumblebee plugin rescans every 6 hours and keeps its own list; Vigil runs "
+                     "Bumblebee in its Full scan.")
+    if _lexists(home_path(*SECURITY_SCAN_WANTS)):
+        kept.append("Security Scan runs every 6 hours. It also runs AUR-Malware, which Vigil does not, "
+                    "so Vigil leaves it on.")
+    undo = ("undo-schedules", "Turn them back on") if handover_marks() else None
+    if twice:
+        return result(cid, cat, title, "info", "%d other scheduled scan%s also run%s what Vigil runs." % (
+            len(twice), "" if len(twice) == 1 else "s", "" if len(twice) > 1 else "s"), why,
+            clean_block(twice + kept), fix=fix("terminal", "hand-over-schedules", "Let Vigil run them"),
+            weight=0, undo=undo,
+            howto="Press Let Vigil run them: Vigil turns off the other schedules listed above, the same way "
+                  "you would in each app. Your scans still run, once, on Vigil's weekly schedule.")
+    return result(cid, cat, title, "pass", "No scan runs twice.", why, clean_block(kept), weight=0, undo=undo)
+
+
 @check
 def check_plugins():
     cid, cat, title = "omarchy-plugins", "supply", "Other Omarchy plugins"
@@ -3685,7 +3810,7 @@ def audit(peek=False):
         c["dismissedAt"] = dismissed.get(fp, "") if c["dismissed"] else ""
         own = c.pop("_undo", None)
         action = CHECK_UNDO.get(c["id"], "")
-        c["undo"] = own if own and find_tool(TOOL_UNDO[own["action"]]) else (
+        c["undo"] = own if own and (own["action"] not in TOOL_UNDO or find_tool(TOOL_UNDO[own["action"]])) else (
             {"action": action, "label": "Undo Vigil's change"} if action and undo_available(action)
             else {"action": "", "label": ""})
     counts = {k: 0 for k in ("fail", "warn", "pass", "info", "na", "unknown")}

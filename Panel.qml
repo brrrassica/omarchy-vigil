@@ -137,7 +137,7 @@ Panel {
     if (code !== 0) { setStatus("The check did not finish (exit " + code + ").", true); return }
     var parsed = Model.parseReport(text.trim())
     if (!parsed) { setStatus("The check returned something Vigil could not read.", true); return }
-    report = parsed
+    report = Model.withSettings(parsed, root.autoUpdate)
     otherRun = feedProc.running ? null : parsed.running
     if (statusIsError) setStatus("", false)
     if (rowIndex >= visibleChecks.length) rowIndex = Math.max(0, visibleChecks.length - 1)

@@ -197,7 +197,8 @@ function undoDropIn(name, path, afterText, after) {
 // keep a terminal.
 var TERMINAL_ONLY = ["update", "fido2", "undo-fido2", "fingerprint", "undo-fingerprint", "sudo-passwordless-off",
                      "docker-group-off", "clean-orphans", "ssh-passphrase"]
-var USER_MODE = ["allow-idle", "restart", "run-arch-audit", "show-ld-preload", "show-plugins", "screen-lock-default"]
+var USER_MODE = ["allow-idle", "restart", "run-arch-audit", "show-ld-preload", "show-plugins", "screen-lock-default",
+                 "hand-over-schedules", "undo-schedules"]
 var PKEXEC = "/usr/bin/pkexec"
 var BASH = "/usr/bin/bash"
 
@@ -272,6 +273,12 @@ var BUMBLEBEE_INSTALL = "v=" + BUMBLEBEE_VERSION + "\n"
   + "  /usr/bin/install -D -o root -g root -m 0755 \"$t/bumblebee\" /usr/local/bin/bumblebee\n"
   + "  echo 'Bumblebee is installed.'\n"
   + "fi"
+
+// The scheduled-scan hand-over: one marker per change, so Undo restores
+// exactly those. Must match HANDOVER_DIR and CLAMUI_SETTINGS in bin/vigil.
+var HANDOVER_DIR_SH = "s=\"$HOME/.local/state/omarchy-vigil/handed-over\"; /usr/bin/mkdir -p -m 0700 -- \"$s\"\n"
+var CLAMUI_SETTINGS_SH = "  case $k in native) f=\"$HOME/.config/clamui/settings.json\" ;;\n"
+  + "    *) f=\"$HOME/.var/app/io.github.linx_systems.ClamUI/config/clamui/settings.json\" ;; esac\n"
 
 var TERMINAL_ACTIONS = {
   "firewall-on": {
@@ -545,6 +552,65 @@ var TERMINAL_ACTIONS = {
     what: ["Prints /etc/ld.so.preload and who owns it, so you or a helper can see what it loads. Changes nothing.",
            "Technical: ls -l and cat /etc/ld.so.preload"],
     run: "/usr/bin/ls -l /etc/ld.so.preload; echo; /usr/bin/cat /etc/ld.so.preload"
+  },
+  "hand-over-schedules": {
+    title: "Let Vigil run the scheduled scans",
+    what: ["Turns off the other schedules that repeat what Vigil already runs every week:",
+           "the scheduled scan in ClamUI (its own setting is switched off too, so ClamUI shows it as off),",
+           "and the Bumblebee plugin, which Vigil replaces. Your scans still run, once, on the Vigil schedule.",
+           "Undo turns back on exactly what this turned off. No password needed.",
+           "Technical: systemctl --user disable --now clamui-scheduled-scan.timer, scheduled_scans_enabled false in ClamUI settings.json, omarchy plugin disable io.github.duketopceo.bumblebee"],
+    run: HANDOVER_DIR_SH
+      + "w=\"$HOME/.config/systemd/user/timers.target.wants/clamui-scheduled-scan.timer\"\n"
+      + "if [ -e \"$w\" ] || [ -L \"$w\" ]; then\n"
+      + "  /usr/bin/systemctl --user disable --now clamui-scheduled-scan.timer\n"
+      + "  : > \"$s/clamui-timer\"; echo 'ClamUI scheduled scan: off.'\n"
+      + "fi\n"
+      + "for k in native flatpak; do\n"
+      + CLAMUI_SETTINGS_SH
+      + "  if [ -f \"$f\" ] && [ ! -L \"$f\" ] && /usr/bin/jq -e '.scheduled_scans_enabled == true' \"$f\" >/dev/null 2>&1; then\n"
+      + "    t=$(/usr/bin/mktemp \"$f.vigil-XXXXXX\")\n"
+      + "    /usr/bin/jq '.scheduled_scans_enabled = false' \"$f\" > \"$t\"\n"
+      + "    /usr/bin/chmod --reference=\"$f\" \"$t\"; /usr/bin/mv -f -- \"$t\" \"$f\"\n"
+      + "    : > \"$s/clamui-setting-$k\"; echo 'ClamUI setting Scheduled scans: off.'\n"
+      + "  fi\n"
+      + "done\n"
+      + "p=io.github.duketopceo.bumblebee; c=\"$HOME/.config/omarchy/shell.json\"\n"
+      + "if [ -d \"$HOME/.config/omarchy/plugins/$p\" ] && [ -f \"$c\" ] && /usr/bin/jq -e --arg id \"$p\" "
+      + "'((.disabledPlugins // []) | index($id) | not) and (tostring | contains(\"\\\"\" + $id + \"\\\"\"))' \"$c\" >/dev/null 2>&1; then\n"
+      + "  omarchy-plugin-disable \"$p\"\n"
+      + "  : > \"$s/bumblebee-plugin\"; echo 'Bumblebee plugin: off. Vigil runs Bumblebee in its Full scan.'\n"
+      + "fi\n"
+      + "echo 'Done. Vigil runs these on its own weekly schedule now.'"
+  },
+  "undo-schedules": {
+    title: "Turn the other scheduled scans back on",
+    what: ["Turns back on what Let Vigil run them turned off, and nothing else:",
+           "the scheduled scan in ClamUI and its setting, and the Bumblebee plugin.",
+           "Technical: systemctl --user enable --now clamui-scheduled-scan.timer, scheduled_scans_enabled true, omarchy plugin enable io.github.duketopceo.bumblebee"],
+    run: HANDOVER_DIR_SH
+      + "if [ -e \"$s/clamui-timer\" ]; then\n"
+      + "  if [ -f \"$HOME/.config/systemd/user/clamui-scheduled-scan.timer\" ]; then\n"
+      + "    /usr/bin/systemctl --user enable --now clamui-scheduled-scan.timer; echo 'ClamUI scheduled scan: on.'\n"
+      + "  fi\n"
+      + "  /usr/bin/rm -f -- \"$s/clamui-timer\"\n"
+      + "fi\n"
+      + "for k in native flatpak; do\n"
+      + "  [ -e \"$s/clamui-setting-$k\" ] || continue\n"
+      + CLAMUI_SETTINGS_SH
+      + "  if [ -f \"$f\" ] && [ ! -L \"$f\" ] && /usr/bin/jq -e 'type == \"object\"' \"$f\" >/dev/null 2>&1; then\n"
+      + "    t=$(/usr/bin/mktemp \"$f.vigil-XXXXXX\")\n"
+      + "    /usr/bin/jq '.scheduled_scans_enabled = true' \"$f\" > \"$t\"\n"
+      + "    /usr/bin/chmod --reference=\"$f\" \"$t\"; /usr/bin/mv -f -- \"$t\" \"$f\"\n"
+      + "    echo 'ClamUI setting Scheduled scans: on.'\n"
+      + "  fi\n"
+      + "  /usr/bin/rm -f -- \"$s/clamui-setting-$k\"\n"
+      + "done\n"
+      + "if [ -e \"$s/bumblebee-plugin\" ]; then\n"
+      + "  omarchy-plugin-enable io.github.duketopceo.bumblebee; echo 'Bumblebee plugin: on.'\n"
+      + "  /usr/bin/rm -f -- \"$s/bumblebee-plugin\"\n"
+      + "fi\n"
+      + "/usr/bin/rmdir -- \"$s\" 2>/dev/null || true"
   },
   "show-plugins": {
     title: "List installed Omarchy plugins",
@@ -1165,6 +1231,22 @@ function parseFixResult(text) {
 // ---------------------------------------------------------------------------
 // Display
 
+// With Vigil's own weekly run switched off, the other apps' schedules are
+// the only ones, so they are not "twice" and nothing is offered.
+function withSettings(report, autoUpdate) {
+  if (!report || autoUpdate !== false) return report
+  var out = Object.assign({}, report)
+  out.checks = report.checks.map(function(c) {
+    if (c.id !== "other-schedules" || c.status !== "info") return c
+    return Object.assign({}, c, {
+      status: "na",
+      summary: "The Vigil weekly scan is off in its settings, so these schedules are your only ones.",
+      fix: { kind: "none", action: "", label: "" }, howto: ""
+    })
+  })
+  return out
+}
+
 function checksFor(report, category) {
   if (!report) return []
   var out = []
@@ -1289,7 +1371,7 @@ function tooltip(report, running) {
 if (typeof module !== "undefined") {
   module.exports = {
     plain: plain, parseReport: parseReport, parseFixResult: parseFixResult, terminalScript: terminalScript,
-    terminalAction: terminalAction, actionPlan: actionPlan, runMode: runMode, stripSudo: stripSudo, launcherPath: launcherPath, canRun: canRun, checksFor: checksFor,
+    terminalAction: terminalAction, actionPlan: actionPlan, runMode: runMode, stripSudo: stripSudo, launcherPath: launcherPath, canRun: canRun, checksFor: checksFor, withSettings: withSettings,
     topFindings: topFindings, countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
     tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
     categoryLabel: categoryLabel, pillarCounts: pillarCounts, tabIntro: tabIntro, cleanAllPlan: cleanAllPlan,

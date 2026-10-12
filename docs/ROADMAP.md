@@ -111,7 +111,16 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.17 (this release): Bumblebee from Perplexity, one run at a time
+## 0.18 (this release): one schedule
+
+- [x] "Scans scheduled twice" (Detect): finds other apps that repeat
+      Vigil's weekly work (a ClamUI scheduled scan of folders inside your
+      home folder, the older Bumblebee plugin) and offers **Let Vigil run
+      them**, which turns those off the way you would in each app, with an
+      Undo that turns back on exactly what it changed. Broader ClamUI scans
+      and the Security Scan plugin (AUR-Malware) are listed and left on.
+
+## 0.17: Bumblebee from Perplexity, one run at a time
 
 - [x] Bumblebee comes straight from Perplexity: **Install** fetches a pinned
       release and installs it only if it matches the release's published
@@ -322,8 +331,8 @@ Dedicated plugins do these well; Vigil may show their status.
 - [ ] `preview.png` at the root, under 512 KiB, a real screenshot.
 - [ ] `omarchy plugin validate .` passes on an Omarchy machine.
 - [ ] Panel exercised on a real Omarchy install: each tab, each helper
-      action, Open ClamUI, and at least the firewall, sysctl, Avahi and USB
-      terminal actions.
+      action, Open ClamUI, Stop, Let Vigil run them and its Undo, and at
+      least the firewall, sysctl and Avahi actions.
 - [ ] Marketplace baseline scanner run locally against the final commit.
       Expect the `privilege`, `package-manager` and `service-management`
       capabilities (sudo, `omarchy-pkg-add` and `systemctl` in the terminal

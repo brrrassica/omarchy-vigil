@@ -26,7 +26,12 @@ These hold for every pillar, now and in later phases:
    you start, and keeps only account names.
 4. **Hand off, don't absorb.** ClamUI keeps quarantine, Black Ops keeps
    telemetry blocking. Vigil reads their results and opens them; it does not
-   run their code or write their files. Perplexity's Bumblebee is a
+   run their code or write their files, with one exception you confirm:
+   **Let Vigil run them** switches off a duplicate scheduled scan the way
+   you would in that app (ClamUI's user timer and its one
+   `scheduled_scans_enabled` setting, `omarchy plugin disable` for the
+   Bumblebee plugin), leaves a marker per change, and its Undo reverses
+   only what the markers name. Perplexity's Bumblebee is a
    standalone program Vigil installs from Perplexity's own release and runs
    as you, read-only.
 5. **Maintained sources, never executed.** Vigil keeps no threat lists. Data
@@ -262,6 +267,16 @@ say where they connect before they run.
   a root-owned file in `/usr/bin` or `/usr/share/omarchy/bin` (a test
   checks the lookup) and reads `/sys/bus/usb/devices` only. It runs only
   when sudo has neither a fingerprint nor a security key set up.
+- The "Scans scheduled twice" check reads, without following links: the
+  `timers.target.wants` entries for `clamui-scheduled-scan.timer` and
+  `qs-security-scan.timer` (lstat only), ClamUI's `settings.json` (1 MiB
+  cap; only the schedule fields, and folders count as inside your home only
+  as absolute paths or `~/` that normalise under it), and `shell.json` (2 MiB
+  cap) for whether the Bumblebee plugin is switched on. The hand-over and
+  its Undo are constant user-level scripts in `Model.js`, run without a
+  password; ClamUI's settings are edited with `jq` into a temporary file in
+  the same folder, given the original's mode and moved over it, and only a
+  regular file (not a link) is edited.
 - For the Last run list Vigil reads ClamUI's log index
   (`clamui/logs/log_index.json` in its data folder, Flatpak or not) with
   the no-follow reader and a 2 MiB cap, and keeps only the newest

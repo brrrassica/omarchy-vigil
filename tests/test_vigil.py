@@ -2029,3 +2029,78 @@ def test_stop_ends_a_program_left_behind_by_a_killed_run(tmp_path):
     assert mod.run_in_progress() is not None                # the sleep still holds the lock
     assert mod.stop_run()["message"] == "Stopped."
     assert mod.run_in_progress() is None
+
+
+# --------------------------------------------------------------------------
+# Scans scheduled twice
+
+def other_schedules(v):
+    return next(c for c in v.audit(peek=True)["checks"] if c["id"] == "other-schedules")
+
+
+def clamui_timer_on(v, settings):
+    wants = Path(v.HOME, ".config/systemd/user/timers.target.wants")
+    wants.mkdir(parents=True, exist_ok=True)
+    (wants / "clamui-scheduled-scan.timer").symlink_to("../clamui-scheduled-scan.timer")
+    if settings is not None:
+        put(Path(v.HOME, ".config/clamui/settings.json"), json.dumps(settings))
+
+
+def test_nothing_scheduled_twice(v):
+    c = other_schedules(v)
+    assert c["status"] == "pass" and c["undo"]["action"] == "" and c["category"] == "detect"
+
+
+def test_clamui_home_scan_is_offered_for_hand_over(v):
+    clamui_timer_on(v, {"scheduled_scans_enabled": True, "schedule_frequency": "weekly", "schedule_time": "02:00",
+                        "schedule_day_of_week": 6, "schedule_targets": [v.HOME + "/Downloads", "~/Documents"]})
+    c = other_schedules(v)
+    assert c["status"] == "info" and c["weight"] == 0
+    assert c["fix"] == {"kind": "terminal", "action": "hand-over-schedules", "label": "Let Vigil run them"}
+    assert "ClamUI scans your home folder every Sunday at 02:00." in c["detail"]
+    assert c["summary"] == "1 other scheduled scan also runs what Vigil runs."
+
+
+def test_clamui_scans_beyond_home_or_unreadable_are_left_alone(v):
+    clamui_timer_on(v, {"scheduled_scans_enabled": True, "schedule_frequency": "daily",
+                        "schedule_targets": [v.HOME, "/srv/data"]})
+    c = other_schedules(v)
+    assert c["status"] == "pass" and "outside your home folder" in c["detail"]
+    put(Path(v.HOME, ".config/clamui/settings.json"), "{not json")
+    c = other_schedules(v)
+    assert c["status"] == "pass" and "could not read which folders" in c["detail"]
+    for evil in (["/home/../etc"], [v.HOME + "/../other"]):
+        put(Path(v.HOME, ".config/clamui/settings.json"), json.dumps(
+            {"scheduled_scans_enabled": True, "schedule_targets": evil}))
+        assert other_schedules(v)["status"] == "pass", evil
+
+
+def test_bumblebee_plugin_counts_only_when_on_and_vigil_runs_bumblebee(v):
+    pid = "io.github.duketopceo.bumblebee"
+    Path(v.HOME, ".config/omarchy/plugins", pid).mkdir(parents=True)
+    put(Path(v.HOME, ".config/omarchy/shell.json"), json.dumps({"bar": {"layout": {"right": [{"id": pid}]}}}))
+    assert other_schedules(v)["status"] == "pass"                      # Vigil has no Bumblebee yet
+    v.TRUSTED.add(v.ROOT + "/usr/local/bin/bumblebee")
+    c = other_schedules(v)
+    assert c["status"] == "info" and "Bumblebee plugin" in c["detail"]
+    put(Path(v.HOME, ".config/omarchy/shell.json"), json.dumps({"disabledPlugins": [pid], "plugins": [{"id": pid}]}))
+    assert other_schedules(v)["status"] == "pass"                      # you switched it off yourself
+    put(Path(v.HOME, ".config/omarchy/shell.json"), json.dumps({"plugins": [{"id": pid + ".fork"}]}))
+    assert other_schedules(v)["status"] == "pass"                      # a different id is not a match
+
+
+def test_security_scan_is_listed_but_kept(v):
+    wants = Path(v.HOME, ".config/systemd/user/timers.target.wants")
+    wants.mkdir(parents=True)
+    (wants / "qs-security-scan.timer").symlink_to("../qs-security-scan.timer")
+    c = other_schedules(v)
+    assert c["status"] == "pass" and "AUR-Malware" in c["detail"]
+
+
+def test_hand_over_markers_bring_undo(v):
+    marks = Path(v.HOME, ".local/state/omarchy-vigil/handed-over")
+    marks.mkdir(parents=True)
+    (marks / "clamui-timer").write_text("")
+    (marks / "unexpected").write_text("")
+    assert v.handover_marks() == ["clamui-timer"]
+    assert other_schedules(v)["undo"] == {"action": "undo-schedules", "label": "Turn them back on"}
