@@ -27,7 +27,7 @@ the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.20.1.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.20.2.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -308,6 +308,28 @@ The panel always says which kind an action is:
 Vigil never runs anything from its own folder as root, never adds a sudoers
 rule, polkit policy, service or timer, and never changes a setting on its
 own.
+
+## What it costs your computer
+
+Vigil runs no service, timer or daemon of its own. While you are logged in:
+
+- **A check every 30 minutes** (the `refreshMinutes` setting), from one
+  monitor's copy only, at lowered priority. It reads files only, and every
+  folder walk has a time and size limit (a few seconds), so even a huge home
+  folder cannot make it slow. Other monitors check only when you open their
+  panel.
+- **The weekly run** (sources once a week, the background part of a Full
+  scan once a week) at low priority; the virus scan itself runs at the
+  lowest (`nice -n 19`). It starts at most once every six hours, whatever
+  happens to it, so a run that keeps failing can never restart in a loop.
+- **One run at a time**, across monitors and shell restarts.
+- **Every step has a deadline**: the virus scan 3 hours, the other steps
+  between 15 seconds and 10 minutes, and the panel stops anything that runs
+  past its own backstop. A step that fails is retried the next day; a virus
+  scan that runs out of time waits a week instead of repeating hours of
+  work every day.
+- **Nothing polls** except while a scan started elsewhere is running, when
+  the panel asks every 4 seconds for its progress (a file read).
 
 ## Where the data comes from
 

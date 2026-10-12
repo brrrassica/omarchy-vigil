@@ -719,3 +719,13 @@ test("a rejected report says which part failed", () => {
   assert.equal(M.reportProblem("{"), "it was not JSON")
   assert.equal(M.reportProblem(JSON.stringify(report({ checks: [check({ id: "<script>" , status: "x"})] }))), "the ? check")
 })
+
+test("the progress bar gives the long virus scan most of its length", () => {
+  const p = M.parseProgress(JSON.stringify({ progress: { step: 9, of: 9, doing: "Scanning your home folder for viruses",
+    done: 5082, total: 172762, at: 0.2, span: 0.8 } }))
+  assert.ok(p.fraction > 0.2 && p.fraction < 0.25, String(p.fraction))          // 3% of the scan, not 89% of the bar
+  const old = M.parseProgress(JSON.stringify({ progress: { step: 9, of: 9, doing: "x", done: 0, total: 0 } }))
+  assert.ok(Math.abs(old.fraction - 8 / 9) < 1e-9)                              // no shares given: as before
+  const bad = M.parseProgress(JSON.stringify({ progress: { step: 1, of: 2, doing: "x", done: 0, total: 0, at: 0.9, span: 0.9 } }))
+  assert.equal(bad.fraction, 0)                                                // shares that do not fit are ignored
+})

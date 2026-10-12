@@ -1332,7 +1332,7 @@ def test_progress_lines_for_the_panel(v, capsys, monkeypatch):
     v.refresh_due_feeds(sources_only=True)
     out = [json.loads(l) for l in capsys.readouterr().out.splitlines()]
     assert out == [{"progress": {"step": 1, "of": 1, "doing": "Updating the Arch vulnerability database",
-                                 "done": 0, "total": 0}}]
+                                 "done": 0, "total": 0, "at": 0.0, "span": 1.0}}]
 
 
 def test_two_timers_sources_and_full_scan(v, monkeypatch):
@@ -2307,3 +2307,59 @@ def test_update_sources_checks_for_waiting_updates(v, capsys):
     assert "Checking for system and Omarchy updates" in steps
     v.PROGRESS["on"] = False
     assert any(s["id"] == "pending-updates" and s["state"] == "ok" for s in v.source_status())
+
+
+# --------------------------------------------------------------------------
+# Nothing loops, nothing repeats hours of work
+
+def test_an_unexpected_error_still_counts_as_tried(v, monkeypatch):
+    updates_tools(v)
+
+    def boom():
+        raise ValueError("a bug")
+    monkeypatch.setitem(v.FEED_REFRESH, "pending-updates", boom)
+    out = v.refresh_due_feeds()
+    assert out["ok"] is False
+    assert v.feed_due("pending-updates") is False                 # tried today: not started again until tomorrow
+
+
+def test_a_virus_scan_that_runs_out_of_time_waits_a_week(v, monkeypatch):
+    clamscan_ok(v)
+    monkeypatch.setattr(v, "VIRUS_SCAN_SECONDS", 3600)
+    clock = [0.0]                                                   # the start, then an hour later
+    monkeypatch.setattr(v.time, "monotonic", lambda: clock.pop() if clock else 3600.0)
+    v.COMMANDS[scan_argv(v)] = (None, "")                           # killed at the deadline
+    monkeypatch.setattr(v, "count_home_files", lambda: 10)
+    with pytest.raises(v.TimedOut):
+        v.refresh_virus_scan()
+    meta = json.loads(Path(v.HOME, ".local/state/omarchy-vigil/virus-scan.json").read_text())
+    assert meta["retryDays"] == v.FEED_DAYS
+    assert v._due_at(meta) is not None                              # not due tomorrow
+    assert (v._due_at(meta) - v.datetime.now()).days >= v.FEED_DAYS - 1
+
+
+def test_a_quick_failure_is_still_retried_tomorrow(v, monkeypatch):
+    clamscan_ok(v, rc=2)
+    monkeypatch.setattr(v, "count_home_files", lambda: 10)
+    with pytest.raises(v.Refused) as e:
+        v.refresh_virus_scan()
+    assert not isinstance(e.value, v.TimedOut)
+    meta = json.loads(Path(v.HOME, ".local/state/omarchy-vigil/virus-scan.json").read_text())
+    assert "retryDays" not in meta and (v._due_at(meta) - v.datetime.now()).days < 1
+
+
+def test_progress_shares_give_the_virus_scan_most_of_the_bar(v, capsys, monkeypatch):
+    v.PROGRESS["on"] = True
+    clamscan_ok(v)
+    monkeypatch.setattr(v, "refresh_virus_scan", lambda cb: cb(50, 100))
+    updates_tools(v)
+    v.COMMANDS[("/usr/bin/checkupdates", "--nocolor")] = (2, "")
+    v.refresh_due_feeds(full=True)
+    lines = [json.loads(l)["progress"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
+    scan = [p for p in lines if p["doing"] == "Scanning your home folder for viruses"][-1]
+    assert scan["span"] >= 0.8 and abs(scan["at"] + scan["span"] - 1) < 0.001
+    firsts = {}
+    for p in lines:
+        firsts.setdefault(p["step"], p)
+    assert abs(sum(p["span"] for p in firsts.values()) - 1) < 0.01         # the shares fill the bar exactly
+    v.PROGRESS["on"] = False

@@ -10,7 +10,7 @@
 // Must match manifest.json and VERSION in bin/vigil (a test checks). The
 // helper runs from disk every time, but this file stays loaded until the
 // shell restarts, so after an update the two can differ for a while.
-var VERSION = "0.20.1"
+var VERSION = "0.20.2"
 var MAX_REPORT_CHARS = 512 * 1024
 var MAX_CHECKS = 160
 var MAX_STR = 400
@@ -1059,9 +1059,14 @@ function parseProgress(line) {
   if (!n(p.step, 20) || !n(p.of, 20) || p.step < 1 || p.step > p.of || !isString(p.doing, 120)
       || !n(p.done, 1e8) || !n(p.total, 1e8)) return null
   var part = p.total > 0 ? Math.min(1, p.done / p.total) : 0
+  // The helper gives each step its share of the bar (the virus scan most of it);
+  // without that, every step counts the same.
+  var share = function(v) { return typeof v === "number" && isFinite(v) && v >= 0 && v <= 1 }
+  var fraction = share(p.at) && share(p.span) && p.at + p.span <= 1.0001
+    ? p.at + p.span * part : (p.step - 1 + part) / p.of
   return { step: Math.round(p.step), of: Math.round(p.of), doing: plain(p.doing, 120),
            done: Math.round(p.done), total: Math.round(p.total),
-           fraction: Math.min(1, (p.step - 1 + part) / p.of) }
+           fraction: Math.min(1, fraction) }
 }
 
 // A scan or update started elsewhere (another monitor, or before the shell

@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta
 
-VERSION = "0.20.1"
+VERSION = "0.20.2"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1736,7 +1736,10 @@ def _due_at(meta):
             if due > now:
                 return due
         if isinstance(tried, str) and _DATE.match(tried) and tried != done:
-            retry = datetime.strptime(tried, "%Y-%m-%d") + timedelta(days=FEED_RETRY_DAYS)
+            wait = meta.get("retryDays")
+            wait = wait if isinstance(wait, int) and not isinstance(wait, bool) and 1 <= wait <= FEED_DAYS \
+                else FEED_RETRY_DAYS
+            retry = datetime.strptime(tried, "%Y-%m-%d") + timedelta(days=wait)
             if retry > now:
                 return retry
     except ValueError:
@@ -1925,8 +1928,9 @@ def feeds_updated():
     return min(dates) if dates else ""
 
 
-def save_feed(name, body, ok=True):
-    """Write a feed's cache. On failure, keep the last good result and record the attempt."""
+def save_feed(name, body, ok=True, retry_days=None):
+    """Write a feed's cache. On failure, keep the last good result and record the
+    attempt; retry_days (default FEED_RETRY_DAYS) is how long until it is tried again."""
     dirfd = _state_dir()
     try:
         _lock(dirfd)
@@ -1936,6 +1940,9 @@ def save_feed(name, body, ok=True):
             old = {}
         today, now = time.strftime("%Y-%m-%d"), time.strftime("%H:%M")
         out = dict(body, schema=SCHEMA, at=today, time=now, attempted=today) if ok else dict(old, attempted=today)
+        out.pop("retryDays", None)
+        if not ok and retry_days:
+            out["retryDays"] = int(retry_days)
         write_atomic(dirfd, FEED_FILES[name], json.dumps(out, separators=(",", ":")).encode())
     finally:
         os.close(dirfd)
@@ -2234,6 +2241,13 @@ def count_home_files(deadline_s=20.0):
     return n
 
 
+VIRUS_SCAN_SECONDS = 3 * 3600
+
+
+class TimedOut(Refused):
+    """A step ran out of its time; retried at the next weekly run, not tomorrow."""
+
+
 def refresh_virus_scan(on_progress=None):
     """ClamAV over the home folder, as you; on_progress(done, total) every couple of seconds."""
     if not exists(HOME):
@@ -2252,10 +2266,17 @@ def refresh_virus_scan(on_progress=None):
             on_progress(seen[0], total)
         return False
 
-    rc, out = run(_clamscan_argv(HOME), timeout=3 * 3600, limit=4 * 1024 * 1024, on_line=on_line)
+    started = time.monotonic()
+    rc, out = run(_clamscan_argv(HOME), timeout=VIRUS_SCAN_SECONDS, limit=4 * 1024 * 1024, on_line=on_line)
+    if rc is None and not STOP["on"] and time.monotonic() - started >= VIRUS_SCAN_SECONDS - 60:
+        # Too big to finish in time: trying again tomorrow would only repeat hours of
+        # work, so it waits for the next weekly scan (the Scan now button still works).
+        save_feed("virus-scan", {}, ok=False, retry_days=FEED_DAYS)
+        raise TimedOut("the virus scan took longer than %d hours, so it was stopped; it tries again next week"
+                       % (VIRUS_SCAN_SECONDS // 3600))
     if rc not in (0, 1):
         save_feed("virus-scan", {}, ok=False)
-        raise Refused("the virus scan did not finish (missing signatures, or it took too long)")
+        raise Refused("the virus scan did not finish (missing signatures?)")
     found = parse_clamscan(out) if rc == 1 else []
     save_feed("virus-scan", {"found": found, "scanned": "~", "files": seen[0]})
     ignored = ignored_detections()
@@ -2716,6 +2737,8 @@ def refresh_bumblebee():
     return "Bumblebee scanned."
 
 
+STEP_WEIGHT = {"virus-scan": 30, "osv": 2, "bumblebee": 2, "firmware": 2, "signatures": 2}
+
 STEP_TEXT = {"arch-audit": "Updating the Arch vulnerability database",
              "osv": "Updating the OSV malicious-package database",
              "aur": "Checking your AUR packages",
@@ -2748,7 +2771,15 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
     if (run_full or scan_only) and feed_available("virus-scan"):
         steps.append("virus-scan")                    # last: it takes longest
     
-    done, failed, why = [], [], {}
+    # Each step's share of the progress bar: the virus scan takes most of the
+    # time, so it gets most of the bar, and the quick steps a sliver each.
+    weights = [STEP_WEIGHT.get(n, 1) for n in steps]
+    total_w, acc, spans = float(sum(weights) or 1), 0.0, []
+    for w in weights:
+        spans.append((round(acc / total_w, 4), round(w / total_w, 4)))
+        acc += w
+    PROGRESS["spans"] = spans
+    done, failed, why, timed_out = [], [], {}, []
     for i, name in enumerate(steps, 1):
         if STOP["on"]:
             break
@@ -2767,11 +2798,19 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
             else:
                 FEED_REFRESH[name]()
             done.append(name)
-        except Refused as e:
+        except (Refused, TimedOut) as e:
             failed.append(name)
             why[name] = str(e)
-        except OSError:
+            if isinstance(e, TimedOut):
+                timed_out.append(name)
+        except Exception:                                  # noqa: BLE001 - any bug must still count as tried
             failed.append(name)
+            why[name] = "it failed unexpectedly"
+            if name in FEED_FILES:
+                try:
+                    save_feed(name, {}, ok=False)
+                except (OSError, Refused):
+                    pass
     stopped = STOP["on"]
     if stopped:
         # What was stopped or never ran counts as tried today, so the weekly run
@@ -2782,7 +2821,8 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
     if sources:
         save_last_run(not stopped and not [n for n in failed if n in SOURCE_FEEDS], force or full or sources_only)
     if run_full:
-        save_feed("full-scan", {}, ok=not stopped and not [n for n in failed if n in ("virus-scan", "bumblebee")])
+        save_feed("full-scan", {}, ok=not stopped and not [n for n in failed if n in ("virus-scan", "bumblebee")],
+                  retry_days=FEED_DAYS if timed_out else None)
     no_pkexec = " The password check could not run: pkexec is missing." if full and not can_ask_password() else ""
     if stopped and not done:
         return {"ok": True, "stopped": True, "action": "", "message": "Stopped."}
@@ -2802,11 +2842,14 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
     if "password-check" in done:
         parts.append("checked for accounts without a password")
     msg = (_and(parts)[0].upper() + _and(parts)[1:] + ".") if parts else ""
-    retried = [n for n in failed if n not in ("password-check", "signatures", "bumblebee")]
+    retried = [n for n in failed if n not in ("password-check", "signatures", "bumblebee") and n not in timed_out]
     if retried:
         msg += " Could not finish %s; Vigil tries again tomorrow." % _and([FEED_LABELS[n] for n in retried])
     if "password-check" in failed:
         msg += " The password check was skipped: no password was given."
+    if "virus-scan" in timed_out:
+        msg += " The virus scan took longer than %d hours, so it was stopped; it tries again next week." % (
+            VIRUS_SCAN_SECONDS // 3600)
     if "bumblebee" in failed:
         msg += " Bumblebee could not scan: %s." % why.get("bumblebee", "it did not finish")
     if "signatures" in failed:
@@ -4710,14 +4753,19 @@ def run_in_progress():
         and p["of"] <= 20 and 1 <= p["step"] <= p["of"] and p.get("doing") in STEP_TEXT.values()
     if not ok:
         return {"step": 0, "of": 0, "doing": "", "done": 0, "total": 0}
-    return {k: p[k] for k in ("step", "of", "doing", "done", "total")}
+    out = {k: p[k] for k in ("step", "of", "doing", "done", "total")}
+    at, span = p.get("at"), p.get("span")
+    if all(isinstance(x, (int, float)) and not isinstance(x, bool) and 0 <= x <= 1 for x in (at, span)) \
+            and at + span <= 1.0001:
+        out["at"], out["span"] = at, span
+    return out
 
 
 def save_progress(body, force=False):
     """The latest progress, for a panel that did not start the run (after a
-    shell restart, or on another monitor). At most once a second."""
+    shell restart, or on another monitor). At most every five seconds."""
     now = time.monotonic()
-    if not force and now - PROGRESS["saved"] < 1.0:
+    if not force and now - PROGRESS["saved"] < 5.0:
         return
     PROGRESS["saved"] = now
     try:
@@ -4735,6 +4783,9 @@ def save_progress(body, force=False):
 def progress(step, of, doing, done=0, total=0):
     """One progress line for the panel while a long refresh runs (only when asked for)."""
     body = {"step": step, "of": of, "doing": doing, "done": int(done), "total": int(total)}
+    spans = PROGRESS.get("spans")
+    if isinstance(spans, list) and len(spans) == of and 1 <= step <= of:
+        body["at"], body["span"] = spans[step - 1]
     if RUN_LOCK["fd"] is not None:
         save_progress(body, force=done == 0)
     if PROGRESS["on"]:
@@ -4757,6 +4808,10 @@ def emit(obj):
 def main(argv):
     os.umask(0o077)
     if len(argv) in (2, 3) and argv[1] == "audit" and argv[2:] in ([], ["--peek"]):
+        try:
+            os.nice(5)                     # a check every half hour should never slow what you are doing
+        except OSError:
+            pass
         # --peek: report only, leave the seen-findings state alone (used by bar
         # instances on secondary monitors so only one instance notifies).
         emit(audit(peek=len(argv) == 3))
@@ -4779,6 +4834,10 @@ def main(argv):
                   "message": "Vigil is already running a scan or update. This one was not started."})
             return 0
         signal.signal(signal.SIGTERM, _on_stop)
+        try:
+            os.nice(10)                    # background work: never compete with what you are doing
+        except OSError:
+            pass
         save_run_info()
         emit(refresh_due_feeds(force=flag == "--force", sources_only=flag == "--sources", full=flag == "--full",
                                scan_only=flag == "--scan"))

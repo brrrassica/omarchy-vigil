@@ -346,7 +346,7 @@ Dedicated plugins do these well; Vigil may show their status.
 
 ## Marketplace submission checklist
 
-- [ ] `preview.png` at the root, under 512 KiB, a real screenshot.
+- [x] `preview.png` at the root, under 512 KiB, a real screenshot.
 - [ ] `omarchy plugin validate .` passes on an Omarchy machine.
 - [ ] Panel exercised on a real Omarchy install: each tab, each helper
       action, Open ClamUI, Stop, Let Vigil run them and its Undo, and at

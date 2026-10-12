@@ -84,6 +84,7 @@ Panel {
   property string fixAction: ""
   property string statusMessage: ""
   property bool updatePending: false
+  property real lastAutoRun: 0
   property bool statusIsError: false
 
   property string tab: "overview"
@@ -152,7 +153,13 @@ Panel {
     if (updatePending) setStatus("Vigil was updated to " + helperVersion + ". Restart the shell to load the new panel.", false)
     if (rowIndex >= visibleChecks.length) rowIndex = Math.max(0, visibleChecks.length - 1)
     if (root.isPrimary && root.notifyOnNew && parsed.fresh.length > 0) notifyNew(parsed.fresh.length)
-    if (root.isPrimary && root.autoUpdate && parsed.feedsDue && parsed.running === null) refreshFeeds("")
+    // The automatic run starts at most every six hours, whatever happens to it,
+    // so a run that keeps failing can never restart in a loop.
+    if (root.isPrimary && root.autoUpdate && parsed.feedsDue && parsed.running === null
+        && Date.now() - lastAutoRun > 6 * 3600000) {
+      lastAutoRun = Date.now()
+      refreshFeeds("")
+    }
   }
 
   // Runs `bin/vigil refresh-feeds` in the background. With no mode (the
@@ -172,7 +179,7 @@ Panel {
       .concat(mode === "sources" ? ["--sources"] : (mode === "full" ? ["--full"] : (mode === "scan" ? ["--scan"] : [])))
     feedProc.running = true
     // Anything but Update sources may scan the whole home folder, which can take a long time.
-    feedDeadline.interval = mode === "sources" ? 1200000 : 4 * 3600000
+    feedDeadline.interval = mode === "sources" ? 1800000 : 4 * 3600000
     feedDeadline.restart()
     if (mode === "sources") setStatus("Updating sources\u2026 Omarchy may ask for your password first.", false)
     else if (mode === "full") setStatus("Full scan started. You can close this panel; you get a notification when it is done.", false)
