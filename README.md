@@ -26,7 +26,7 @@ root runs in a terminal you can watch.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.14.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.15.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -70,33 +70,35 @@ reviewed) are dimmed.
 | What | When |
 |---|---|
 | Every check in every pillar (reading local settings) | every 30 minutes, and whenever you open the panel; offline, under a second |
-| Known vulnerabilities, malicious packages, AUR status | once a week |
-| Virus scan (ClamAV, as you) | `~/Downloads` once a week; your whole home folder in a **Full scan** |
+| **Update sources**: known vulnerabilities, malicious packages, AUR status | once a week, and when you press **Update sources** or **Full scan** |
+| **Full scan**, background part: a virus scan of your home folder, a Bumblebee rescan | once a week, and when you press **Full scan** |
+| Password check (accounts without a password) | only when you press **Full scan**, since it needs your password |
 | ClamAV virus signatures | continuously, by ClamAV's own update service |
-| Bumblebee's catalog and scan | by the Bumblebee plugin, and a rescan in every **Full scan** |
-| Accounts without a password | only in a **Full scan**, the one check that needs your password |
 | Cleaning (Care) | only when you ask; Vigil only measures sizes by itself |
 
 The Overview has two buttons:
 
-- **Full scan** (`R` or `S`) runs every check and scan Vigil has: it updates
-  every source, scans your whole home folder for viruses (skipping caches,
-  game libraries, `node_modules` and `.git` folders, at low priority), has
-  Bumblebee rescan your packages if it is installed, checks for accounts
-  without a password (the one step that needs your password, in a terminal
-  where sudo asks once), and re-checks every setting. A notification says
-  when it is done; every tab then shows the results, and you fix what you
-  choose from there.
-- **Update sources** (or `U`) only refreshes the lists Vigil checks against
-  (known vulnerabilities, malicious packages, AUR status), with no password
-  and no scan. ClamAV's signatures update by themselves, so they need no
-  button.
+- **Full scan** (`R` or `S`) runs every check and scan Vigil has, in this
+  order: the password check (Omarchy's own password dialog asks for your
+  password; no terminal), the sources, a virus scan of your whole home
+  folder (skipping caches, game libraries, `node_modules` and `.git`
+  folders, at low priority), a Bumblebee rescan if it is installed, then
+  every setting again. The panel shows a progress bar with the current step
+  (and, during the virus scan, how many files are done), and a notification
+  says when it is finished. Every tab then shows the results, and you fix
+  what you choose from there.
+- **Update sources** (or `U`) only refreshes the lists Vigil checks against,
+  with no password and no scan. ClamAV's signatures update by themselves.
 
-Below them one line says when the sources last updated and counts down to
-the next automatic update, for example *Updated today at 09:52 · next
-automatic update in 7 days*. Pressing either button resets the countdown.
-It turns red if a source failed to update. Turning off `autoUpdate` leaves
-the weekly updates and scan to these buttons.
+Under the buttons, two lines count down to the next automatic update and the
+next automatic full scan (everything but the password check). Each button
+resets its own countdown. Turning off `autoUpdate` leaves both to the
+buttons.
+
+Below the pillars, **Last run** lists when each scan last ran (the settings
+checks, the virus scan, Bumblebee, the password check) and when each source
+last updated (virus signatures, known vulnerabilities, malicious packages,
+AUR status), with the time. Anything that failed or is out of date is red.
 
 ### Every finding
 
@@ -146,7 +148,7 @@ settings:
 |---|---|---|
 | `refreshMinutes` | `30` | How often to check in the background (5 to 1440). |
 | `notifyOnNew` | `true` | One desktop notification when a check that was fine starts failing. It only says how many. |
-| `autoUpdate` | `true` | The weekly work: refresh the maintained sources (see [Where the data comes from](#where-the-data-comes-from)) and scan `~/Downloads` for viruses. Off means only when you press **Update sources** or **Full scan**. |
+| `autoUpdate` | `true` | The weekly work: update the sources (see [Where the data comes from](#where-the-data-comes-from)), and the background part of a Full scan (a virus scan of your home folder and a Bumblebee rescan). Off means only when you press **Update sources** or **Full scan**. |
 
 ## What Vigil checks
 
@@ -188,9 +190,9 @@ lower it. A warning you mark as reviewed stops counting.
 | Startup files | Reads shell startup files, autostart entries, user services and timers, uwsm and environment.d files, Hyprland config and your crontab, and flags lines that download and run code, decode hidden code, or open reverse shells. These are leads to read, not proof. |
 | System-wide preload | Fails if `/etc/ld.so.preload` loads anything; rootkits use it to hide. |
 | Changes to important files | Records a fingerprint of accounts, PAM, SSH settings, `~/.ssh/authorized_keys`, system and user services, autostart entries and your startup files, and lists anything changed, added or removed since. Changes that match exactly what a package update shipped (from pacman's own records) are not reported, nor are system users that packages add. Changes to who can log in or what runs at start are warnings; changes to your own shell files are information. **Accept these changes** records the current state as the new normal. |
-| Virus scan | ClamAV scans `~/Downloads` once a week, and your whole home folder in a Full scan, as you, with signatures ClamAV keeps current. Infected files are listed with **Open ClamUI** to quarantine them. Only ClamAV's published signatures count; its guess-based "potentially unwanted" rules stay off. |
+| Virus scan | ClamAV scans your home folder once a week and in every Full scan, as you, with signatures ClamAV keeps current. Infected files are listed with **Open ClamUI** to quarantine them. Only ClamAV's published signatures count; its guess-based "potentially unwanted" rules stay off. |
 | ClamUI | Vigil hands virus scanning to [ClamUI](https://github.com/linx-systems/clamui): file and folder scans, scheduled scans, USB drive scans and quarantine. When it is installed, **Open ClamUI** starts it; otherwise Vigil offers to install it from Flathub. |
-| ClamAV virus engine | Whether ClamAV is installed and its signatures keep themselves up to date. Vigil turns on ClamAV's own update service (`clamav-freshclam`) when it installs ClamAV or ClamUI, and offers to if it is off. Quick scan of `~/Downloads` in a terminal. |
+| ClamAV virus engine | Whether ClamAV is installed and its signatures keep themselves up to date. Vigil turns on ClamAV's own update service (`clamav-freshclam`) when it installs ClamAV or ClamUI, and offers to if it is off. |
 
 ### Supply
 
@@ -319,8 +321,9 @@ service (ClamAV's servers), and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/arch-audit.json` | the helper, mode 0600 | weekly and on Check now: package names and severities an update fixes |
 | `~/.local/state/omarchy-vigil/osv.json` | the helper, mode 0600 | weekly and on Check now: known-malicious packages found, if any, and which folders were checked |
 | `~/.local/state/omarchy-vigil/aur.json` | the helper, mode 0600 | weekly and on Check now: names of AUR packages that left the AUR or have no maintainer |
-| `~/.local/state/omarchy-vigil/virus-scan.json` | the helper, mode 0600 | weekly and on Scan now: names of infected files found in Downloads, if any |
-| `~/.local/state/omarchy-vigil/no-password.txt` | the Full scan terminal step, mode 0600 | each Full scan: names of accounts with an empty password, usually none |
+| `~/.local/state/omarchy-vigil/virus-scan.json` | the helper, mode 0600 | weekly, in each Full scan and on Scan now: names of infected files found in your home folder, if any, and how many files were scanned |
+| `~/.local/state/omarchy-vigil/no-password.txt` | the helper, mode 0600 | each Full scan: names of accounts with an empty password, usually none |
+| `~/.local/state/omarchy-vigil/full-scan.json` | the helper, mode 0600 | after each Full scan, automatic or not: its date and time, for the countdown |
 | `~/.local/state/omarchy-vigil/last-run.json` | the helper, mode 0600 | after each weekly or button update: its date, time and whether every source updated |
 | `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` | the helper | only when you set the opt-out variables |
 | `/etc/sysctl.d/90-omarchy-vigil.conf` | terminal action | only when you apply the kernel settings |

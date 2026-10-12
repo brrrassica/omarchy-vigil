@@ -15,7 +15,10 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 
 - **Root changes run in a visible terminal, permanently.** Vigil will not
   install a root helper, sudoers rule or polkit policy. Every privileged step
-  is a constant script you see before it runs, or an Omarchy command.
+  that changes something is a constant script you see before it runs, or an
+  Omarchy command. The one read-only root step, the Full scan's password
+  check, uses Omarchy's own password dialog (pkexec) instead, so the scan
+  never interrupts you with a terminal.
 - **Hand off rather than rebuild.** Where a maintained tool already does the
   job well (ClamUI, Bumblebee, Black Ops, Omarchy's own commands), Vigil
   shows its status and opens it. It does not copy it.
@@ -107,7 +110,23 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.14 (this release): a simpler Overview, a real Full scan
+## 0.15 (this release): Full scan with progress, and a schedule you can see
+
+- [x] Full scan opens no terminal: the password check uses Omarchy's own
+      password dialog (pkexec), first, while you are at the screen. A progress
+      bar shows each step and, during the virus scan, files done of the total.
+- [x] Two weekly timers with countdowns on the Overview: the next automatic
+      update and the next automatic full scan (everything but the password
+      check). Each button resets its own.
+- [x] The virus scan always covers the home folder (Downloads included), and
+      its row's Scan now runs in the background with progress.
+- [x] **Last run** on the Overview: when each scan last ran and each source
+      last updated, with the time.
+- [x] Every terminal explains itself the same way: what it does, what
+      changes for you, then a "Technical:" line, and whether it will ask for
+      your password.
+
+## 0.14: a simpler Overview, a real Full scan
 
 - [x] Overview: the score, **Full scan** and **Update sources**, one line
       with the last update and a countdown to the next automatic one, then

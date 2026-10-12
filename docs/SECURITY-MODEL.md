@@ -11,7 +11,9 @@ These hold for every pillar, now and in later phases:
 
 1. **No root from the plugin.** Root changes are constant scripts in a
    visible terminal, or Omarchy's own commands. No root helper, sudoers rule,
-   polkit policy, service or timer, ever.
+   polkit policy, service or timer, ever. The one read-only root step (the
+   password check) uses `pkexec` with a constant command and Omarchy's own
+   password dialog; it changes nothing.
 2. **Everything Vigil reads is untrusted**, including its own helper's output,
    other tools' result files and file names (a file name is chosen by whoever
    created the file). It is size-capped, validated and shown as plain text,
@@ -20,7 +22,7 @@ These hold for every pillar, now and in later phases:
    never run as root: malware scanners have had parser bugs, and running
    them unprivileged limits what a malicious file can do. The one check
    that needs root, accounts without a password, runs only in a Full scan
-   you start, in the visible terminal, and keeps only account names.
+   you start, and keeps only account names.
 4. **Hand off, don't absorb.** ClamUI keeps quarantine, Bumblebee keeps its
    catalog, Black Ops keeps telemetry blocking. Vigil reads their results and
    opens them; it does not run their code or write their files.
@@ -83,12 +85,14 @@ no polkit policy, no service, no timer and no daemon.
   a two-element argv, no shell. The URL is a constant from the `DOCS` table
   in `Model.js`, chosen by id; any other id is dropped when the report is
   validated.
-- The password check's terminal step runs one constant `awk` over
-  `/etc/shadow` with sudo and writes only the names of accounts whose
-  password field is empty, as you, to a 0600 file in the state folder. The
-  helper reads it with its owner-checked, no-follow reader, keeps only names
-  that are valid account names and exist in `/etc/passwd`, and treats the
-  file's date as when the check last ran.
+- The password check runs `pkexec /usr/bin/awk -F: '$2 == "" { print $1 }'
+  /etc/shadow` from the helper, a constant argv (`NO_PASSWORD_ARGV`), only
+  when you press Full scan, never in the weekly run. pkexec asks for your
+  password through Omarchy's polkit agent, the same dialog Omarchy's own
+  commands use. The output (account names only) is validated against the
+  account-name pattern and written as you, mode 0600, to the state folder;
+  the check keeps only names that also exist in `/etc/passwd`. Cancelling
+  the dialog changes nothing and keeps the last result.
 - The screen-lock fix runs Omarchy's own `omarchy-shell-config` helper
   (resolved from a trusted directory, no root) with a constant `jq` program,
   the way Omarchy's own commands edit `shell.json`.
@@ -156,10 +160,14 @@ by itself, and only once the relevant tool is installed:
   =https --max-time 30 --max-filesize 4194304 -- <url>` to a fixed host,
   with package names checked against a strict pattern and percent-encoded.
   `tests/test_marketplace_rules.py` fails if any other network call appears.
-- The weekly virus scan runs `/usr/bin/clamscan --recursive --infected
-  --no-summary --stdout -- ~/Downloads` as you, never as root. File names in
-  its output are chosen by whoever named the file, so they are cleaned,
-  capped and shown as plain text, and never reach a command or notification.
+- The virus scan runs `/usr/bin/nice -n 19 /usr/bin/clamscan --recursive
+  --no-summary --stdout --cross-fs=no --follow-dir-symlinks=0
+  --follow-file-symlinks=0 --exclude-dir=... -- ~` as you, never as root.
+  Its output is read line by line: lines for clean files are only counted
+  (for the progress bar) and dropped, and only `FOUND` lines are kept,
+  within a byte cap. File names in them are chosen by whoever named the
+  file, so they are cleaned, capped and shown as plain text, and never reach
+  a command or notification.
 - Results are parsed with byte caps and strict patterns, and only names,
   severities, IDs and counts are kept. A failed refresh keeps the last good
   result and retries after a day, so an offline machine is not hammered.

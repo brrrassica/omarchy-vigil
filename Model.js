@@ -114,8 +114,9 @@ function howTo(check) {
   var a = check.fix.kind === "helper" ? helperInfo(check.fix.action)
     : (check.fix.kind === "terminal" ? terminalAction(check.fix.action) : null)
   if (!a) return ""
-  return "Press " + check.fix.label + ": " + a.what.join(" ")
-    + (check.fix.kind === "terminal" ? " It opens a terminal and asks before changing anything." : "")
+  var plainLines = a.what.filter(function(l) { return l.indexOf("Technical:") !== 0 })
+  return "Press " + check.fix.label + ": " + plainLines.join(" ")
+    + (check.fix.kind === "terminal" ? " It shows what it will do and asks before changing anything." : "")
 }
 
 // Title and lines for the confirmation card of any runnable action.
@@ -125,7 +126,9 @@ function confirmation(kind, id, report) {
   var a = kind === "helper" ? helperInfo(id) : (kind === "terminal" ? terminalAction(id) : null)
   if (!a) return null
   var lines = a.what.slice(0)
-  if (kind === "terminal") lines.push("Opens a terminal. sudo asks for your password there.")
+  if (kind === "terminal")
+    lines.push(String(a.run || a.args || "").indexOf("sudo ") !== -1 || /^omarchy-(setup|sudo|remove|update|pkg)/.test(a.tool || "")
+      ? "Opens a terminal, where you type your password." : "Opens a terminal.")
   return { title: a.title, lines: lines }
 }
 
@@ -166,8 +169,9 @@ function dropIn(path, lines) {
 function undoDropIn(name, path, afterText, after) {
   return {
     title: "Undo the Vigil change to " + name,
-    what: ["Deletes " + path + " if its first line is still the Vigil marker.",
-           "A file edited since Vigil wrote it is left alone.", afterText],
+    what: ["Puts " + name + " back the way it was before Vigil changed it.",
+           "If someone has edited the file since, it is left alone. " + afterText,
+           "Technical: deletes " + path + " if its first line is still the Vigil marker"],
     run: "f=" + path + "; "
          + "[ -e \"$f\" ] || { echo 'Nothing to undo.'; exit 0; }; "
          + "[ \"$(/usr/bin/head -n 1 -- \"$f\")\" = '" + VIGIL_MARK + "' ] "
@@ -191,45 +195,57 @@ var OLD_SERVICES = ["telnet.socket", "rsh.socket", "rlogin.socket", "ftpd.servic
 var TERMINAL_ACTIONS = {
   "firewall-on": {
     title: "Turn the firewall on",
-    what: ["Runs: sudo ufw enable", "Starts ufw now and at every boot with the rules Omarchy set up."],
+    what: ["Blocks other computers from connecting to yours unless you allowed it.",
+           "Apps on this computer still reach the internet as usual. The firewall stays on after restarts.",
+           "Technical: sudo ufw enable, then sudo systemctl enable --now ufw.service"],
     run: "sudo /usr/bin/ufw enable && sudo /usr/bin/systemctl enable --now ufw.service"
   },
   "firewall-deny-in": {
-    title: "Deny incoming connections by default",
-    what: ["Runs: sudo ufw default deny incoming", "Rules you added for specific ports stay in place."],
+    title: "Block incoming connections by default",
+    what: ["Other computers can no longer connect to this one, except where you added a rule yourself.",
+           "Apps on this computer still reach the internet as usual.",
+           "Technical: sudo ufw default deny incoming, then sudo ufw reload"],
     run: "sudo /usr/bin/ufw default deny incoming && sudo /usr/bin/ufw reload"
   },
   "install-ufw": {
-    title: "Install and turn on the ufw firewall",
-    what: ["Installs ufw with omarchy pkg add, denies incoming connections and starts it."],
+    title: "Install and turn on the firewall",
+    what: ["Installs the ufw firewall, blocks incoming connections and turns it on, now and after restarts.",
+           "Apps on this computer still reach the internet as usual.",
+           "Technical: omarchy pkg add ufw, ufw default deny incoming, ufw enable"],
     tool: "omarchy-pkg-add", args: " ufw && sudo /usr/bin/ufw default deny incoming && sudo /usr/bin/ufw enable && sudo /usr/bin/systemctl enable --now ufw.service"
   },
   "sysctl-harden": {
-    title: "Apply recommended kernel and network settings",
-    what: ["Writes /etc/sysctl.d/90-omarchy-vigil.conf and loads it.",
-           "Undo: sudo rm /etc/sysctl.d/90-omarchy-vigil.conf, then reboot."],
+    title: "Turn on kernel and network protections",
+    what: ["Switches on protections built into Linux that make it harder for a harmful program to spy on",
+           "other programs or take over the system, and for other machines to redirect your traffic.",
+           "Nothing you use should change. Undo appears on this finding afterwards.",
+           "Technical: writes /etc/sysctl.d/90-omarchy-vigil.conf and loads it with sysctl --system"],
     run: dropIn("/etc/sysctl.d/90-omarchy-vigil.conf", SYSCTL_LINES) + " && sudo /usr/bin/sysctl --system >/dev/null && echo 'Settings applied.'"
   },
   "llmnr-off": {
-    title: "Turn LLMNR off",
-    what: ["Writes /etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf and restarts systemd-resolved.",
-           "Undo: delete that file and restart systemd-resolved."],
+    title: "Turn off LLMNR name lookups",
+    what: ["Stops other machines on the local network from answering when this computer looks up a name,",
+           "a trick used on shared Wi-Fi to capture passwords. Normal browsing is not affected.",
+           "Undo appears on this finding afterwards.",
+           "Technical: writes /etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf, restarts systemd-resolved"],
     run: "sudo /usr/bin/install -d -m 0755 /etc/systemd/resolved.conf.d && "
          + dropIn("/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf", [VIGIL_MARK, "[Resolve]", "LLMNR=no"])
          + " && sudo /usr/bin/systemctl restart systemd-resolved.service"
   },
   "dns-fallback-off": {
-    title: "Remove the public DNS fallback",
-    what: ["Writes /etc/systemd/resolved.conf.d/90-omarchy-vigil-fallback.conf with an empty FallbackDNS=.",
-           "If your DNS servers fail, lookups fail instead of going to Google, Cloudflare or Quad9."],
+    title: "Turn off the hidden DNS fallback",
+    what: ["When your own DNS servers stop answering, lookups no longer go quietly to Google, Cloudflare or Quad9.",
+           "If your DNS fails, websites stop loading instead, which you notice. Undo appears on this finding afterwards.",
+           "Technical: writes /etc/systemd/resolved.conf.d/90-omarchy-vigil-fallback.conf with an empty FallbackDNS="],
     run: "sudo /usr/bin/install -d -m 0755 /etc/systemd/resolved.conf.d && "
          + dropIn("/etc/systemd/resolved.conf.d/90-omarchy-vigil-fallback.conf", [VIGIL_MARK, "[Resolve]", "FallbackDNS="])
          + " && sudo /usr/bin/systemctl restart systemd-resolved.service"
   },
   "sshd-harden": {
-    title: "SSH: keys only, no root login",
-    what: ["Writes /etc/ssh/sshd_config.d/00-omarchy-vigil.conf, checks it with sshd -t and reloads sshd.",
-           "Stops if ~/.ssh/authorized_keys is empty, so you cannot lock yourself out."],
+    title: "Let SSH accept keys only",
+    what: ["Other computers can log in only with an SSH key, never by guessing a password, and never as root.",
+           "Stops without changing anything if you have no authorized key, so you cannot lock yourself out.",
+           "Technical: writes /etc/ssh/sshd_config.d/00-omarchy-vigil.conf, checks it with sshd -t, reloads sshd"],
     run: "test -s \"$HOME/.ssh/authorized_keys\" || { echo 'No keys in ~/.ssh/authorized_keys. Add one first.'; exit 1; }; "
          + dropIn("/etc/ssh/sshd_config.d/00-omarchy-vigil.conf",
                   [VIGIL_MARK, "PermitRootLogin no", "PasswordAuthentication no", "KbdInteractiveAuthentication no"])
@@ -237,16 +253,18 @@ var TERMINAL_ACTIONS = {
          + "else sudo /usr/bin/rm -f /etc/ssh/sshd_config.d/00-omarchy-vigil.conf; echo 'sshd rejected the change, so it was removed.'; exit 1; fi"
   },
   "connectivity-off": {
-    title: "Turn the connectivity check off",
-    what: ["Writes /etc/NetworkManager/conf.d/90-omarchy-vigil-connectivity.conf and reloads NetworkManager.",
-           "The network menu can no longer tell a captive portal from no internet."],
+    title: "Turn off the connectivity check",
+    what: ["Stops this computer contacting a server every few minutes to see whether it is online.",
+           "Wi-Fi login pages in hotels and airports may no longer open by themselves. Undo appears on this finding.",
+           "Technical: writes /etc/NetworkManager/conf.d/90-omarchy-vigil-connectivity.conf, reloads NetworkManager"],
     run: dropIn("/etc/NetworkManager/conf.d/90-omarchy-vigil-connectivity.conf", [VIGIL_MARK, "[connectivity]", "enabled=false"])
          + " && sudo /usr/bin/systemctl reload NetworkManager.service"
   },
   "mac-randomize": {
-    title: "Use a separate hardware address per network",
-    what: ["Writes /etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf and reloads NetworkManager.",
-           "Each network sees its own stable address. Takes effect when you next connect."],
+    title: "Use a different hardware address on each network",
+    what: ["Each Wi-Fi network sees its own address for this computer, so shops and airports cannot recognise",
+           "you from place to place. Applies the next time you connect. Undo appears on this finding afterwards.",
+           "Technical: writes /etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf, reloads NetworkManager"],
     run: "if /usr/bin/grep -rqs '^wifi.backend=iwd' /etc/NetworkManager; then echo 'NetworkManager uses iwd here. Add AddressRandomization=network under [General] in /etc/iwd/main.conf instead.'; exit 1; fi; "
          + dropIn("/etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf",
                   [VIGIL_MARK, "[device]", "wifi.scan-rand-mac-address=yes", "[connection]",
@@ -254,11 +272,11 @@ var TERMINAL_ACTIONS = {
          + " && sudo /usr/bin/systemctl reload NetworkManager.service"
   },
   "avahi-quiet": {
-    title: "Stop announcing this machine on the network",
-    what: ["Edits one line of /etc/avahi/avahi-daemon.conf: disable-publishing=yes, then restarts Avahi.",
-           "Stops without changing anything unless that line appears exactly once, under [publish].",
-           "The first original is kept as avahi-daemon.conf.vigil-backup; a failed restart rolls back.",
-           "Printer discovery keeps working."],
+    title: "Stop announcing this computer on the network",
+    what: ["Other devices on your network no longer see this computer and its services. Printers still work.",
+           "Changes nothing unless the setting is exactly where expected, keeps a copy of the original, and",
+           "puts it back if Avahi does not restart. Undo appears on this finding afterwards.",
+           "Technical: sets disable-publishing=yes in /etc/avahi/avahi-daemon.conf, restarts avahi-daemon"],
     run: "f=/etc/avahi/avahi-daemon.conf; "
          + "[ \"$(/usr/bin/awk '/^\\[/{s=$0} /^#?disable-publishing=/{n++; if (s != \"[publish]\") bad=1} "
          + "END{print (n == 1 && !bad) ? \"ok\" : \"no\"}' \"$f\")\" = ok ] "
@@ -273,158 +291,164 @@ var TERMINAL_ACTIONS = {
   },
   "sudo-passwordless-off": {
     title: "Turn passwordless sudo off",
-    what: ["Runs the Omarchy command omarchy-sudo-passwordless --disable"],
+    what: ["Programs need your password again before they can change the system.",
+           "Technical: runs the Omarchy command omarchy-sudo-passwordless --disable"],
     tool: "omarchy-sudo-passwordless", args: " --disable"
   },
   "docker-group-off": {
     title: "Leave the docker group",
-    what: ["Runs the Omarchy command omarchy-remove-security-sudoless-docker", "Docker then needs sudo."],
+    what: ["Programs you run can no longer use Docker to take full control of the computer without a password.",
+           "Docker commands then need sudo.",
+           "Technical: runs the Omarchy command omarchy-remove-security-sudoless-docker"],
     tool: "omarchy-remove-security-sudoless-docker", args: ""
   },
   "usb-auth": {
-    title: "Set up USB authorization",
-    what: ["Runs the Omarchy setup omarchy-setup-security-usb-authorization",
-           "It installs USBGuard, trusts the devices plugged in now, and asks you about new ones."],
+    title: "Ask before new USB devices work",
+    what: ["New USB devices, such as a stick that pretends to be a keyboard, work only after you allow them.",
+           "Devices plugged in now are trusted. Omarchy walks you through it.",
+           "Technical: runs omarchy-setup-security-usb-authorization, which installs USBGuard"],
     tool: "omarchy-setup-security-usb-authorization", args: ""
   },
   "thunderbolt-auth": {
-    title: "Set up Thunderbolt authorization",
-    what: ["Runs the Omarchy setup omarchy-setup-security-thunderbolt-authorization"],
+    title: "Ask before new Thunderbolt devices work",
+    what: ["New Thunderbolt devices connect only after you allow them. Omarchy walks you through it.",
+           "Technical: runs omarchy-setup-security-thunderbolt-authorization"],
     tool: "omarchy-setup-security-thunderbolt-authorization", args: ""
   },
   "fido2": {
-    title: "Set up a FIDO2 security key",
-    what: ["Runs the Omarchy setup omarchy-setup-security-fido2", "Have your security key plugged in."],
+    title: "Use a security key for sudo",
+    what: ["Lets a security key such as a YubiKey confirm system changes. Have the key plugged in;",
+           "Omarchy walks you through it.",
+           "Technical: runs omarchy-setup-security-fido2"],
     tool: "omarchy-setup-security-fido2", args: ""
   },
   "update": {
     title: "Update the system",
-    what: ["Runs the Omarchy updater omarchy-update"],
+    what: ["Installs every waiting update, including security fixes. Restart afterwards if Vigil asks you to.",
+           "Technical: runs omarchy-update"],
     tool: "omarchy-update", args: ""
   },
   "allow-idle": {
     title: "Turn Stay Awake off",
-    what: ["Runs: omarchy-toggle-idle allow-idle", "The screen locks again when you are idle."],
+    what: ["The screen locks by itself again when you are away.",
+           "Technical: runs omarchy-toggle-idle allow-idle"],
     tool: "omarchy-toggle-idle", args: " allow-idle"
   },
   "install-clamav": {
     title: "Install ClamAV",
-    what: ["Installs clamav with omarchy pkg add, then downloads the virus database with freshclam."],
+    what: ["Installs the ClamAV virus scanner and downloads its list of known viruses.",
+           "Technical: omarchy pkg add clamav, then sudo freshclam"],
     tool: "omarchy-pkg-add", args: " clamav && sudo /usr/bin/freshclam && sudo /usr/bin/systemctl enable --now clamav-freshclam.service"
   },
   "freshclam-service": {
-    title: "Keep virus signatures updated automatically",
-    what: ["Turns on the ClamAV update service (clamav-freshclam), which downloads new signatures",
-           "from the ClamAV servers several times a day, and fetches them once now."],
+    title: "Keep virus signatures up to date",
+    what: ["Turns on the ClamAV service that downloads new virus signatures several times a day,",
+           "and gets them once now.",
+           "Technical: sudo systemctl enable --now clamav-freshclam.service"],
     run: "sudo /usr/bin/systemctl enable --now clamav-freshclam.service"
   },
   "install-osv-scanner": {
     title: "Install osv-scanner",
-    what: ["Installs osv-scanner, the Google tool for checking packages against OSV.dev, with omarchy pkg add.",
-           "Vigil then checks your npm and Bun packages for known malware once a week."],
+    what: ["Installs the tool Vigil uses to check your npm and Bun packages against known malware.",
+           "It sends only package names and versions to OSV.dev, never your files.",
+           "Technical: omarchy pkg add osv-scanner"],
     tool: "omarchy-pkg-add", args: " osv-scanner"
   },
   "freshclam": {
-    title: "Update the ClamAV database",
-    what: ["Runs: sudo freshclam (downloads signatures from the ClamAV servers)"],
+    title: "Update virus signatures now",
+    what: ["Downloads the newest virus signatures from ClamAV.",
+           "Technical: sudo freshclam"],
     run: "sudo /usr/bin/freshclam"
   },
   "install-clamui": {
     title: "Install ClamUI",
-    what: ["Installs flatpak and clamav with omarchy pkg add, adds the Flathub remote for your account,",
-           "installs ClamUI from Flathub (io.github.linx_systems.ClamUI), downloads virus signatures,",
-           "and turns on the ClamAV service that keeps them updated.",
-           "Contacts the Arch mirrors, dl.flathub.org and the ClamAV servers."],
+    what: ["Installs ClamUI, an app for virus scans and quarantine, with ClamAV and its virus signatures,",
+           "and turns on the service that keeps the signatures up to date.",
+           "Downloads from the Arch mirrors, Flathub and the ClamAV servers.",
+           "Technical: omarchy pkg add flatpak clamav, flatpak install io.github.linx_systems.ClamUI, freshclam service"],
     tool: "omarchy-pkg-add", args: " flatpak clamav && "
       + "/usr/bin/flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo && "
       + "/usr/bin/flatpak install --user flathub io.github.linx_systems.ClamUI && sudo /usr/bin/freshclam && "
       + "sudo /usr/bin/systemctl enable --now clamav-freshclam.service"
   },
-  "scan-downloads": {
-    title: "Scan ~/Downloads for viruses",
-    what: ["Runs: clamscan --recursive --infected ~/Downloads", "Only infected files are listed. Nothing is deleted."],
-    run: "/usr/bin/clamscan --recursive --infected -- \"$HOME/Downloads\""
-  },
-  "password-check": {
-    title: "Full scan",
-    what: ["Vigil is running every check and scan it has. Most of it runs in the background:",
-           "updating its lists, the virus scan of your home folder, Bumblebee, and every setting.",
-           "",
-           "This terminal does the one step that needs your password: finding accounts that have no",
-           "password. Only root can read where passwords are kept (/etc/shadow); Vigil keeps only",
-           "the names of such accounts (usually none), in ~/.local/state/omarchy-vigil/no-password.txt."],
-    run: "umask 077; d=\"$HOME/.local/state/omarchy-vigil\"; /usr/bin/mkdir -p \"$d\"; "
-      + "echo 'Checking for accounts without a password.'; "
-      + "sudo /usr/bin/awk -F: '$2 == \"\" { print $1 }' /etc/shadow > \"$d/no-password.txt.new\"; "
-      + "/usr/bin/mv -f \"$d/no-password.txt.new\" \"$d/no-password.txt\"; "
-      + "echo 'Done. You can close this window; Vigil notifies you when the rest of the Full scan finishes.'"
-  },
+
+
   "old-services-off": {
     title: "Switch off old network services",
-    what: ["For telnet, rsh, rlogin, FTP, TFTP, NIS and xinetd: runs sudo systemctl disable --now",
-           "on each one that is switched on. Nothing is uninstalled.",
-           "To turn one back on later: sudo systemctl enable --now <name>"],
+    what: ["Switches off any telnet, rsh, rlogin, FTP, TFTP, NIS or xinetd service that is on. Nothing is uninstalled.",
+           "To turn one back on later: sudo systemctl enable --now <name>",
+           "Technical: sudo systemctl disable --now for each one that is switched on"],
     run: "for u in " + OLD_SERVICES.join(" ") + "; do "
       + "if /usr/bin/systemctl is-enabled --quiet \"$u\" 2>/dev/null || /usr/bin/systemctl is-active --quiet \"$u\"; "
       + "then echo \"Switching off $u\"; sudo /usr/bin/systemctl disable --now \"$u\"; fi; done"
   },
   "restart": {
     title: "Restart the computer",
-    what: ["Restarts now so the updated kernel takes over. Save your work and close your apps first."],
+    what: ["Restarts now so the updated kernel, with its security fixes, takes over.",
+           "Save your work and close your apps first.",
+           "Technical: systemctl reboot"],
     run: "/usr/bin/systemctl reboot"
   },
   "install-arch-audit": {
     title: "Install arch-audit",
-    what: ["Installs arch-audit with omarchy pkg add."],
+    what: ["Installs the tool that checks your packages against the Arch security team list of known holes.",
+           "Technical: omarchy pkg add arch-audit"],
     tool: "omarchy-pkg-add", args: " arch-audit"
   },
   "run-arch-audit": {
-    title: "List packages with known vulnerabilities",
-    what: ["Runs: arch-audit --upgradable (contacts security.archlinux.org)",
-           "Shows vulnerable packages that already have a fixed version: update to get it."],
+    title: "List packages with known security holes",
+    what: ["Shows installed packages with a known security hole that an update already fixes. Changes nothing.",
+           "Technical: arch-audit --upgradable (contacts security.archlinux.org)"],
     run: "/usr/bin/arch-audit --upgradable && echo 'Done. Nothing listed means nothing to fix.'"
   },
   "clean-pacman-cache": {
     title: "Free space in the package cache",
-    what: ["Runs: sudo paccache -rk2, then sudo paccache -ruk0",
-           "Keeps the two newest versions of each installed package, for rollback, as Omarchy does,",
-           "and removes the downloads of packages you no longer have installed."],
+    what: ["Deletes old downloaded package files. The two newest versions of each installed package stay,",
+           "so a bad update can still be rolled back, as Omarchy does.",
+           "Technical: sudo paccache -rk2, then sudo paccache -ruk0"],
     run: PACCACHE_RUN
   },
 
   "clean-orphans": {
-    title: "Review orphaned packages",
-    what: ["Runs the Omarchy command omarchy-update-orphan-pkgs", "It lists them and asks before removing anything."],
+    title: "Review leftover packages",
+    what: ["Lists packages that were installed only for something you have since removed,",
+           "and asks before removing any.",
+           "Technical: runs the Omarchy command omarchy-update-orphan-pkgs"],
     tool: "omarchy-update-orphan-pkgs", args: ""
   },
   "show-listeners": {
-    title: "Show which programs are listening",
-    what: ["Runs: sudo ss -tulpn, which lists open ports and the program behind each. Changes nothing."],
+    title: "Show which programs accept network connections",
+    what: ["Lists each open port and the program behind it. Changes nothing.",
+           "Technical: sudo ss -tulpn"],
     run: "sudo /usr/bin/ss -tulpn"
   },
   "show-ld-preload": {
-    title: "Show /etc/ld.so.preload",
-    what: ["Prints the file and who owns it. Changes nothing."],
+    title: "Show the system-wide preload file",
+    what: ["Prints /etc/ld.so.preload and who owns it, so you or a helper can see what it loads. Changes nothing.",
+           "Technical: ls -l and cat /etc/ld.so.preload"],
     run: "/usr/bin/ls -l /etc/ld.so.preload; echo; /usr/bin/cat /etc/ld.so.preload"
   },
   "show-plugins": {
     title: "List installed Omarchy plugins",
-    what: ["Runs: omarchy plugin list. Changes nothing.",
-           "Remove one with: omarchy plugin remove <id>"],
+    what: ["Shows every plugin you have installed. Changes nothing.",
+           "Remove one you do not use with: omarchy plugin remove <id>",
+           "Technical: omarchy plugin list"],
     tool: "omarchy-plugin-list", args: ""
   },
   "edit-shell-history": {
-    title: "Edit your shell history",
-    what: ["Opens each shell history file you have in your editor, one after the other.",
-           "Delete the lines with the leaked keys (Details lists the line numbers), save and quit.",
-           "Revoke the keys with their services too: anything in history may already have been read."],
+    title: "Remove leaked keys from your shell history",
+    what: ["Opens each of your shell history files in your editor, one after the other. Delete the lines that",
+           "Details points to, then save and quit. Also revoke those keys with the service that issued them:",
+           "anything in your history may already have been read.",
+           "Technical: opens ~/.bash_history, ~/.zsh_history and the fish history with your editor"],
     run: "for f in \"$HOME/.bash_history\" \"$HOME/.zsh_history\" \"$HOME/.local/share/fish/fish_history\"; do "
       + "if [ -f \"$f\" ]; then \"${EDITOR:-nvim}\" \"$f\"; fi; done"
   },
   "ssh-passphrase": {
     title: "Add a passphrase to your SSH keys",
-    what: ["For each private key in ~/.ssh without a passphrase, runs ssh-keygen -p, which asks for the new one.",
-           "The key itself stays the same, so servers that trust it keep working. No sudo needed."],
+    what: ["Protects each SSH key that has no passphrase, so a stolen copy is useless; it asks you for the new one.",
+           "Servers that trust the key keep working.",
+           "Technical: ssh-keygen -p for each private key in ~/.ssh without a passphrase"],
     run: "found=0; for k in \"$HOME\"/.ssh/*; do "
       + "[ -f \"$k\" ] && [ ! -L \"$k\" ] || continue; "
       + "/usr/bin/grep -q 'PRIVATE KEY' \"$k\" 2>/dev/null || continue; "
@@ -433,17 +457,18 @@ var TERMINAL_ACTIONS = {
       + "[ \"$found\" = 1 ] || echo 'Every key already has a passphrase.'"
   },
   "screen-lock-default": {
-    title: "Lock the screen after 5 minutes idle",
-    what: ["Sets idle.lock to 300 seconds in ~/.config/omarchy/shell.json, the Omarchy default,",
-           "using the shell-config helper that Omarchy ships, which also reloads the shell. No sudo needed."],
+    title: "Lock the screen after 5 minutes away",
+    what: ["Locks the screen after 5 minutes without use, the Omarchy default.",
+           "Technical: sets idle.lock to 300 in ~/.config/omarchy/shell.json with the helper Omarchy ships"],
     source: "omarchy-shell-config",
     run: "commit \"$NORMALIZE | .idle = ((.idle | if type == \\\"object\\\" then . else {} end) + {lock: 300})\" "
       + "&& echo 'The screen now locks after 5 minutes idle.'"
   },
   "firewire-off": {
     title: "Turn off FireWire",
-    what: ["Writes /etc/modprobe.d/90-omarchy-vigil-firewire.conf so the FireWire drivers never load.",
-           "Takes full effect after the next restart. Undo: delete that file."],
+    what: ["Stops the FireWire port from working, so a plugged-in device cannot read memory directly.",
+           "Takes full effect after a restart. Undo appears on this finding afterwards.",
+           "Technical: writes /etc/modprobe.d/90-omarchy-vigil-firewire.conf"],
     run: "sudo /usr/bin/install -d -m 0755 /etc/modprobe.d && "
       + dropIn("/etc/modprobe.d/90-omarchy-vigil-firewire.conf", [VIGIL_MARK,
           "install firewire-core /bin/false", "install firewire-ohci /bin/false", "install ohci1394 /bin/false"])
@@ -454,15 +479,16 @@ var TERMINAL_ACTIONS = {
     "The drivers can load again after the next restart.", "echo 'Removed. FireWire works again after a restart.'"),
   "clean-system": {
     title: "Free space in the package cache and trim system logs",
-    what: ["Runs: sudo paccache -rk2, sudo paccache -ruk0, then sudo journalctl --vacuum-time=2weeks",
-           "Keeps the two newest versions of each installed package, for rollback, and two weeks of logs;",
-           "removes the downloads of packages you no longer have installed."],
+    what: ["Deletes old downloaded package files, keeping the two newest versions of each for rollback,",
+           "and system logs older than two weeks.",
+           "Technical: sudo paccache -rk2, sudo paccache -ruk0, sudo journalctl --vacuum-time=2weeks"],
     run: PACCACHE_RUN + "; sudo /usr/bin/journalctl --vacuum-time=2weeks"
   },
 
   "clean-journal": {
     title: "Trim system logs",
-    what: ["Runs: sudo journalctl --vacuum-time=2weeks", "Keeps the last two weeks of logs."],
+    what: ["Deletes system logs older than two weeks.",
+           "Technical: sudo journalctl --vacuum-time=2weeks"],
     run: "sudo /usr/bin/journalctl --vacuum-time=2weeks"
   },
   "undo-sysctl": undoDropIn("kernel and network settings", "/etc/sysctl.d/90-omarchy-vigil.conf",
@@ -485,8 +511,9 @@ var TERMINAL_ACTIONS = {
     "sudo /usr/bin/systemctl reload NetworkManager.service"),
   "undo-avahi": {
     title: "Undo: restore the original Avahi settings",
-    what: ["Puts back /etc/avahi/avahi-daemon.conf.vigil-backup, the file as it was before Vigil first changed it,",
-           "and restarts Avahi. Edits made to the file since then are lost."],
+    what: ["Puts back the Avahi settings file as it was before Vigil first changed it, and restarts Avahi.",
+           "Edits made to the file since then are lost.",
+           "Technical: moves /etc/avahi/avahi-daemon.conf.vigil-backup back into place"],
     run: "b=/etc/avahi/avahi-daemon.conf.vigil-backup; "
          + "[ -f \"$b\" ] || { echo 'There is no backup to restore.'; exit 0; }; "
          + "sudo /usr/bin/mv -f -- \"$b\" /etc/avahi/avahi-daemon.conf && sudo /usr/bin/systemctl restart avahi-daemon.service"
@@ -567,7 +594,8 @@ function terminalScript(id, tools) {
   } else {
     body = a.run
   }
-  var intro = ["Vigil: " + a.title, ""].concat(a.what).concat([""])
+  var intro = ["Vigil: " + a.title, ""].concat(a.what).concat(["",
+    body.indexOf("sudo ") !== -1 ? "You will be asked for your password." : "No password needed."])
   var shown = []
   for (var i = 0; i < intro.length; i++) shown.push("'" + intro[i] + "'")
   return "printf '%s\\n' " + shown.join(" ")
@@ -689,7 +717,9 @@ function parseSources(list) {
     if (!e || typeof e !== "object" || !inList(e.id, SOURCE_IDS) || !inList(e.state, SOURCE_STATES)) return null
     if (!isString(e.label, 40) || !isString(e.date, 10) || !isString(e.tried, 10)) return null
     if ((e.date !== "" && !DATE_RE.test(e.date)) || (e.tried !== "" && !DATE_RE.test(e.tried))) return null
-    out.push({ id: e.id, label: plain(e.label, 40), date: e.date, state: e.state, tried: e.tried })
+    var time = e.time === undefined ? "" : e.time
+    if (!isString(time, 5) || (time !== "" && !/^\d{2}:\d{2}$/.test(time))) return null
+    out.push({ id: e.id, label: plain(e.label, 40), date: e.date, time: time, state: e.state, tried: e.tried })
   }
   return out
 }
@@ -715,11 +745,11 @@ function relativeDay(date, now) {
 
 function sourceLine(src, now) {
   // Scans "ran"; databases and signatures are "updated".
-  var scan = src.id === "virus-scan" || src.id === "bumblebee" || src.id === "password-check"
+  var scan = SCAN_SOURCES.indexOf(src.id) !== -1
   if (src.state === "never") return scan ? "not run yet" : "not updated yet"
   if (src.state === "failed")
     return (scan ? "last run failed" : "last update failed") + (src.date !== "" ? "; last good " + relativeDay(src.date, now) : "")
-  var when = relativeDay(src.date, now)
+  var when = relativeDay(src.date, now) + (src.time ? " at " + src.time : "")
   return src.state === "stale" ? "out of date (" + when + ")" : (scan ? "ran " : "updated ") + when
 }
 
@@ -730,39 +760,90 @@ function lastRunLine(run, now) {
     + (run.ok ? ". Every source refreshed." : ". Some sources did not refresh; Vigil tries again tomorrow.")
 }
 
-// One line under the scan buttons: when sources last updated, and a countdown
-// to the next automatic update (which a manual update or Full scan resets).
-function updateLine(report, autoUpdate, now) {
-  if (!report) return ""
-  var run = report.lastRun
-  var last = run && run.at !== ""
-    ? "Updated " + relativeDay(run.at, now) + " at " + run.at.substring(11, 16)
-    : "Not updated yet"
-  if (run && run.at !== "" && !run.ok) last += ", but some sources failed"
-  if (!autoUpdate) return last + ". Automatic updates are off."
-  if (report.nextUpdate === "") return last + "."
-  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(report.nextUpdate)
+var SCAN_SOURCES = ["virus-scan", "bumblebee", "password-check"]
+
+// The Overview's LAST RUN list: every scan (with the settings checks first),
+// then every source update, each with when it last ran or updated.
+function lastRunRows(report, now) {
+  if (!report) return []
+  var rows = [{ label: "Scans", value: "", heading: true, problem: false },
+              { label: "Settings checks (every tab)", heading: false, problem: false,
+                value: "ran " + relativeDay(report.generatedAt, now) + " at " + report.generatedAt.substring(11, 16) }]
+  var add = function(scan) {
+    for (var i = 0; i < report.sources.length; i++) {
+      var src = report.sources[i]
+      if ((SCAN_SOURCES.indexOf(src.id) !== -1) !== scan) continue
+      rows.push({ label: src.label, value: sourceLine(src, now), heading: false,
+                  problem: src.state === "failed" || src.state === "stale" })
+    }
+  }
+  add(true)
+  rows.push({ label: "Updates", value: "", heading: true, problem: false })
+  add(false)
+  if (rows[rows.length - 1].heading) rows.pop()
+  return rows
+}
+
+// "in 6 days", "tomorrow" or "today" until an ISO date; "" when there is none.
+function countdown(dateStr, now) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr))
+  if (!m) return ""
   var due = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
   var today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
   var days = Math.round((due - today) / 86400000)
-  var when = days <= 0 ? "today" : (days === 1 ? "tomorrow" : "in " + days + " days")
-  return last + " \u00b7 next automatic update " + when + "."
+  return days <= 0 ? "today" : (days === 1 ? "tomorrow" : "in " + days + " days")
 }
 
-// The Full scan card: what runs in the background and what needs the terminal.
+// The two lines under the buttons: when each automatic run comes next.
+function scheduleLines(report, autoUpdate, now) {
+  if (!report) return []
+  if (!autoUpdate) return ["Automatic updates and scans are off (Vigil settings)."]
+  var out = []
+  var u = countdown(report.nextUpdate, now)
+  if (u !== "") out.push("Next automatic update: " + u)
+  var f = countdown(report.nextFullScan, now)
+  if (f !== "") out.push("Next automatic full scan: " + f + " (everything except the password check)")
+  if (report.lastRun && report.lastRun.at !== "" && !report.lastRun.ok)
+    out.push("The last update could not reach every source; Vigil tries again tomorrow.")
+  return out
+}
+
+// A progress line from a running update or scan, or null.
+function parseProgress(line) {
+  var d
+  try { d = JSON.parse(line) } catch (e) { return null }
+  var p = d && typeof d === "object" ? d.progress : null
+  if (!p || typeof p !== "object") return null
+  var n = function(v, max) { return typeof v === "number" && isFinite(v) && v >= 0 && v <= max }
+  if (!n(p.step, 20) || !n(p.of, 20) || p.step < 1 || p.step > p.of || !isString(p.doing, 120)
+      || !n(p.done, 1e8) || !n(p.total, 1e8)) return null
+  var part = p.total > 0 ? Math.min(1, p.done / p.total) : 0
+  return { step: Math.round(p.step), of: Math.round(p.of), doing: plain(p.doing, 120),
+           done: Math.round(p.done), total: Math.round(p.total),
+           fraction: Math.min(1, (p.step - 1 + part) / p.of) }
+}
+
+// What the progress line under the bar says.
+function progressText(p) {
+  if (!p) return ""
+  var s = "Step " + p.step + " of " + p.of + ": " + p.doing
+  if (p.total > 0) s += " (" + p.done.toLocaleString() + " of " + p.total.toLocaleString() + " files)"
+  else if (p.done > 0) s += " (" + p.done.toLocaleString() + " files)"
+  return s
+}
+
+// The Full scan card. Everything runs in the background; the one step that
+// needs your password uses Omarchy's own password dialog, not a terminal.
 function fullScanConfirmation(report) {
   if (!report) return null
-  var lines = ["Runs every check and scan Vigil has:",
-               "\u2022 updates the lists of known vulnerabilities, malicious packages and AUR status;",
-               "\u2022 scans your whole home folder for viruses with ClamAV, if installed (skipping caches "
-               + "and game libraries); this can take a while and runs in the background;",
-               "\u2022 has Bumblebee rescan your packages, if installed;",
-               "\u2022 checks for accounts without a password, the one step that needs your password: a "
-               + "terminal opens and sudo asks once;",
-               "\u2022 then checks every setting in every tab again. You get a notification when it is done."]
-  if (launcherPath(report.tools) === "" || terminalScript("password-check", report.tools) === "")
-    lines.splice(4, 1, "\u2022 the password check needs the Omarchy terminal tools, which were not found; the rest still runs;")
-  return { title: "Full scan", lines: lines }
+  return { title: "Full scan", lines: [
+    "Runs every check and scan Vigil has, in this order:",
+    "1. Checks that every account has a password. Omarchy asks for your password for this one step.",
+    "2. Updates the lists of known security holes, malicious packages and AUR status.",
+    "3. Scans your home folder for viruses, if ClamAV is installed. This can take a while.",
+    "4. Has Bumblebee rescan your packages, if it is installed.",
+    "5. Checks every setting in every tab again.",
+    "The panel shows the progress, and you get a notification when it is done."] }
 }
 
 function parseHistory(h) {
@@ -834,15 +915,18 @@ function parseReport(text) {
   var sources = parseSources(d.sources)
   var lastRun = parseLastRun(d.lastRun)
   if (!sources || !lastRun) return null
-  var nextUpdate = ""
-  if (d.nextUpdate !== undefined && d.nextUpdate !== "") {
-    if (!isString(d.nextUpdate, 10) || !DATE_RE.test(d.nextUpdate)) return null
-    nextUpdate = d.nextUpdate
+  var optionalDate = function(v) {
+    if (v === undefined || v === "") return ""
+    return isString(v, 10) && DATE_RE.test(v) ? v : null
   }
+  var nextUpdate = optionalDate(d.nextUpdate)
+  var nextFullScan = optionalDate(d.nextFullScan)
+  if (nextUpdate === null || nextFullScan === null) return null
   return {
     sources: sources,
     lastRun: lastRun,
     nextUpdate: nextUpdate,
+    nextFullScan: nextFullScan,
     feedsDue: d.feedsDue === true,
     feedsUpdated: feedsUpdated,
     history: history,
@@ -992,7 +1076,8 @@ if (typeof module !== "undefined") {
     categoryLabel: categoryLabel, pillarCounts: pillarCounts, tabIntro: tabIntro, cleanAllPlan: cleanAllPlan,
     howTo: howTo, docsUrl: docsUrl, docsCommand: docsCommand, DOCS: DOCS, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
     shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
-    relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine, updateLine: updateLine,
+    relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine, countdown: countdown, scheduleLines: scheduleLines,
+    parseProgress: parseProgress, progressText: progressText, lastRunRows: lastRunRows,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,
     SYSCTL_LINES: SYSCTL_LINES
   }

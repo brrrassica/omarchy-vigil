@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "keasbeexd.vigil",
   "name": "Vigil",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "author": "Marc Ferro @keasbeexd",
   "license": "MIT",
   "description": "A security suite for Omarchy in five pillars: hardening, malware detection (with ClamUI), supply-chain checks (with Bumblebee), privacy and system care. Plain-language findings and fixes you approve one by one; root changes run in a visible terminal. Sends nothing anywhere.",
@@ -57,9 +57,9 @@
       {
         "key": "autoUpdate",
         "type": "boolean",
-        "label": "Weekly updates and checks",
+        "label": "Weekly updates and scans",
         "defaultValue": true,
-        "description": "Once a week: refresh the maintained sources Vigil checks against (known vulnerabilities via arch-audit and security.archlinux.org; known-malicious npm and Bun packages via osv-scanner and OSV.dev, which receives package names and versions, never files; the AUR via aur.archlinux.org) and scan ~/Downloads with ClamAV. Each step runs only once its tool is installed. Turn off to do this only with the Update sources and Full scan buttons."
+        "description": "Once a week each: refresh the lists Vigil checks against (known vulnerabilities from security.archlinux.org via arch-audit; known-malicious npm and Bun packages from OSV.dev via osv-scanner, which receives package names and versions, never files; your AUR packages from aur.archlinux.org), and run the background part of a Full scan (a ClamAV virus scan of your home folder, as you, and a Bumblebee rescan). Each step runs only once its tool is installed. Turn off to run them only with the Update sources and Full scan buttons."
       }
     ]
   }

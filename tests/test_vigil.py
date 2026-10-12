@@ -55,11 +55,14 @@ def v(tmp_path, monkeypatch):
     commands = {}
     mod.COMMANDS = commands
 
-    def fake_run(argv, timeout=8, limit=0):
+    def fake_run(argv, timeout=8, limit=0, on_line=None):
         key = tuple(argv)
-        if key in commands:
-            return commands[key]
-        return None, ""
+        if key not in commands:
+            return None, ""
+        rc, out = commands[key]
+        if on_line is not None and rc is not None:      # stream like the real run(): keep what on_line wants
+            out = "".join(l + "\n" for l in out.splitlines() if on_line(l))
+        return rc, out
 
     monkeypatch.setattr(mod, "run", fake_run)
     trusted = set()
@@ -629,7 +632,7 @@ def test_every_fix_in_helper_is_known_to_model(v):
     for a in used_app:
         assert '"%s": {\n    app:' % a in msrc, a
     for spec in v.SCANNERS:
-        used_terminal |= {spec[5], spec[6]}
+        used_terminal |= {a for a in (spec[5], spec[6]) if a}
     assert used_terminal <= terminal, used_terminal - terminal
     assert used_helper <= helper, used_helper - helper
     assert helper == set(v.FIXES)
@@ -1044,7 +1047,7 @@ def test_clamav_signatures_come_from_freshclam(v):
     assert c["status"] == "info" and c["fix"]["action"] == "freshclam-service"
     v.UNITS[("is-enabled", "clamav-freshclam.service")] = "enabled"
     c = clamav(v)()
-    assert c["status"] == "info" and "update automatically" in c["summary"] and c["fix"]["action"] == "scan-downloads"
+    assert c["status"] == "pass" and "update automatically" in c["summary"] and c["fix"]["kind"] == "none"
     p = v.ROOT + "/var/lib/clamav/daily.cld"
     os.utime(p, (os.path.getmtime(p) - 10 * 86400,) * 2)
     assert clamav(v)()["status"] == "warn"
@@ -1211,12 +1214,6 @@ def test_failed_refresh_keeps_last_good_result(v):
     assert arch_audit_check(v)["status"] == "warn"
 
 
-def test_report_says_when_feeds_are_due(v):
-    assert v.audit(peek=True)["feedsDue"] is False
-    v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
-    assert v.audit(peek=True)["feedsDue"] is True
-
-
 OSV_JSON = json.dumps({"results": [
     {"source": {"path": "/HOME/.cache/yay/atomic-pkg/bun.lock", "type": "lockfile"},
      "packages": [
@@ -1288,21 +1285,24 @@ def test_aur_refresh_failure_is_retried(v):
 
 
 # --------------------------------------------------------------------------
-# Weekly virus scan, Update sources and Full scan
+# Virus scan, Update sources, Full scan and their schedules
 
-def scan_argv(v, whole_home=False):
-    return tuple(v._clamscan_argv(v.HOME if whole_home else os.path.join(v.HOME, "Downloads"), whole_home))
+def scan_argv(v):
+    return tuple(v._clamscan_argv(v.HOME))
+
+
+def clamscan_ok(v, out="", rc=0):
+    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
+    v.COMMANDS[scan_argv(v)] = (rc, out)
 
 
 def test_clamscan_never_follows_links_or_leaves_the_disk(v):
     argv = scan_argv(v)
-    assert argv[:5] == ("/usr/bin/clamscan", "--recursive", "--infected", "--no-summary", "--stdout")
+    assert argv[:4] == ("/usr/bin/clamscan", "--recursive", "--no-summary", "--stdout")
     assert {"--cross-fs=no", "--follow-dir-symlinks=0", "--follow-file-symlinks=0"} <= set(argv)
-    assert argv[-2:] == ("--", os.path.join(v.HOME, "Downloads")) and not any("exclude" in a for a in argv)
-    home = scan_argv(v, True)
-    assert home[-2:] == ("--", v.HOME)
-    assert "--exclude-dir=^%s/\\.cache($|/)" % re.escape(v.HOME) in home
-    assert "--exclude-dir=/node_modules($|/)" in home
+    assert argv[-2:] == ("--", v.HOME)
+    assert "--exclude-dir=^%s/\\.cache($|/)" % re.escape(v.HOME) in argv
+    assert "--exclude-dir=/node_modules($|/)" in argv
 
 
 def test_clamscan_parse():
@@ -1319,45 +1319,124 @@ def test_clamscan_parse():
 
 def test_virus_scan_states(v):
     assert v.check_virus_scan()["status"] == "info"                       # no ClamAV
-    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
-    assert v.check_virus_scan()["status"] == "na"                         # no Downloads
-    os.makedirs(os.path.join(v.HOME, "Downloads"))
+    c_out = os.path.join(v.HOME, "Documents/x.exe") + ": Win.Test.EICAR_HDB-1 FOUND\n"
+    clamscan_ok(v)
     c = v.check_virus_scan()
     assert c["status"] == "info" and c["fix"]["action"] == "virus-scan-now"
-    v.COMMANDS[scan_argv(v)] = (1, os.path.join(v.HOME, "Downloads/x.exe") + ": Win.Test.EICAR_HDB-1 FOUND\n")
+    clamscan_ok(v, os.path.join(v.HOME, "a.txt") + ": OK\n" + c_out, 1)
     assert v.run_fix("virus-scan-now")["ok"]
     c = v.check_virus_scan()
-    assert c["status"] == "fail" and "~/Downloads/x.exe: Win.Test.EICAR_HDB-1" in c["detail"]
+    assert c["status"] == "fail" and "~/Documents/x.exe: Win.Test.EICAR_HDB-1" in c["detail"]
+    assert c["summary"].startswith("1 infected file in your home folder")
     v.TRUSTED.add(v.ROOT + "/usr/bin/clamui")
     assert v.check_virus_scan()["fix"]["kind"] == "app"                   # hand off quarantine to ClamUI
-    v.COMMANDS[scan_argv(v)] = (0, "")
+    clamscan_ok(v)
     v.run_fix("virus-scan-now")
     assert v.check_virus_scan()["status"] == "pass"
 
 
 def test_virus_scan_error_is_not_a_clean_result(v):
-    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
-    os.makedirs(os.path.join(v.HOME, "Downloads"))
-    v.COMMANDS[scan_argv(v)] = (2, "LibClamAV Error: cli_loaddbdir(): No supported database files found\n")
+    clamscan_ok(v, "LibClamAV Error: cli_loaddbdir(): No supported database files found\n", 2)
     assert v.run_fix("virus-scan-now")["ok"] is False
     assert v.check_virus_scan()["status"] == "info"                       # still "first scan pending"
 
 
-def test_force_refresh_runs_everything_available(v):
-    v.TRUSTED |= {v.ROOT + "/usr/bin/arch-audit", v.ROOT + "/usr/bin/clamscan"}
-    os.makedirs(os.path.join(v.HOME, "Downloads"))
-    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
-    v.COMMANDS[scan_argv(v)] = (0, "")
-    assert v.refresh_due_feeds()["ok"]                                    # first run: both due
+def test_virus_scan_reports_progress(v, capsys):
+    for n in range(5):
+        put(Path(v.HOME, "Documents", "f%d" % n), "x")
+    assert v.count_home_files() == 5
+    put(Path(v.HOME, ".cache", "big"), "x")                               # skipped, as in the scan
+    put(Path(v.HOME, "proj", "node_modules", "m.js"), "x")
+    assert v.count_home_files() == 5
+    lines = "".join(os.path.join(v.HOME, "Documents/f%d" % n) + ": OK\n" for n in range(5))
+    clamscan_ok(v, lines)
+    seen = []
+    import itertools
+    clock = itertools.count(0, 3)                                         # every line looks 3 s apart
+    real = v.time.monotonic
+    v.time.monotonic = lambda: float(next(clock))
+    try:
+        v.refresh_virus_scan(lambda done, total: seen.append((done, total)))
+    finally:
+        v.time.monotonic = real
+    assert seen and seen[-1] == (5, 5)
+
+
+def test_progress_lines_for_the_panel(v, capsys, monkeypatch):
+    v.PROGRESS["on"] = True
+    monkeypatch.setattr(v, "FEED_REFRESH", {"arch-audit": lambda: None})
+    monkeypatch.setattr(v, "feed_available", lambda n: n in ("arch-audit", "full-scan"))
+    v.refresh_due_feeds(sources_only=True)
+    out = [json.loads(l) for l in capsys.readouterr().out.splitlines()]
+    assert out == [{"progress": {"step": 1, "of": 1, "doing": "Updating the Arch vulnerability database",
+                                 "done": 0, "total": 0}}]
+
+
+def test_two_timers_sources_and_full_scan(v, monkeypatch):
+    ran = []
+
+    def fake(name):
+        def go(cb=None):
+            ran.append(name)
+            v.save_feed(name, {})
+        return go
+    monkeypatch.setattr(v, "FEED_REFRESH", {"arch-audit": fake("arch-audit")})
+    monkeypatch.setattr(v, "refresh_virus_scan", fake("virus-scan"))
+    monkeypatch.setattr(v, "feed_available", lambda n: n in ("arch-audit", "virus-scan", "full-scan"))
+    # Update sources: only the lists.
+    v.refresh_due_feeds(sources_only=True)
+    assert ran == ["arch-audit"]
+    # Weekly run: sources were just updated, the full scan has never run.
+    ran.clear()
+    v.refresh_due_feeds()
+    assert ran == ["virus-scan"]
+    # Nothing due now.
+    ran.clear()
     assert v.refresh_due_feeds()["message"] == "Everything is up to date."
-    res = v.refresh_due_feeds(force=True)                                 # the button ignores "due"
-    assert res["message"] == ("Refreshed the Arch vulnerability database and scanned Downloads. "
-                              "Nothing on this machine needs attention.")
+    assert ran == []
+    # Full scan button: everything.
+    v.refresh_due_feeds(full=True)
+    assert ran == ["arch-audit", "virus-scan"]
 
 
-def test_force_refresh_with_nothing_installed_says_how_to_start(v):
-    res = v.refresh_due_feeds(force=True)
-    assert res["ok"] and "Install the tools" in res["message"]
+def test_report_says_when_something_is_due(v):
+    assert v.audit(peek=True)["feedsDue"] is True                         # the first full scan
+    v.refresh_due_feeds()
+    assert v.audit(peek=True)["feedsDue"] is False
+    v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
+    assert v.audit(peek=True)["feedsDue"] is True
+
+
+def test_countdowns_to_the_next_update_and_full_scan(v):
+    from datetime import date, timedelta
+    week = (date.today() + timedelta(days=v.FEED_DAYS)).isoformat()
+    assert v.next_update() == ""                                          # no sources set up
+    assert v.next_full_scan() == date.today().isoformat()                 # never ran: due now
+    v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
+    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
+    v.refresh_due_feeds(sources_only=True)
+    assert v.next_update() == week and v.next_full_scan() == date.today().isoformat()
+    v.refresh_due_feeds(full=True)
+    assert v.next_full_scan() == week
+    report = v.audit(peek=True)
+    assert report["nextUpdate"] == week and report["nextFullScan"] == week
+
+
+def test_full_scan_with_nothing_installed_still_checks(v):
+    res = v.refresh_due_feeds(full=True)
+    assert res["ok"] and res["message"].startswith("Checked every setting.")
+
+
+def test_full_scan_message_separates_refreshing_from_findings(v):
+    """Refreshing a database must never read as finding something."""
+    v.TRUSTED |= {v.ROOT + "/usr/bin/arch-audit"}
+    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (1, ARCH_AUDIT_JSON)
+    clamscan_ok(v, os.path.join(v.HOME, "x.exe") + ": Win.Test.EICAR_HDB-1 FOUND\n", 1)
+    msg = v.refresh_due_feeds(full=True)["message"]
+    assert msg.startswith("Refreshed the Arch vulnerability database and scanned your home folder.")
+    assert "On this machine: updating would fix 2 known vulnerabilities; 1 infected file in your home folder." in msg
+    assert v.run_fix("arch-audit-refresh")["message"] == (
+        "Vulnerability database refreshed. Updating would fix 2 known vulnerabilities on this machine.")
 
 
 def test_feeds_updated_is_oldest_completed_source(v):
@@ -1379,77 +1458,42 @@ def test_cli_refresh_feeds_arguments():
 
 
 # --------------------------------------------------------------------------
-# Source dates and the last full update, shown on the Overview
+# When each scan last ran and each source last updated, shown on the Overview
 
-def test_source_status_lists_only_what_is_set_up(v):
-    assert [s["id"] for s in v.source_status()] == ["password-check"]       # always offered: run a Full scan
+def test_last_run_list_scans_then_updates_with_times(v):
+    assert [s["id"] for s in v.source_status()] == ["password-check"]       # always offered
     v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan", v.ROOT + "/usr/bin/arch-audit"}
-    os.makedirs(os.path.join(v.HOME, "Downloads"))
-    got = {s["id"]: s for s in v.source_status()}
-    assert set(got) == {"signatures", "virus-scan", "arch-audit", "password-check"}
-    assert got["signatures"]["state"] == "never" and got["arch-audit"]["state"] == "never"
-    sysfile(v, "/var/lib/clamav/daily.cld", "")
+    got = [(s["id"], s["label"], s["state"]) for s in v.source_status()]
+    assert got == [("virus-scan", "Virus scan (home folder)", "never"),
+                   ("password-check", "Password check (Full scan button only)", "never"),
+                   ("signatures", "ClamAV virus signatures", "never"),
+                   ("arch-audit", "Arch vulnerability database", "never")]
     v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
     v.run_fix("arch-audit-refresh")
-    got = {s["id"]: s for s in v.source_status()}
-    assert got["signatures"]["state"] == "ok" and got["arch-audit"]["state"] == "ok"
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", got["arch-audit"]["date"])
+    src = {s["id"]: s for s in v.source_status()}["arch-audit"]
+    assert src["state"] == "ok" and re.fullmatch(r"\d{2}:\d{2}", src["time"])
 
 
-def test_source_status_failed_and_stale(v):
+def test_source_failed_and_stale(v):
     v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
-    p = Path(v.HOME, ".local/state/omarchy-vigil/arch-audit.json")
-    p.parent.mkdir(parents=True)
-    p.write_text(json.dumps({"at": "2026-01-01", "attempted": "2026-01-05", "packages": []}))
-    s = v.source_status()[0]
+    d = Path(v.HOME, ".local/state/omarchy-vigil")
+    d.mkdir(parents=True, mode=0o700)
+    put(d / "arch-audit.json", json.dumps({"at": "2026-01-01", "time": "09:00", "attempted": "2026-01-05"}), 0o600)
+    s = {x["id"]: x for x in v.source_status()}["arch-audit"]
     assert s["state"] == "failed" and s["date"] == "2026-01-01" and s["tried"] == "2026-01-05"
-    p.write_text(json.dumps({"at": "2020-01-01", "attempted": "2020-01-01", "packages": []}))
-    assert v.source_status()[0]["state"] == "stale"
-    sysfile(v, "/var/lib/clamav/daily.cld", "")
-    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
-    f = v.ROOT + "/var/lib/clamav/daily.cld"
-    os.utime(f, (os.path.getmtime(f) - 20 * 86400,) * 2)
-    assert {s["id"]: s for s in v.source_status()}["signatures"]["state"] == "stale"
+    put(d / "arch-audit.json", json.dumps({"at": "2026-01-01", "time": "09:00", "attempted": "2026-01-01"}), 0o600)
+    assert {x["id"]: x for x in v.source_status()}["arch-audit"]["state"] == "stale"
 
 
-def test_last_run_recorded(v):
+def test_last_run_recorded_for_source_updates(v):
     assert v.last_run() == {"at": "", "ok": False}
-    v.refresh_due_feeds(force=True)                       # nothing set up: nothing ran, nothing recorded
-    assert v.last_run()["at"] == ""
     v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
-    v.refresh_due_feeds(force=True)                       # fails (fake run returns nothing)
+    v.refresh_due_feeds(sources_only=True)                                # arch-audit fails: no output
     r = v.last_run()
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", r["at"]) and r["ok"] is False
     v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
-    v.refresh_due_feeds(force=True)
+    v.refresh_due_feeds(sources_only=True)
     assert v.last_run()["ok"] is True
-    report = v.audit(peek=True)
-    assert report["lastRun"]["ok"] is True
-    assert [s["id"] for s in report["sources"]] == ["arch-audit", "password-check"]
-
-
-def test_update_message_separates_refreshing_from_findings(v):
-    """Refreshing a database must never read as finding something."""
-    v.TRUSTED |= {v.ROOT + "/usr/bin/arch-audit", v.ROOT + "/usr/bin/clamscan"}
-    os.makedirs(os.path.join(v.HOME, "Downloads"))
-    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (1, ARCH_AUDIT_JSON)
-    v.COMMANDS[scan_argv(v)] = (1, os.path.join(v.HOME, "Downloads/x.exe") + ": Win.Test.EICAR_HDB-1 FOUND\n")
-    msg = v.refresh_due_feeds(force=True)["message"]
-    assert msg.startswith("Refreshed the Arch vulnerability database and scanned Downloads.")
-    assert "On this machine: updating would fix 2 known vulnerabilities; 1 infected file in Downloads." in msg
-    assert v.run_fix("arch-audit-refresh")["message"] == (
-        "Vulnerability database refreshed. Updating would fix 2 known vulnerabilities on this machine.")
-    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
-    assert v.run_fix("arch-audit-refresh")["message"] == (
-        "Vulnerability database refreshed. No updates are waiting that fix a known vulnerability on this machine.")
-
-
-def test_source_labels_name_the_source_not_a_finding(v):
-    v.TRUSTED |= {v.ROOT + "/usr/bin/arch-audit", v.ROOT + "/usr/bin/clamscan"}
-    os.makedirs(os.path.join(v.HOME, "Downloads"))
-    labels = [s["label"] for s in v.source_status()]
-    assert labels == ["ClamAV virus signatures", "Virus scan", "Arch vulnerability database",
-                      "Full scan (password check)"]
 
 
 def test_warnings_cost_less_than_failures(v):
@@ -1523,24 +1567,6 @@ def test_old_services_list_matches_the_switch_off_script(v):
     assert tuple(re.findall(r'"([a-z.-]+)"', m.group(1))) == v.OLD_SERVICES
 
 
-def test_password_check_is_a_source_on_the_overview(v):
-    assert [s for s in v.source_status() if s["id"] == "password-check"][0]["state"] == "never"
-    put(Path(v.HOME, ".local/state/omarchy-vigil/no-password.txt"), "", 0o600)
-    src = [s for s in v.source_status() if s["id"] == "password-check"][0]
-    assert src["state"] == "ok" and src["label"] == "Full scan (password check)"
-
-
-def test_update_sources_skips_the_virus_scan(v, monkeypatch):
-    ran = []
-    monkeypatch.setattr(v, "FEED_REFRESH", {n: (lambda n=n: ran.append(n)) for n in ("arch-audit", "virus-scan")})
-    monkeypatch.setattr(v, "feed_available", lambda n: True)
-    v.refresh_due_feeds(force=True, sources_only=True)
-    assert ran == ["arch-audit"]
-    ran.clear()
-    v.refresh_due_feeds(force=True)
-    assert ran == ["arch-audit", "virus-scan"]
-
-
 def test_restart_needed(v, monkeypatch):
     monkeypatch.setattr(v, "_running_kernel", lambda: "6.18.44-arch1-1")
     assert v.check_restart()["status"] == "na"
@@ -1578,16 +1604,6 @@ def test_firewire_only_matters_with_a_port(v):
 # --------------------------------------------------------------------------
 # Full scan: the whole home folder, Bumblebee, and the next automatic update
 
-def test_full_scan_covers_the_home_folder(v):
-    v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan"}
-    os.makedirs(os.path.join(v.HOME, "Downloads"))
-    v.COMMANDS[scan_argv(v, True)] = (1, os.path.join(v.HOME, "Documents/x.exe") + ": Win.Test.EICAR_HDB-1 FOUND\n")
-    res = v.refresh_due_feeds(force=True, full=True)
-    assert res["message"].startswith("Scanned your home folder. On this machine: 1 infected file in your home folder.")
-    c = v.check_virus_scan()
-    assert c["status"] == "fail" and c["summary"].startswith("1 infected file in your home folder")
-
-
 def bumblebee_install(v, mode=0o755):
     base = Path(v.HOME, ".config/omarchy/plugins", v.BUMBLEBEE_ID)
     script = put(base / "bin" / "scan_bumblebee.py", "print('{}')\n", mode)
@@ -1598,9 +1614,9 @@ def bumblebee_install(v, mode=0o755):
 def test_full_scan_asks_bumblebee_to_rescan(v):
     script = bumblebee_install(v)
     v.COMMANDS[("/usr/bin/python3", script, "--force")] = (0, "{}")
-    res = v.refresh_due_feeds(force=True, full=True)
+    res = v.refresh_due_feeds(full=True)
     assert res["message"].startswith("Had Bumblebee rescan your packages.")
-    assert "Bumblebee" not in v.refresh_due_feeds(force=True, sources_only=True)["message"]
+    assert "Bumblebee" not in v.refresh_due_feeds(sources_only=True)["message"]
 
 
 def test_bumblebee_scanner_must_be_safe_to_run(v, tmp_path):
@@ -1613,12 +1629,26 @@ def test_bumblebee_scanner_must_be_safe_to_run(v, tmp_path):
     assert v.bumblebee_scanner() == ""
 
 
-def test_next_update_counts_down_from_the_last_refresh(v):
-    from datetime import date, timedelta
-    assert v.next_update() == ""                             # nothing set up
-    v.TRUSTED |= {v.ROOT + "/usr/bin/arch-audit"}
-    assert v.next_update() == date.today().isoformat()       # never refreshed: due now
-    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
-    v.refresh_due_feeds(force=True, sources_only=True)
-    assert v.next_update() == (date.today() + timedelta(days=v.FEED_DAYS)).isoformat()
-    assert v.audit(peek=True)["nextUpdate"] == v.next_update()
+
+
+def test_password_check_uses_omarchys_password_dialog(v):
+    sysfile(v, "/etc/passwd", PASSWD + "ghost:x:1001:1001::/home/g:/bin/sh\n")
+    v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/awk"}
+    assert v.NO_PASSWORD_ARGV == ["/usr/bin/pkexec", "/usr/bin/awk", "-F:", '$2 == "" { print $1 }', "/etc/shadow"]
+    v.COMMANDS[tuple(v.NO_PASSWORD_ARGV)] = (0, "ghost\n../evil\n")
+    res = v.refresh_due_feeds(full=True)
+    assert res["message"].startswith("Checked for accounts without a password.")
+    assert v.no_password_scan()[1] == ["ghost"]
+    c = v.check_accounts()
+    assert c["status"] == "fail" and "No password: ghost" in c["detail"]
+    v.COMMANDS[tuple(v.NO_PASSWORD_ARGV)] = (126, "")                     # dialog cancelled
+    res = v.refresh_due_feeds(full=True)
+    assert "The password check was skipped" in res["message"] and "tries again" not in res["message"]
+    assert v.no_password_scan()[1] == ["ghost"]                           # last result kept
+
+
+def test_weekly_run_never_asks_for_a_password(v):
+    v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/awk"}
+    v.COMMANDS[tuple(v.NO_PASSWORD_ARGV)] = (0, "")
+    v.refresh_due_feeds()
+    assert v.no_password_scan() == ("", None)

@@ -386,9 +386,7 @@ test("clean all and the Lynis copy are fixed scripts with absolute paths", () =>
   const sys = M.terminalScript("clean-system", TOOLS)
   assert.match(sys, /sudo \/usr\/bin\/paccache -rk2/)
   assert.match(sys, /sudo \/usr\/bin\/journalctl --vacuum-time=2weeks/)
-  const pw = M.terminalScript("password-check", TOOLS)
-  assert.match(pw, /umask 077;/)
-  assert.match(pw, /sudo \/usr\/bin\/awk -F: '\$2 == "" \{ print \$1 \}' \/etc\/shadow > "\$d\/no-password\.txt\.new"/)
+  assert.equal(M.terminalAction("password-check"), null)        // now Omarchy's password dialog, not a terminal
   assert.match(M.terminalScript("old-services-off", TOOLS), /sudo \/usr\/bin\/systemctl disable --now "\$u"/)
   assert.match(M.terminalScript("restart", TOOLS), /\/usr\/bin\/systemctl reboot \)$/)
   assert.ok(M.isHelperAction("clean-user"))
@@ -416,20 +414,11 @@ test("how to fix comes from the helper, or from what the fix button does", () =>
     check({ id: "d", fix: { kind: "none", action: "", label: "" } })
   ] }))
   assert.equal(M.howTo(r.checks[0]), "Do this.")
-  assert.match(M.howTo(r.checks[1]), /^Press Turn it on: Runs: sudo ufw enable .* It opens a terminal and asks before changing anything\.$/)
+  assert.match(M.howTo(r.checks[1]), /^Press Turn it on: Blocks other computers .* It shows what it will do and asks before changing anything\.$/)
+  assert.ok(!M.howTo(r.checks[1]).includes("Technical:"))
   assert.equal(M.howTo(r.checks[2]), "")
   assert.equal(M.howTo(r.checks[3]), "")
   assert.equal(parse(report({ checks: [check({ howto: 5 })] })), null)
-})
-
-test("full scan card says what runs and what needs a password", () => {
-  const card = M.confirmation("full-scan", "all", parse(report()))
-  assert.equal(card.title, "Full scan")
-  assert.ok(card.lines.some(l => l.includes("sudo asks once")))
-  const noTerm = M.confirmation("full-scan", "all", parse(report({ tools: {} })))
-  assert.ok(!noTerm.lines.some(l => l.includes("sudo asks")))
-  assert.ok(noTerm.lines.some(l => l.includes("the rest still runs")))
-  assert.equal(M.confirmation("full-scan", "all", null), null)
 })
 
 test("pillar rows count what each pillar shows", () => {
@@ -438,16 +427,56 @@ test("pillar rows count what each pillar shows", () => {
   assert.equal(M.pillarCounts(0, 0, 1), "1 note")
 })
 
-test("update line: last update and a countdown to the next automatic one", () => {
+
+test("full scan card: every step, and the one that needs a password", () => {
+  const card = M.confirmation("full-scan", "all", parse(report()))
+  assert.equal(card.title, "Full scan")
+  assert.ok(card.lines.some(l => l.includes("Omarchy asks for your password for this one step")))
+  assert.ok(card.lines.some(l => l.includes("notification")))
+  assert.equal(M.confirmation("full-scan", "all", null), null)
+})
+
+test("every terminal says what it does, plainly, then the technical part", () => {
+  for (const [id, a] of Object.entries(M.TERMINAL_ACTIONS)) {
+    assert.ok(a.what.length >= 2, id)
+    assert.ok(!a.what[0].startsWith("Technical:") && !a.what[0].startsWith("Runs:"), id)
+    assert.ok(a.what[a.what.length - 1].startsWith("Technical: "), id)
+    const script = M.terminalScript(id, TOOLS)
+    if (script) assert.match(script, /'(You will be asked for your password\.|No password needed\.)'/, id)
+  }
+})
+
+test("schedule lines: countdowns to the next update and the next full scan", () => {
   const now = new Date(2026, 9, 12, 10, 0)
-  const r = (at, ok, next) => ({ lastRun: { at, ok }, nextUpdate: next })
-  assert.equal(M.updateLine(r("2026-10-12 09:52", true, "2026-10-19"), true, now),
-    "Updated today at 09:52 · next automatic update in 7 days.")
-  assert.equal(M.updateLine(r("2026-10-11 09:52", true, "2026-10-13"), true, now),
-    "Updated yesterday at 09:52 · next automatic update tomorrow.")
-  assert.match(M.updateLine(r("2026-10-12 09:52", false, "2026-10-13"), true, now), /but some sources failed/)
-  assert.equal(M.updateLine(r("", false, ""), true, now), "Not updated yet.")
-  assert.match(M.updateLine(r("2026-10-12 09:52", true, "2026-10-19"), false, now), /Automatic updates are off\.$/)
-  assert.equal(parse(report({ nextUpdate: "2026-10-19" })).nextUpdate, "2026-10-19")
-  assert.equal(parse(report({ nextUpdate: "soon" })), null)
+  const r = { lastRun: { at: "2026-10-12 09:52", ok: true }, nextUpdate: "2026-10-19", nextFullScan: "2026-10-13" }
+  assert.deepEqual(M.scheduleLines(r, true, now), [
+    "Next automatic update: in 7 days",
+    "Next automatic full scan: tomorrow (everything except the password check)"])
+  assert.deepEqual(M.scheduleLines(r, false, now), ["Automatic updates and scans are off (Vigil settings)."])
+  assert.match(M.scheduleLines(Object.assign({}, r, { lastRun: { at: "2026-10-12 09:52", ok: false } }), true, now)[2],
+    /could not reach every source/)
+  assert.equal(M.countdown("2026-10-12", now), "today")
+  assert.equal(parse(report({ nextFullScan: "2026-10-19" })).nextFullScan, "2026-10-19")
+  assert.equal(parse(report({ nextFullScan: "<b>" })), null)
+})
+
+test("progress lines are validated and worded", () => {
+  const p = M.parseProgress(JSON.stringify({ progress: { step: 3, of: 4, doing: "Scanning your home folder for viruses", done: 500, total: 1000 } }))
+  assert.equal(p.fraction, (2 + 0.5) / 4)
+  assert.match(M.progressText(p), /^Step 3 of 4: Scanning your home folder for viruses \(500 of 1,?000 files\)$/)
+  for (const bad of ['{"ok":true}', "nope", JSON.stringify({ progress: { step: 5, of: 4, doing: "x", done: 0, total: 0 } }),
+                     JSON.stringify({ progress: { step: 1, of: 1, doing: 7, done: 0, total: 0 } })])
+    assert.equal(M.parseProgress(bad), null, bad)
+})
+
+test("last run: scans first, then updates, with times", () => {
+  const r = parse(report({ generatedAt: "2026-10-12T10:02:00+0000", sources: [
+    { id: "signatures", label: "ClamAV virus signatures", date: "2026-10-12", time: "08:00", state: "ok", tried: "" },
+    { id: "virus-scan", label: "Virus scan (home folder)", date: "2026-10-11", time: "22:10", state: "ok", tried: "" },
+    { id: "password-check", label: "Password check (Full scan button only)", date: "", time: "", state: "never", tried: "" }] }))
+  const rows = M.lastRunRows(r, new Date(2026, 9, 12, 10, 5))
+  assert.deepEqual(rows.map(x => [x.label, x.value]), [
+    ["Scans", ""], ["Settings checks (every tab)", "ran today at 10:02"],
+    ["Virus scan (home folder)", "ran yesterday at 22:10"], ["Password check (Full scan button only)", "not run yet"],
+    ["Updates", ""], ["ClamAV virus signatures", "updated today at 08:00"]])
 })

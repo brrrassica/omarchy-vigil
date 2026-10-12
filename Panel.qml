@@ -40,6 +40,8 @@ Panel {
   readonly property bool autoUpdate: setting("autoUpdate", true) === true
   property string feedBuffer: ""
   property bool feedOverflow: false
+  property string feedResult: ""           // the last non-progress line: the result
+  property var scanProgress: null          // the latest progress line, while a run is going
   property bool feedForced: false
   property bool feedFull: false
   // One bar per monitor means one copy of this widget per monitor. Only the
@@ -121,17 +123,20 @@ Panel {
   function refreshFeeds(mode) {
     if (feedProc.running) return
     feedBuffer = ""
+    feedResult = ""
+    scanProgress = null
     feedOverflow = false
-    feedForced = mode === "sources" || mode === "full"
+    feedForced = mode === "sources" || mode === "full" || mode === "scan"
     feedFull = mode === "full"
     feedProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, "refresh-feeds"]
-      .concat(mode === "sources" ? ["--sources"] : (mode === "full" ? ["--full"] : []))
+      .concat(mode === "sources" ? ["--sources"] : (mode === "full" ? ["--full"] : (mode === "scan" ? ["--scan"] : [])))
     feedProc.running = true
-    // A Full scan covers the whole home folder, which can take a long time.
-    feedDeadline.interval = feedFull ? 4 * 3600000 : 1200000
+    // Anything but Update sources may scan the whole home folder, which can take a long time.
+    feedDeadline.interval = mode === "sources" ? 1200000 : 4 * 3600000
     feedDeadline.restart()
     if (mode === "sources") setStatus("Updating sources\u2026", false)
-    else if (mode === "full") setStatus("Full scan running in the background. You get a notification when it is done.", false)
+    else if (mode === "full") setStatus("Full scan started. You can close this panel; you get a notification when it is done.", false)
+    else if (mode === "scan") setStatus("Virus scan started. It runs in the background.", false)
   }
 
   // Full scan: the background part (sources and the virus scan) plus the
@@ -156,6 +161,12 @@ Panel {
   function requestFix(check) {
     if (!check || !report || busy) return
     if (!Model.canRun(check.fix, report.tools, report.apps)) return
+    if (check.fix.kind === "helper" && check.fix.action === "virus-scan-now") {
+      // A scan of the whole home folder can take a long time: run it like the
+      // weekly scan, with progress, rather than as a quick helper action.
+      refreshFeeds("scan")
+      return
+    }
     if (check.fix.kind === "app" || check.fix.kind === "docs") {
       // Opening an app you installed or a guide in the browser changes
       // nothing, so it needs no confirmation.
@@ -186,9 +197,8 @@ Panel {
     cancelPending()
     if (!report) return
     if (kind === "full-scan") {
-      var scanLauncher = Model.launcherPath(report.tools)
-      var scanScript = Model.terminalScript("password-check", report.tools)
-      if (scanLauncher !== "" && scanScript !== "") Quickshell.execDetached([scanLauncher, scanScript])
+      // No terminal: the password step uses Omarchy's own password dialog,
+      // so the panel stays open and shows the progress.
       refreshFeeds("full")
       return
     }
@@ -373,21 +383,36 @@ Panel {
       splitMarker: ""
       onRead: function(data) {
         if (root.feedOverflow) return
-        if (root.feedBuffer.length + data.length > root.maxFixChars) {
+        // Complete lines are handled as they arrive, so only a partial line is
+        // ever held; the cap is on that, and on the result line.
+        var text = root.feedBuffer + data
+        var cut = text.lastIndexOf("\n")
+        root.feedBuffer = cut === -1 ? text : text.substring(cut + 1)
+        if (root.feedBuffer.length > root.maxFixChars) {
           root.feedOverflow = true
           root.feedBuffer = ""
           feedProc.signal(15)
           feedKill.restart()
           return
         }
-        root.feedBuffer += data
+        if (cut === -1) return
+        var lines = text.substring(0, cut).split("\n")
+        for (var i = 0; i < lines.length; i++) {
+          if (lines[i] === "") continue
+          var p = Model.parseProgress(lines[i])
+          if (p) root.scanProgress = p
+          else if (lines[i].length <= root.maxFixChars) root.feedResult = lines[i]
+        }
       }
     }
     onExited: function(exitCode, exitStatus) {
       feedKill.stop()
       feedDeadline.stop()
-      var parsed = (!root.feedOverflow && exitCode === 0) ? Model.parseFixResult(root.feedBuffer.trim()) : null
+      var parsed = (!root.feedOverflow && exitCode === 0)
+        ? Model.parseFixResult((root.feedResult !== "" ? root.feedResult : root.feedBuffer).trim()) : null
       root.feedBuffer = ""
+      root.feedResult = ""
+      root.scanProgress = null
       // Only the button reports back; the weekly background run stays quiet.
       if (root.feedForced) {
         if (!parsed) root.setStatus("The update did not finish.", true)
@@ -682,14 +707,45 @@ Panel {
                 onClicked: root.refreshFeeds("sources")
               }
             }
-            Text {
-              textFormat: Text.PlainText
+            // While an update or scan runs: what it is doing, and how far along.
+            Column {
+              visible: feedProc.running
               width: parent.width
-              text: Model.updateLine(root.report, root.autoUpdate, new Date())
-              color: root.report && root.report.lastRun.at !== "" && !root.report.lastRun.ok ? root.urgent : root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
+              spacing: Style.space(4)
+              Rectangle {
+                width: parent.width
+                height: Style.space(6)
+                radius: height / 2
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
+                Rectangle {
+                  width: parent.width * (root.scanProgress ? Math.max(0.02, root.scanProgress.fraction) : 0.02)
+                  height: parent.height
+                  radius: parent.radius
+                  color: root.foreground
+                }
+              }
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                text: root.scanProgress ? Model.progressText(root.scanProgress) : "Starting\u2026"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+            Repeater {
+              model: feedProc.running ? [] : Model.scheduleLines(root.report, root.autoUpdate, new Date())
+              delegate: Text {
+                required property var modelData
+                textFormat: Text.PlainText
+                width: column.width
+                text: String(modelData)
+                color: String(modelData).indexOf("could not") !== -1 ? root.urgent : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
             }
 
             SectionHeading { visible: root.report !== null; text: "PILLARS" }
@@ -699,6 +755,42 @@ Panel {
                 required property var modelData
                 width: column.width
                 category: String(modelData)
+              }
+            }
+
+            // When every check and scan last ran, and when each source last updated.
+            SectionHeading { visible: root.report !== null; text: "LAST RUN" }
+            Repeater {
+              model: root.report ? Model.lastRunRows(root.report, new Date()) : []
+              delegate: Item {
+                required property var modelData
+                width: column.width
+                implicitHeight: Math.max(runLabel.implicitHeight, runValue.implicitHeight)
+                Text {
+                  id: runLabel
+                  textFormat: Text.PlainText
+                  anchors.left: parent.left
+                  width: parent.width * 0.5
+                  text: modelData.label
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: modelData.heading === true
+                  wrapMode: Text.WordWrap
+                }
+                Text {
+                  id: runValue
+                  textFormat: Text.PlainText
+                  anchors.right: parent.right
+                  width: parent.width * 0.5
+                  horizontalAlignment: Text.AlignRight
+                  text: modelData.value
+                  color: modelData.problem ? root.urgent : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: modelData.problem === true
+                  wrapMode: Text.WordWrap
+                }
               }
             }
           }
