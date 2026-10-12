@@ -1,0 +1,116 @@
+"""Mechanical checks for the Omarchy plugin marketplace review rules.
+
+These encode the findings reviewers raise most often, so a regression fails
+here instead of in a review round. Run with the rest: python3 -m pytest tests
+"""
+import json
+import re
+import subprocess
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+MANIFEST = json.loads((REPO / "manifest.json").read_text())
+PLUGIN_ID = MANIFEST["id"]
+
+
+def shipped_files():
+    """Files `omarchy plugin add` would install (the git tree), minus .git."""
+    out = subprocess.run(["git", "-C", str(REPO), "ls-files", "--cached", "--others", "--exclude-standard"],
+                         capture_output=True, text=True, check=True).stdout.split()
+    return [REPO / p for p in out if (REPO / p).is_file()]
+
+
+def qml_files():
+    return sorted(REPO.glob("*.qml")) + sorted(REPO.glob("**/*.qml"))
+
+
+def test_every_text_sink_is_plain_text():
+    missing = []
+    for f in set(qml_files()):
+        src = f.read_text()
+        for m in re.finditer(r"\b(Text|Label|TextEdit|TextInput|StyledText)\s*\{", src):
+            i, depth = m.end(), 1
+            while i < len(src) and depth:
+                depth += (src[i] == "{") - (src[i] == "}")
+                i += 1
+            if "textFormat: Text.PlainText" not in src[m.end():i]:
+                missing.append("%s:%d" % (f.name, src[:m.start()].count("\n") + 1))
+    assert missing == []
+
+
+def test_no_unbounded_collectors_or_shell_strings_in_qml():
+    for f in set(qml_files()):
+        src = f.read_text()
+        assert "StdioCollector" not in src, f
+        assert "FileView" not in src, f
+        assert not re.search(r'"(ba)?sh",\s*"-l?c"', src), f
+        assert "bar.run(" not in src and "Util.execDetached" not in src, f
+        for m in re.finditer(r"execDetached\(", src):
+            assert src[m.end()] == "[", "%s: execDetached must take an argv array" % f.name
+
+
+def test_process_commands_are_absolute():
+    src = (REPO / "Panel.qml").read_text()
+    for m in re.finditer(r"\.command = \[\s*\"([^\"]+)\"", src):
+        assert m.group(1).startswith("/usr/bin/"), m.group(1)
+    for m in re.finditer(r"execDetached\(\[\s*\"([^\"]+)\"", src):
+        assert m.group(1).startswith("/usr/bin/"), m.group(1)
+    assert src.count("clearEnvironment: true") == src.count("Process {")
+
+
+def test_ids_agree():
+    src = (REPO / "Panel.qml").read_text()
+    assert 'moduleName: "%s"' % PLUGIN_ID in src
+    assert 'ipcTarget: "%s"' % PLUGIN_ID in src
+    for kind, entry in MANIFEST["entryPoints"].items():
+        assert (REPO / entry).is_file(), entry
+    assert MANIFEST["schemaVersion"] == 1
+    assert not PLUGIN_ID.startswith("omarchy.")
+
+
+def test_versions_agree():
+    helper = (REPO / "bin" / "vigil").read_text()
+    assert 'VERSION = "%s"' % MANIFEST["version"] in helper
+
+
+def test_ipc_methods_take_no_parameters():
+    src = (REPO / "Panel.qml").read_text()
+    block = src[src.index("ShellIpc {"):]
+    block = block[:block.index("\n  }\n")]
+    for m in re.finditer(r"function (\w+)\(([^)]*)\)", block):
+        assert m.group(2).strip() == "", m.group(0)
+
+
+def test_tree_hygiene():
+    banned = re.compile(r"(^|/)(AGENTS\.md|CLAUDE\.md|SKILL\.md|\.claude|\.codex|\.agents|\.gemini|__pycache__)(/|$)|\.pyc$")
+    for f in shipped_files():
+        rel = str(f.relative_to(REPO))
+        assert not banned.search(rel), rel
+        assert f.stat().st_size <= 512 * 1024 or rel == "preview.png", rel
+        data = f.read_bytes()
+        if f.suffix not in (".png", ".jpg", ".webp"):
+            assert b"\x00" not in data, rel
+        assert not data.startswith(b"\x7fELF"), rel
+        if re.search(r"install|setup|uninstall", f.name, re.I):
+            assert f.suffix not in (".png", ".jpg", ".gif", ".webp"), rel
+
+
+def test_no_shared_tmp_or_shell_in_python():
+    src = (REPO / "bin" / "vigil").read_text()
+    for bad in ("shell=True", "os.system", "capture_output", "communicate(", "/tmp/", "urlopen", "import requests"):
+        assert bad not in src, bad
+    assert src.startswith("#!/usr/bin/python3 -I -S\n")
+
+
+def test_no_network_tools_invoked_by_helper():
+    src = (REPO / "bin" / "vigil").read_text()
+    for argv0 in re.findall(r'run\(\[\s*"?([^",\]]+)', src):
+        assert "curl" not in argv0 and "wget" not in argv0, argv0
+
+
+def test_readme_documents_removal_and_files():
+    readme = (REPO / "README.md").read_text()
+    assert "omarchy plugin remove %s" % PLUGIN_ID in readme
+    for path in ("~/.local/state/omarchy-vigil", "90-omarchy-vigil-opt-out", "/etc/sysctl.d/90-omarchy-vigil.conf"):
+        assert path in readme, path
+    assert (REPO / "LICENSE").is_file()

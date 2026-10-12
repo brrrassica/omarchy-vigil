@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.keasbeexd.vigil",
+  "name": "Vigil",
+  "version": "0.1.0",
+  "author": "keasbeexd",
+  "license": "MIT",
+  "description": "A security suite for Omarchy: hardening checks, malware and rootkit scanners, privacy settings and cleanup in one bar panel, with plain-language explanations and fixes you approve one by one. Runs locally and sends nothing anywhere.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Vigil",
+    "description": "Security score in the bar; harden, scan, privacy and clean tabs in the panel",
+    "category": "System",
+    "aliases": [
+      "vigil",
+      "security",
+      "hardening",
+      "firewall",
+      "malware",
+      "antivirus",
+      "rootkit",
+      "privacy",
+      "cleaner"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshMinutes": 30,
+      "notifyOnNew": true
+    },
+    "schema": [
+      {
+        "key": "refreshMinutes",
+        "type": "integer",
+        "label": "Check every (minutes)",
+        "min": 5,
+        "max": 1440,
+        "step": 5,
+        "defaultValue": 30,
+        "description": "How often Vigil re-reads your settings in the background. Checks are local, read-only and take well under a second."
+      },
+      {
+        "key": "notifyOnNew",
+        "type": "boolean",
+        "label": "Notify about new findings",
+        "defaultValue": true,
+        "description": "Send one desktop notification when a check that was fine starts failing. The notification only says how many; details stay in the panel."
+      }
+    ]
+  }
+}

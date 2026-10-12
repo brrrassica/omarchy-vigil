@@ -1,0 +1,1827 @@
+#!/usr/bin/python3 -I -S
+"""Vigil helper: the unprivileged half of the Vigil security suite.
+
+The bar widget runs this file as an argv array,
+
+    /usr/bin/python3 -I -S <plugin>/bin/vigil audit
+    /usr/bin/python3 -I -S <plugin>/bin/vigil fix <action-id>
+
+with a cleared environment, and reads exactly one JSON object from stdout.
+
+Rules this file keeps (they follow the marketplace review guidance):
+
+- It never asks for root. Everything it reads is readable by the logged-in
+  account; anything that needs root is done by Omarchy's own commands or by a
+  constant command the user watches run in a terminal (see Panel.qml).
+- Every child process is an absolute path, runs in its own session with a
+  minimal environment, has a hard deadline, and has its output capped at the
+  producer (cap + 1 bytes, overflow is an error, not a truncation).
+- Files are opened once, through a descriptor that is fstat-validated
+  (regular file, size cap) before reading; writes go to an exclusive random
+  temporary that is 0600 from creation, then fsync + rename + directory fsync.
+  Directories that Vigil writes into are walked one component at a time with
+  O_NOFOLLOW from the home directory.
+- Output strings are control-character-free and length-capped; counts are
+  capped. The QML side applies the same limits again.
+
+Standard library only. No network access of any kind.
+"""
+import errno
+import hashlib
+import json
+import os
+import pwd
+import re
+import secrets
+import selectors
+import signal
+import stat
+import subprocess
+import sys
+import time
+from base64 import b64decode
+
+VERSION = "0.1.0"
+SCHEMA = 1
+
+# ---------------------------------------------------------------------------
+# Where things live. Constants, not settings: tests replace them on the
+# imported module, which is the only way they change.
+
+ROOT = ""                       # filesystem prefix for /etc, /proc, /sys, /var
+try:
+    HOME = pwd.getpwuid(os.geteuid()).pw_dir
+except KeyError:
+    HOME = "/nonexistent"
+USER = ""
+try:
+    USER = pwd.getpwuid(os.geteuid()).pw_name
+except KeyError:
+    pass
+
+STATE_DIR = (".local", "state", "omarchy-vigil")
+STATE_NAME = "state.json"
+OPT_OUT_DIR = (".config", "uwsm", "env.d")
+OPT_OUT_NAME = "90-omarchy-vigil-opt-out"
+
+# Directories an Omarchy command may live in. Only root-owned, non-writable
+# files here are ever reported as usable.
+TRUSTED_BIN_DIRS = ("/usr/bin", "/usr/share/omarchy/bin")
+
+SAFE_PATH = "/usr/bin:/bin"
+
+# Bounds.
+FILE_MAX = 1024 * 1024           # any config or log read
+SMALL_FILE_MAX = 64 * 1024
+PACMAN_LOG_TAIL = 2 * 1024 * 1024
+CMD_MAX = 256 * 1024
+CMD_TIMEOUT = 8
+STR_MAX = 240
+DETAIL_MAX = 1200
+LIST_MAX = 40
+WALK_MAX_ENTRIES = 200000
+WALK_MAX_SECONDS = 3.0
+HISTORY_MAX = 30
+SEEN_MAX = 200
+
+O_READ = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC
+O_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+class Refused(Exception):
+    """A file or directory failed validation; treated as unreadable."""
+
+
+# ---------------------------------------------------------------------------
+# Text hygiene
+
+_CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f‎‏‪-‮⁦-⁩]")
+
+
+def clean(value, limit=STR_MAX):
+    """Strip control and bidi characters, collapse tabs, cap the length."""
+    s = str(value if value is not None else "")
+    s = _CONTROL.sub(" ", s.replace("\t", " "))
+    if len(s) > limit:
+        s = s[: limit - 1] + "…"
+    return s.strip()
+
+
+def clean_block(lines, limit=DETAIL_MAX):
+    out = "\n".join(clean(x, STR_MAX) for x in lines[:LIST_MAX])
+    if len(lines) > LIST_MAX:
+        out += "\n… and %d more" % (len(lines) - LIST_MAX)
+    return out[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Reading files
+
+def sys_path(path):
+    """Map an absolute system path under the (test) ROOT prefix."""
+    return ROOT + path
+
+
+def home_path(*parts):
+    return os.path.join(HOME, *parts)
+
+
+def _read_fd(fd, limit):
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        raise Refused("not a regular file")
+    os.set_blocking(fd, True)
+    chunks = []
+    total = 0
+    while total <= limit:
+        chunk = os.read(fd, min(65536, limit + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    if total > limit:
+        raise Refused("file is larger than %d bytes" % limit)
+    return b"".join(chunks)
+
+
+def read_file(path, limit=FILE_MAX, follow=False):
+    """Return the bytes of a file, None if it does not exist.
+
+    One open, then fstat and a bounded read on that same descriptor.
+    O_NONBLOCK keeps a planted FIFO from hanging the open. By default the
+    final component must not be a symlink. `follow=True` is used only for
+    audit reads of shell startup files, where refusing a symlink would let
+    a dotfile hide from the persistence scan; those reads still refuse
+    anything that is not a regular file and still enforce the size cap.
+    Raises Refused for anything else that cannot be read safely.
+    """
+    flags = O_READ if follow else (O_READ | os.O_NOFOLLOW)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except NotADirectoryError:
+        return None
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise Refused("is a symbolic link")
+        raise Refused(os.strerror(e.errno or 0) or "cannot open")
+    try:
+        return _read_fd(fd, limit)
+    finally:
+        os.close(fd)
+
+
+def read_text(path, limit=FILE_MAX, follow=False):
+    data = read_file(path, limit, follow)
+    if data is None:
+        return None
+    return data.decode("utf-8", "replace")
+
+
+def read_tail(path, limit):
+    """Last `limit` bytes of a (possibly large) log file, via one descriptor."""
+    try:
+        fd = os.open(path, O_READ | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise Refused(os.strerror(e.errno or 0) or "cannot open")
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise Refused("not a regular file")
+        os.set_blocking(fd, True)
+        start = max(0, st.st_size - limit)
+        os.lseek(fd, start, os.SEEK_SET)
+        chunks, total = [], 0
+        while total < limit:
+            chunk = os.read(fd, min(65536, limit - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks).decode("utf-8", "replace")
+    finally:
+        os.close(fd)
+
+
+def list_dir(path, limit=500):
+    """Sorted names in a directory, capped before sorting. [] if absent."""
+    try:
+        fd = os.open(path, O_DIR)
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    except OSError:
+        return []
+    names = []
+    try:
+        with os.scandir(fd) as it:
+            for entry in it:
+                names.append(entry.name)
+                if len(names) >= limit:
+                    break
+    finally:
+        os.close(fd)
+    return sorted(names)
+
+
+def exists(path):
+    try:
+        os.lstat(path)
+        return True
+    except OSError:
+        return False
+
+
+def is_trusted_executable(path):
+    """Root-owned regular file, not group/world writable, in a root-owned dir."""
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o022:
+            return False
+        if not st.st_mode & 0o111:
+            return False
+        dst = os.stat(os.path.dirname(path))
+        return dst.st_uid == 0 and not dst.st_mode & 0o022
+    except OSError:
+        return False
+
+
+def find_tool(name):
+    """Absolute path of a root-owned tool in a fixed directory, or ''."""
+    for d in TRUSTED_BIN_DIRS:
+        p = sys_path(d + "/" + name)
+        if is_trusted_executable(p):
+            return d + "/" + name
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Running commands
+
+SAFE_ENV = {"PATH": SAFE_PATH, "HOME": HOME, "LC_ALL": "C", "LANG": "C"}
+
+
+def _kill_group(proc):
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except (OSError, ProcessLookupError):
+            return
+        try:
+            proc.wait(timeout=0.5)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX):
+    """Run an absolute argv; return (returncode, stdout_text) or (None, '').
+
+    Own session, scrubbed env, deadline, stdout read incrementally against a
+    byte budget, stderr discarded. Overflow and timeout both return None.
+    """
+    if not argv or not argv[0].startswith("/"):
+        return None, ""
+    try:
+        proc = subprocess.Popen(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env=dict(SAFE_ENV, HOME=HOME),
+            start_new_session=True, close_fds=True,
+        )
+    except OSError:
+        return None, ""
+    buf = bytearray()
+    deadline = time.monotonic() + timeout
+    ok = False
+    sel = selectors.DefaultSelector()
+    try:
+        sel.register(proc.stdout, selectors.EVENT_READ)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not sel.select(remaining):
+                break
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                ok = True
+                break
+            buf += chunk
+            if len(buf) > limit:
+                break
+    except OSError:
+        pass
+    finally:
+        sel.close()
+        if ok:
+            try:
+                proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                ok = False
+        if proc.poll() is None:
+            _kill_group(proc)
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
+    if not ok or len(buf) > limit:
+        return None, ""
+    return proc.returncode, buf.decode("utf-8", "replace")
+
+
+_SYSTEMCTL_MEMO = {}
+
+
+def systemctl(*args):
+    """`systemctl <args>` → first output word ('' when unknown). Memoised per audit."""
+    if args in _SYSTEMCTL_MEMO:
+        return _SYSTEMCTL_MEMO[args]
+    _SYSTEMCTL_MEMO[args] = _systemctl(*args)
+    return _SYSTEMCTL_MEMO[args]
+
+
+def _systemctl(*args):
+    tool = "/usr/bin/systemctl"
+    if not is_trusted_executable(sys_path(tool)):
+        return ""
+    rc, out = run([tool] + list(args), timeout=4, limit=4096)
+    if rc is None:
+        return ""
+    words = out.split()
+    return words[0] if words else ""
+
+
+# ---------------------------------------------------------------------------
+# Config parsing helpers
+
+def parse_kv(text, sep="="):
+    """Simple KEY=VALUE parser for shell-ish and systemd-ish files."""
+    out = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line[0] in "#;" or sep not in line:
+            continue
+        k, v = line.split(sep, 1)
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def parse_ini(text):
+    """Minimal INI: {section: {key: value}}; later keys win."""
+    data, section = {}, ""
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            data.setdefault(section, {})
+            continue
+        if "=" in line:
+            k, v = line.split("=", 1)
+            data.setdefault(section, {})[k.strip()] = v.strip()
+    return data
+
+
+def merged_ini(paths):
+    """Merge INI files in order; later files win key by key."""
+    merged = {}
+    for p in paths:
+        try:
+            text = read_text(p)
+        except Refused:
+            continue
+        for section, kv in parse_ini(text).items():
+            merged.setdefault(section, {}).update(kv)
+    return merged
+
+
+def conf_d(dirpath, suffix=".conf"):
+    return [dirpath + "/" + n for n in list_dir(dirpath) if n.endswith(suffix)]
+
+
+# ---------------------------------------------------------------------------
+# Checks
+#
+# Each check returns a dict:
+#   id        stable identifier
+#   category  harden | scan | privacy | clean
+#   title     short name
+#   status    pass | warn | fail | info | na | unknown
+#   summary   one plain-language sentence about the current state
+#   detail    optional multi-line evidence
+#   why       one or two sentences on why it matters, for people new to this
+#   fix       {"kind": "terminal"|"helper"|"none", "action": id, "label": str}
+#   weight    0 (not scored) .. 3
+
+CHECKS = []
+
+
+def check(fn):
+    CHECKS.append(fn)
+    return fn
+
+
+def result(id, category, title, status, summary, why="", detail="", fix=None, weight=1):
+    return {
+        "id": id, "category": category, "title": title, "status": status,
+        "summary": summary, "why": why, "detail": detail,
+        "fix": fix or {"kind": "none", "action": "", "label": ""},
+        "weight": weight,
+    }
+
+
+def fix(kind, action, label):
+    return {"kind": kind, "action": action, "label": label}
+
+
+# --- Harden -----------------------------------------------------------------
+
+@check
+def check_firewall():
+    cid, cat, title = "firewall", "harden", "Firewall"
+    why = ("A firewall drops connections from other machines that you did not ask for. "
+           "On café or office Wi-Fi it is what stands between your open ports and strangers.")
+    try:
+        conf = parse_kv(read_text(sys_path("/etc/ufw/ufw.conf")) or "")
+        defaults = parse_kv(read_text(sys_path("/etc/default/ufw")) or "")
+    except Refused as e:
+        return result(cid, cat, title, "unknown", "Could not read the firewall settings: %s" % e, why, weight=3)
+    have_ufw = exists(sys_path("/usr/bin/ufw"))
+    if not have_ufw:
+        for unit in ("nftables.service", "firewalld.service"):
+            if systemctl("is-active", unit) == "active":
+                return result(cid, cat, title, "pass", "%s is running." % unit.split(".")[0], why, weight=3)
+        return result(cid, cat, title, "fail", "No firewall is installed.", why,
+                      fix=fix("terminal", "install-ufw", "Install ufw"), weight=3)
+    enabled = conf.get("ENABLED", "").lower() == "yes"
+    active = systemctl("is-active", "ufw.service") == "active"
+    policy = defaults.get("DEFAULT_INPUT_POLICY", "").upper()
+    detail = "ENABLED=%s in /etc/ufw/ufw.conf\nufw.service: %s\nDefault for incoming: %s" % (
+        conf.get("ENABLED", "?"), "active" if active else "not active", policy or "?")
+    if not enabled or not active:
+        return result(cid, cat, title, "fail", "ufw is installed but switched off.", why, detail,
+                      fix("terminal", "firewall-on", "Turn the firewall on"), weight=3)
+    if policy not in ("DROP", "REJECT"):
+        return result(cid, cat, title, "warn", "ufw is on but lets incoming connections in by default.",
+                      why, detail, fix("terminal", "firewall-deny-in", "Deny incoming by default"), weight=3)
+    return result(cid, cat, title, "pass", "ufw is on and refuses incoming connections by default.", why, detail, weight=3)
+
+
+def _sysctl(name):
+    try:
+        text = read_text(sys_path("/proc/sys/" + name.replace(".", "/")), SMALL_FILE_MAX)
+    except Refused:
+        return None
+    if text is None:
+        return None
+    return text.strip()
+
+
+KERNEL_SYSCTLS = [
+    # name, test, recommended, plain explanation
+    ("kernel.kptr_restrict", lambda v: v >= 1, 2, "hides kernel memory addresses from programs"),
+    ("kernel.dmesg_restrict", lambda v: v == 1, 1, "keeps the kernel log away from normal programs"),
+    ("kernel.yama.ptrace_scope", lambda v: v >= 1, 1, "stops programs reading each other's memory"),
+    ("kernel.unprivileged_bpf_disabled", lambda v: v >= 1, 2, "blocks a common kernel attack surface"),
+    ("fs.protected_symlinks", lambda v: v == 1, 1, "blocks symlink tricks in shared folders"),
+    ("fs.protected_hardlinks", lambda v: v == 1, 1, "blocks hardlink tricks in shared folders"),
+    ("fs.protected_fifos", lambda v: v >= 1, 2, "blocks FIFO tricks in shared folders"),
+    ("fs.protected_regular", lambda v: v >= 1, 2, "blocks file tricks in shared folders"),
+    ("fs.suid_dumpable", lambda v: v == 0, 0, "stops privileged programs leaving memory dumps"),
+]
+
+NETWORK_SYSCTLS = [
+    ("net.ipv4.conf.all.accept_redirects", lambda v: v == 0, 0, "ignores route changes sent by other machines"),
+    ("net.ipv6.conf.all.accept_redirects", lambda v: v == 0, 0, "ignores IPv6 route changes sent by other machines"),
+    ("net.ipv4.conf.all.send_redirects", lambda v: v == 0, 0, "this laptop is not a router"),
+    ("net.ipv4.conf.all.accept_source_route", lambda v: v == 0, 0, "refuses packets that pick their own route"),
+    ("net.ipv4.tcp_syncookies", lambda v: v == 1, 1, "survives connection floods"),
+    ("net.ipv4.conf.all.rp_filter", lambda v: v in (1, 2), 2, "drops packets with spoofed source addresses"),
+    ("net.ipv4.icmp_echo_ignore_broadcasts", lambda v: v == 1, 1, "ignores broadcast pings (smurf attacks)"),
+]
+
+
+def _sysctl_check(cid, title, table, why, action, weight):
+    bad, lines, unknown = [], [], 0
+    for name, test, rec, plain in table:
+        raw = _sysctl(name)
+        try:
+            val = int(raw.split()[0]) if raw else None
+        except (ValueError, IndexError):
+            val = None
+        if val is None:
+            unknown += 1
+            continue
+        ok = test(val)
+        lines.append("%s %s = %d (recommended %d): %s" % ("ok " if ok else "!! ", name, val, rec, plain))
+        if not ok:
+            bad.append(name)
+    if unknown == len(table):
+        return result(cid, "harden", title, "unknown", "Could not read the kernel settings.", why, weight=weight)
+    detail = clean_block(lines, 2000)
+    if bad:
+        return result(cid, "harden", title, "warn",
+                      "%d of %d protections are off." % (len(bad), len(table) - unknown),
+                      why, detail, fix("terminal", action, "Apply recommended settings"), weight)
+    return result(cid, "harden", title, "pass", "All %d protections are on." % (len(table) - unknown), why, detail, weight=weight)
+
+
+@check
+def check_kernel_sysctl():
+    return _sysctl_check(
+        "kernel-hardening", "Kernel self-protection", KERNEL_SYSCTLS,
+        "These kernel switches make it harder for a program that is already running on your "
+        "machine to spy on other programs or attack the kernel to become root.",
+        "sysctl-harden", 2)
+
+
+@check
+def check_network_sysctl():
+    return _sysctl_check(
+        "network-hardening", "Network stack", NETWORK_SYSCTLS,
+        "These switches make the network stack ignore tricks other machines on the same "
+        "network can use to redirect or spoof your traffic.",
+        "sysctl-harden", 1)
+
+
+def _resolved_config():
+    paths = conf_d(sys_path("/usr/lib/systemd/resolved.conf.d"))
+    paths.append(sys_path("/etc/systemd/resolved.conf"))
+    paths += conf_d(sys_path("/etc/systemd/resolved.conf.d"))
+    return merged_ini(paths).get("Resolve", {})
+
+
+@check
+def check_llmnr():
+    cid, cat, title = "llmnr", "harden", "LLMNR name lookups"
+    why = ("LLMNR lets any machine on the local network answer when your laptop looks up a name. "
+           "Attackers on shared Wi-Fi use it to pose as servers and capture login hashes.")
+    if systemctl("is-active", "systemd-resolved.service") != "active":
+        return result(cid, cat, title, "na", "systemd-resolved is not running.", why, weight=2)
+    value = _resolved_config().get("LLMNR", "yes").lower()
+    if value in ("no", "false", "0", "off"):
+        return result(cid, cat, title, "pass", "LLMNR is off.", why, weight=2)
+    return result(cid, cat, title, "warn", "LLMNR is on (LLMNR=%s)." % clean(value, 20), why,
+                  fix=fix("terminal", "llmnr-off", "Turn LLMNR off"), weight=2)
+
+
+def _sshd_effective():
+    """First-obtained-value semantics: drop-ins (Include at the top on Arch), then main."""
+    files = conf_d(sys_path("/etc/ssh/sshd_config.d")) + [sys_path("/etc/ssh/sshd_config")]
+    seen = {}
+    for p in files:
+        try:
+            text = read_text(p) or ""
+        except Refused:
+            continue
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(None, 1)
+            key = parts[0].lower()
+            if key == "match":
+                break
+            if len(parts) == 2 and key not in seen:
+                seen[key] = parts[1].strip().lower()
+    return seen
+
+
+@check
+def check_ssh_server():
+    cid, cat, title = "ssh-server", "harden", "SSH server"
+    why = ("An SSH server lets other machines log in to this one. If you do not use it, it should be off; "
+           "if you do, it should accept keys only and never a direct root login.")
+    active = systemctl("is-active", "sshd.service") == "active"
+    enabled = systemctl("is-enabled", "sshd.service") == "enabled"
+    if not active and not enabled:
+        return result(cid, cat, title, "pass", "The SSH server is off.", why, weight=2)
+    cfg = _sshd_effective()
+    root_login = cfg.get("permitrootlogin", "prohibit-password")
+    password = cfg.get("passwordauthentication", "yes")
+    kbd = cfg.get("kbdinteractiveauthentication", "yes")
+    detail = "sshd: %s, %s\nPermitRootLogin %s\nPasswordAuthentication %s\nKbdInteractiveAuthentication %s" % (
+        "running" if active else "stopped", "starts at boot" if enabled else "manual",
+        clean(root_login, 30), clean(password, 30), clean(kbd, 30))
+    if root_login == "yes":
+        return result(cid, cat, title, "fail", "SSH allows root to log in with a password.", why, detail,
+                      fix("terminal", "sshd-harden", "Keys only, no root login"), weight=3)
+    if password != "no" or kbd != "no":
+        return result(cid, cat, title, "warn", "SSH accepts passwords, not just keys.", why, detail,
+                      fix("terminal", "sshd-harden", "Keys only, no root login"), weight=2)
+    return result(cid, cat, title, "pass", "SSH is on and accepts keys only.", why, detail, weight=2)
+
+
+def _ssh_string(buf, pos):
+    """One length-prefixed string from an OpenSSH key blob: (value, next_pos)."""
+    if pos + 4 > len(buf):
+        raise ValueError("truncated")
+    n = int.from_bytes(buf[pos:pos + 4], "big")
+    if pos + 4 + n > len(buf):
+        raise ValueError("truncated")
+    return buf[pos + 4:pos + 4 + n], pos + 4 + n
+
+
+def _private_key_state(data):
+    """Return (is_private_key, encrypted: True/False/None, kind)."""
+    text = data.decode("ascii", "replace")
+    if "-----BEGIN OPENSSH PRIVATE KEY-----" in text:
+        body = text.split("-----BEGIN OPENSSH PRIVATE KEY-----", 1)[1].split("-----END", 1)[0]
+        try:
+            blob = b64decode("".join(body.split()), validate=False)
+            magic = b"openssh-key-v1\x00"
+            if not blob.startswith(magic):
+                return True, None, "openssh"
+            cipher, pos = _ssh_string(blob, len(magic))
+            _kdf, pos = _ssh_string(blob, pos)
+            _kdfopts, pos = _ssh_string(blob, pos)
+            pos += 4                                  # number of keys
+            pub, pos = _ssh_string(blob, pos)
+            ktype, _ = _ssh_string(pub, 0)
+            ktype = ktype.decode("ascii", "replace")
+        except ValueError:
+            return True, None, "openssh"
+        if ktype.startswith("sk-"):
+            return True, True, ktype                  # the secret half lives on a hardware key
+        return True, cipher != b"none", ktype
+    if "-----BEGIN ENCRYPTED PRIVATE KEY-----" in text:
+        return True, True, "pkcs8"
+    m = re.search(r"-----BEGIN ([A-Z0-9 ]*)PRIVATE KEY-----", text)
+    if m:
+        return True, "ENCRYPTED" in text.split("-----END", 1)[0], (m.group(1).strip().lower() or "pkcs8")
+    return False, None, ""
+
+
+def _open_home_dir(parts, create=False):
+    """Walk from HOME with held descriptors; every component must be a real
+    directory owned by us. Missing components are created 0700 if `create`."""
+    fd = os.open(HOME, O_DIR)
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != os.geteuid():
+            raise Refused("home directory is not owned by this account")
+        for name in parts:
+            if name in ("", ".", "..") or "/" in name:
+                raise Refused("bad path component")
+            try:
+                nfd = os.open(name, O_DIR, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(name, 0o700, dir_fd=fd)
+                nfd = os.open(name, O_DIR, dir_fd=fd)
+            except OSError as e:
+                if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise Refused("%s is not a real directory" % name)
+                raise
+            os.close(fd)
+            fd = nfd
+            st = os.fstat(fd)
+            if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
+                raise Refused("%s is not a directory owned by this account" % name)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _scan_ssh_dir():
+    """Return (dir_mode, [(name, mode, is_key, encrypted, kind)]) for ~/.ssh."""
+    try:
+        dfd = _open_home_dir([".ssh"])
+    except FileNotFoundError:
+        return None, []
+    try:
+        dmode = stat.S_IMODE(os.fstat(dfd).st_mode)
+        rows = []
+        with os.scandir(dfd) as it:
+            names = sorted(e.name for e in it)[:64]
+        for name in names:
+            try:
+                fd = os.open(name, O_READ | os.O_NOFOLLOW, dir_fd=dfd)
+            except OSError:
+                continue
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode) or st.st_size > SMALL_FILE_MAX:
+                    continue
+                data = _read_fd(fd, SMALL_FILE_MAX)
+            except (OSError, Refused):
+                continue
+            finally:
+                os.close(fd)
+            is_key, enc, kind = _private_key_state(data)
+            rows.append((name, stat.S_IMODE(st.st_mode), is_key, enc, kind))
+        return dmode, rows
+    finally:
+        os.close(dfd)
+
+
+@check
+def check_ssh_keys():
+    cid, cat, title = "ssh-keys", "harden", "SSH keys"
+    why = ("Your SSH private keys are the keys to every server and Git host you use. They should be "
+           "readable only by you and protected by a passphrase, so a stolen copy is useless.")
+    try:
+        dmode, rows = _scan_ssh_dir()
+    except Refused as e:
+        return result(cid, cat, title, "warn", "~/.ssh is not a plain private folder: %s" % e, why, weight=2)
+    except OSError:
+        return result(cid, cat, title, "unknown", "Could not read ~/.ssh.", why, weight=2)
+    if dmode is None:
+        return result(cid, cat, title, "na", "You have no ~/.ssh folder.", why, weight=2)
+    keys = [r for r in rows if r[2]]
+    loose = [r for r in keys if r[1] & 0o077]
+    plain = [r for r in keys if r[3] is False]
+    lines = ["~/.ssh is mode %03o" % dmode]
+    for name, mode, _, enc, kind in keys:
+        lines.append("%s (%s) mode %03o, %s" % (name, kind, mode,
+                     "passphrase" if enc else ("no passphrase" if enc is False else "unknown")))
+    detail = clean_block(lines)
+    if dmode & 0o077 or loose:
+        return result(cid, cat, title, "fail", "Other accounts can read your SSH folder or keys.", why, detail,
+                      fix("helper", "ssh-perms", "Make them private"), weight=2)
+    if plain:
+        return result(cid, cat, title, "warn",
+                      "%d private key%s ha%s no passphrase." % (len(plain), "" if len(plain) == 1 else "s",
+                                                                "s" if len(plain) == 1 else "ve"),
+                      why + " Add one with: ssh-keygen -p -f ~/.ssh/<key>", detail, weight=1)
+    if not keys:
+        return result(cid, cat, title, "pass", "No private keys in ~/.ssh.", why, detail, weight=1)
+    return result(cid, cat, title, "pass", "Your SSH keys are private and passphrase-protected.", why, detail, weight=1)
+
+
+@check
+def check_gnupg():
+    cid, cat, title = "gnupg", "harden", "GnuPG folder"
+    why = "GnuPG keeps your private signing and encryption keys here; only you should be able to read it."
+    try:
+        fd = _open_home_dir([".gnupg"])
+    except FileNotFoundError:
+        return result(cid, cat, title, "na", "You have no ~/.gnupg folder.", why, weight=1)
+    except Refused as e:
+        return result(cid, cat, title, "warn", "~/.gnupg is not a plain private folder: %s" % e, why, weight=1)
+    try:
+        mode = stat.S_IMODE(os.fstat(fd).st_mode)
+    finally:
+        os.close(fd)
+    if mode & 0o077:
+        return result(cid, cat, title, "warn", "~/.gnupg is readable by other accounts (mode %03o)." % mode, why,
+                      fix=fix("helper", "gnupg-perms", "Make it private"), weight=1)
+    return result(cid, cat, title, "pass", "~/.gnupg is private.", why, weight=1)
+
+
+def _shell_json_lock():
+    for path in (home_path(".config", "omarchy", "shell.json"),
+                 sys_path("/usr/share/omarchy/config/omarchy/shell.json")):
+        try:
+            text = read_text(path, FILE_MAX, follow=True)
+        except Refused:
+            continue
+        if text is None:
+            continue
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return None, path
+        idle = data.get("idle") if isinstance(data, dict) else None
+        lock = idle.get("lock") if isinstance(idle, dict) else None
+        if isinstance(lock, bool) or not isinstance(lock, (int, float)):
+            return 0, path
+        return int(lock), path
+    return None, ""
+
+
+@check
+def check_screen_lock():
+    cid, cat, title = "screen-lock", "harden", "Automatic screen lock"
+    why = ("If you walk away from an unlocked laptop, anyone nearby can use your accounts. "
+           "Locking after a few idle minutes closes that gap.")
+    if exists(home_path(".local", "state", "omarchy", "indicators", "stay-awake")):
+        return result(cid, cat, title, "warn", "Stay Awake is on, so the screen will not lock by itself.", why,
+                      fix=fix("terminal", "allow-idle", "Turn Stay Awake off"), weight=2)
+    how = ' Set "idle": {"lock": 300} in ~/.config/omarchy/shell.json for five minutes.'
+    lock, path = _shell_json_lock()
+    if lock is None:
+        return result(cid, cat, title, "unknown", "Could not read the idle settings.", why, weight=2)
+    if lock <= 0:
+        return result(cid, cat, title, "warn", "The screen never locks by itself.", why + how,
+                      "idle.lock is off in shell.json", weight=2)
+    minutes = lock / 60.0
+    if lock > 900:
+        return result(cid, cat, title, "warn", "The screen locks only after %d minutes idle." % round(minutes),
+                      why + how, "idle.lock = %d seconds" % lock, weight=2)
+    return result(cid, cat, title, "pass", "The screen locks after %s idle." % (
+        "%d minutes" % round(minutes) if lock >= 120 else "%d seconds" % lock), why, weight=2)
+
+
+def _rdev(path):
+    return os.stat(path).st_rdev
+
+
+def _root_device_chain():
+    """Walk sysfs from the device under / and report dm-crypt anywhere below it."""
+    try:
+        text = read_text(sys_path("/proc/self/mountinfo"))
+    except Refused:
+        return None
+    src = ""
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) > 9 and parts[4] == "/":
+            try:
+                sep = parts.index("-")
+                src = parts[sep + 2]
+            except (ValueError, IndexError):
+                continue
+    if not src.startswith("/dev/"):
+        return None
+    try:
+        rdev = _rdev(sys_path(src))
+    except OSError:
+        return None
+    start = "%d:%d" % (os.major(rdev), os.minor(rdev))
+    todo, seen = [start], set()
+    while todo and len(seen) < 16:
+        majmin = todo.pop()
+        if majmin in seen:
+            continue
+        seen.add(majmin)
+        base = sys_path("/sys/dev/block/" + majmin)
+        try:
+            uuid = (read_text(base + "/dm/uuid", 4096, follow=True) or "").strip()
+        except Refused:
+            uuid = ""
+        if uuid.startswith("CRYPT-"):
+            return True
+        for slave in list_dir(base + "/slaves", 16):
+            try:
+                dev = (read_text(base + "/slaves/" + slave + "/dev", 64, follow=True) or "").strip()
+            except Refused:
+                dev = ""
+            if re.fullmatch(r"\d+:\d+", dev):
+                todo.append(dev)
+    return False
+
+
+@check
+def check_disk_encryption():
+    cid, cat, title = "disk-encryption", "harden", "Disk encryption"
+    why = ("With full-disk encryption a lost or stolen laptop gives away nothing. Omarchy turns it on "
+           "during install; it cannot be added later without reinstalling.")
+    enc = _root_device_chain()
+    if enc is None:
+        return result(cid, cat, title, "unknown", "Could not tell how the system disk is set up.", why, weight=3)
+    if enc:
+        return result(cid, cat, title, "pass", "The system disk is encrypted (LUKS).", why, weight=3)
+    return result(cid, cat, title, "fail", "The system disk is not encrypted.", why, weight=3)
+
+
+@check
+def check_secure_boot():
+    cid, cat, title = "secure-boot", "harden", "Secure Boot"
+    why = ("Secure Boot makes the firmware refuse a tampered bootloader or kernel. Omarchy boots with "
+           "Limine and leaves it off by default; turning it on needs your own signing keys (sbctl).")
+    if not exists(sys_path("/sys/firmware/efi")):
+        return result(cid, cat, title, "na", "This machine boots in legacy BIOS mode.", why, weight=0)
+    path = sys_path("/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c")
+    try:
+        data = read_file(path, 64)
+    except Refused:
+        data = None
+    if not data:
+        return result(cid, cat, title, "unknown", "Could not read the Secure Boot state.", why, weight=0)
+    if data[-1] == 1:
+        return result(cid, cat, title, "pass", "Secure Boot is on.", why, weight=0)
+    return result(cid, cat, title, "info", "Secure Boot is off.", why, weight=0)
+
+
+@check
+def check_faillock():
+    cid, cat, title = "login-lockout", "harden", "Wrong-password lockout"
+    why = ("After a number of wrong passwords the account is locked for a while, which slows down "
+           "anyone guessing at the keyboard or lock screen.")
+    deny, unlock = None, None
+    try:
+        text = read_text(sys_path("/etc/pam.d/system-auth"))
+        if text is None:
+            return result(cid, cat, title, "na", "This system has no /etc/pam.d/system-auth.", why, weight=1)
+        if "pam_faillock.so" not in text:
+            return result(cid, cat, title, "warn", "Wrong passwords never lock the account.", why, weight=1)
+        for line in text.splitlines():
+            if "pam_faillock.so" in line and not line.lstrip().startswith("#"):
+                m = re.search(r"\bdeny=(\d+)", line)
+                if m:
+                    deny = int(m.group(1))
+                m = re.search(r"\bunlock_time=(\d+)", line)
+                if m:
+                    unlock = int(m.group(1))
+        conf = parse_kv(read_text(sys_path("/etc/security/faillock.conf")) or "")
+    except Refused:
+        return result(cid, cat, title, "unknown", "Could not read the login settings.", why, weight=1)
+    if deny is None and conf.get("deny", "").isdigit():
+        deny = int(conf["deny"])
+    if unlock is None and conf.get("unlock_time", "").isdigit():
+        unlock = int(conf["unlock_time"])
+    deny = 3 if deny is None else deny
+    unlock = 600 if unlock is None else unlock
+    if deny == 0:
+        return result(cid, cat, title, "warn", "Wrong passwords never lock the account.", why, weight=1)
+    return result(cid, cat, title, "pass",
+                  "After %d wrong passwords the account locks for %d seconds." % (deny, unlock), why, weight=1)
+
+
+@check
+def check_passwordless_sudo():
+    cid, cat, title = "passwordless-sudo", "harden", "Passwordless sudo"
+    why = ("While passwordless sudo is on, any program you run can silently become root. "
+           "Omarchy offers it as a convenience for a limited time; keep it off when you do not need it.")
+    tool = find_tool("omarchy-sudo-passwordless")
+    if not tool:
+        return result(cid, cat, title, "na", "Omarchy's passwordless-sudo command is not installed.", why, weight=3)
+    rc, _ = run([tool, "--active"], timeout=6, limit=4096)
+    if rc is None:
+        return result(cid, cat, title, "unknown", "Could not check passwordless sudo.", why, weight=3)
+    if rc == 0:
+        return result(cid, cat, title, "fail", "Passwordless sudo is on.", why,
+                      fix=fix("terminal", "sudo-passwordless-off", "Turn it off"), weight=3)
+    return result(cid, cat, title, "pass", "sudo asks for your password.", why, weight=3)
+
+
+@check
+def check_docker_group():
+    cid, cat, title = "docker-group", "harden", "Docker group"
+    why = ("Membership of the docker group is the same as having root without a password: any program "
+           "you run can start a container that mounts the whole disk.")
+    try:
+        text = read_text(sys_path("/etc/group")) or ""
+    except Refused:
+        return result(cid, cat, title, "unknown", "Could not read /etc/group.", why, weight=2)
+    for line in text.splitlines():
+        parts = line.split(":")
+        if len(parts) >= 4 and parts[0] == "docker":
+            if USER and USER in parts[3].split(","):
+                return result(cid, cat, title, "warn", "You are in the docker group (sudoless Docker).", why,
+                              fix=fix("terminal", "docker-group-off", "Leave the docker group"), weight=2)
+    return result(cid, cat, title, "pass", "You are not in the docker group.", why, weight=2)
+
+
+@check
+def check_usb_authorization():
+    cid, cat, title = "usb-authorization", "harden", "USB authorization"
+    why = ("A malicious USB stick can pretend to be a keyboard and type commands in seconds (BadUSB). "
+           "Omarchy can ask you before any new USB device is allowed to talk to the system.")
+    if systemctl("is-active", "usbguard.service") == "active":
+        return result(cid, cat, title, "pass", "New USB devices need your approval.", why, weight=0)
+    return result(cid, cat, title, "info", "New USB devices are trusted automatically.", why,
+                  fix=fix("terminal", "usb-auth", "Set up USB authorization"), weight=0)
+
+
+@check
+def check_thunderbolt():
+    cid, cat, title = "thunderbolt-authorization", "harden", "Thunderbolt authorization"
+    why = ("Thunderbolt accessories get direct memory access. Omarchy can require approval before a new "
+           "one is connected, which blocks drive-by attacks through the port.")
+    if not list_dir(sys_path("/sys/bus/thunderbolt/devices"), 4):
+        return result(cid, cat, title, "na", "This machine has no Thunderbolt ports.", why, weight=0)
+    if exists(sys_path("/etc/omarchy/thunderbolt-authorization.enabled")):
+        return result(cid, cat, title, "pass", "New Thunderbolt accessories need approval.", why, weight=0)
+    return result(cid, cat, title, "info", "Thunderbolt accessories are trusted automatically.", why,
+                  fix=fix("terminal", "thunderbolt-auth", "Set up Thunderbolt authorization"), weight=0)
+
+
+@check
+def check_strong_auth():
+    cid, cat, title = "strong-auth", "harden", "Security key or fingerprint"
+    why = ("A FIDO2 security key (YubiKey and similar) or a fingerprint reader can confirm sudo and "
+           "system prompts, so a shoulder-surfed password is not enough on its own.")
+    try:
+        text = read_text(sys_path("/etc/pam.d/sudo")) or ""
+    except Refused:
+        return result(cid, cat, title, "unknown", "Could not read /etc/pam.d/sudo.", why, weight=0)
+    found = [n for n, mod in (("FIDO2 key", "pam_u2f.so"), ("fingerprint", "pam_fprintd.so")) if mod in text]
+    if found:
+        return result(cid, cat, title, "pass", "sudo accepts a %s." % " or ".join(found), why, weight=0)
+    return result(cid, cat, title, "info", "sudo uses your password only.", why,
+                  fix=fix("terminal", "fido2", "Set up a FIDO2 key"), weight=0)
+
+
+_PACMAN_TS = re.compile(r"^\[(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})")
+
+
+@check
+def check_updates():
+    cid, cat, title = "updates", "harden", "System updates"
+    why = ("Most attacks use security holes that already have a fix. Updating every week or two "
+           "keeps those fixes on your machine.")
+    try:
+        text = read_tail(sys_path("/var/log/pacman.log"), PACMAN_LOG_TAIL)
+    except Refused:
+        text = None
+    if not text:
+        return result(cid, cat, title, "unknown", "Could not read the package log.", why, weight=2)
+    last = None
+    for line in text.splitlines():
+        if "starting full system upgrade" in line or "pacman -Syu" in line:
+            m = _PACMAN_TS.match(line)
+            if m:
+                last = m.group(1)
+    if not last:
+        return result(cid, cat, title, "warn", "No full system update found in the recent package log.", why,
+                      fix=fix("terminal", "update", "Update now"), weight=2)
+    try:
+        then = time.mktime(time.strptime(last, "%Y-%m-%d"))
+    except ValueError:
+        return result(cid, cat, title, "unknown", "Could not read the date of the last update.", why, weight=2)
+    days = max(0, int((time.time() - then) // 86400))
+    summary = "Last full update: %s (%d day%s ago)." % (last, days, "" if days == 1 else "s")
+    if days > 30:
+        return result(cid, cat, title, "fail", summary, why, fix=fix("terminal", "update", "Update now"), weight=2)
+    if days > 14:
+        return result(cid, cat, title, "warn", summary, why, fix=fix("terminal", "update", "Update now"), weight=2)
+    return result(cid, cat, title, "pass", summary, why, weight=2)
+
+
+KNOWN_PORTS = {53317: "LocalSend", 5353: "mDNS (Avahi/resolved)", 5355: "LLMNR", 68: "DHCP client",
+               546: "DHCPv6 client", 22: "SSH", 631: "printing (CUPS)", 1716: "KDE Connect",
+               47984: "Sunshine", 47989: "Sunshine", 5900: "VNC", 3389: "RDP"}
+
+
+def _is_loopback(hexaddr):
+    """/proc/net addresses are hex in host (little-endian) byte order."""
+    if len(hexaddr) == 8:
+        return hexaddr[6:8].upper() == "7F"                     # 127.0.0.0/8
+    if len(hexaddr) == 32:
+        a = hexaddr.upper()
+        if a == "00000000000000000000000001000000":              # ::1
+            return True
+        return a.startswith("0000000000000000FFFF0000") and a[30:32] == "7F"   # ::ffff:127.x
+    return False
+
+
+def _listeners():
+    rows = set()
+    for proto, fname, want in (("tcp", "tcp", "0A"), ("tcp", "tcp6", "0A"),
+                               ("udp", "udp", "07"), ("udp", "udp6", "07")):
+        try:
+            text = read_text(sys_path("/proc/net/" + fname), 4 * 1024 * 1024) or ""
+        except Refused:
+            continue
+        for line in text.splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 4 or parts[3] != want:
+                continue
+            addr, _, port = parts[1].rpartition(":")
+            try:
+                port = int(port, 16)
+            except ValueError:
+                continue
+            if _is_loopback(addr):
+                continue
+            rows.add((proto, port))
+            if len(rows) >= 200:
+                break
+    return sorted(rows, key=lambda r: (r[1], r[0]))
+
+
+@check
+def check_listeners():
+    cid, cat, title = "open-ports", "harden", "Open network ports"
+    why = ("Every program listening on the network is a door other machines can knock on. "
+           "With the firewall on most are shut, but it is worth knowing what is open.")
+    rows = _listeners()
+    if not rows:
+        return result(cid, cat, title, "pass", "Nothing is listening for connections from the network.", why, weight=1)
+    lines = ["%s %d%s" % (p, port, ("  " + KNOWN_PORTS[port]) if port in KNOWN_PORTS else "") for p, port in rows]
+    fw = check_firewall()["status"] == "pass"
+    summary = "%d port%s open to the network%s." % (len(rows), "" if len(rows) == 1 else "s",
+                                                     ", behind the firewall" if fw else " with no firewall in front")
+    return result(cid, cat, title, "info" if fw else "warn", summary, why, clean_block(lines), weight=1 if not fw else 0)
+
+
+# --- Scan -------------------------------------------------------------------
+
+PERSISTENCE_PATTERNS = [
+    (re.compile(r"\b(curl|wget|fetch)\b[^|\n]*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b", re.I), "downloads and runs a script"),
+    (re.compile(r"\b(ba|z)?sh\s+<\(\s*(curl|wget)", re.I), "downloads and runs a script"),
+    (re.compile(r"\beval\s+[\"']?\$\(\s*(curl|wget|base64)", re.I), "evaluates downloaded or encoded code"),
+    (re.compile(r"\bbase64\s+(-d|--decode)\b[^|\n]*\|\s*(ba|z)?sh\b", re.I), "runs base64-hidden code"),
+    (re.compile(r"/dev/(tcp|udp)/\d", re.I), "opens a raw network connection (reverse shell pattern)"),
+    (re.compile(r"\bnc(at)?\b[^\n]*\s-(e|c)\s", re.I), "netcat with command execution"),
+    (re.compile(r"\bpython[0-9.]*\s+-c\s+[\"'][^\"']*(socket|urllib|exec\()", re.I), "inline Python that connects or executes"),
+    (re.compile(r"\bLD_PRELOAD\s*=", re.I), "forces a library into every program (LD_PRELOAD)"),
+]
+
+STARTUP_FILES = [(".bashrc",), (".bash_profile",), (".bash_login",), (".profile",), (".zshrc",),
+                 (".zprofile",), (".zshenv",), (".xprofile",), (".config", "fish", "config.fish"),
+                 (".config", "uwsm", "env"), (".config", "uwsm", "default")]
+STARTUP_DIRS = [((".config", "autostart"), ".desktop"), ((".config", "systemd", "user"), ".service"),
+                ((".config", "systemd", "user"), ".timer"), ((".config", "uwsm", "env.d"), ""),
+                ((".config", "environment.d"), ".conf"), ((".config", "hypr"), ".conf"),
+                ((".config", "hypr"), ".lua")]
+
+
+def _scan_text(label, text, hits):
+    for n, line in enumerate(text.splitlines()[:20000], 1):
+        s = line.strip()
+        if not s or s.startswith("#") or s.startswith("--") or s.startswith(";"):
+            continue
+        for rx, what in PERSISTENCE_PATTERNS:
+            if rx.search(s):
+                hits.append("%s:%d %s: %s" % (label, n, what, clean(s, 120)))
+                break
+
+
+@check
+def check_persistence():
+    cid, cat, title = "persistence", "scan", "Startup files"
+    why = ("Malware that wants to survive a reboot hides a line in a file that runs at login: a shell "
+           "startup file, an autostart entry, a user service or a cron job. These patterns are suspicious, "
+           "not proof; read each line and keep it only if you know where it came from.")
+    hits, scanned = [], 0
+    files = [home_path(*p) for p in STARTUP_FILES]
+    for parts, suffix in STARTUP_DIRS:
+        d = home_path(*parts)
+        for name in list_dir(d, 300):
+            if not suffix or name.endswith(suffix):
+                files.append(d + "/" + name)
+    for path in files[:600]:
+        try:
+            text = read_text(path, FILE_MAX, follow=True)
+        except Refused:
+            continue
+        if text is None:
+            continue
+        scanned += 1
+        _scan_text("~" + path[len(HOME):] if path.startswith(HOME) else path, text, hits)
+    crontab = "/usr/bin/crontab"
+    if is_trusted_executable(sys_path(crontab)):
+        rc, out = run([crontab, "-l"], timeout=4, limit=SMALL_FILE_MAX)
+        if rc == 0 and out:
+            scanned += 1
+            _scan_text("crontab", out, hits)
+    if hits:
+        return result(cid, cat, title, "warn", "%d suspicious line%s in startup files." % (
+            len(hits), "" if len(hits) == 1 else "s"), why, clean_block(hits, 3000), weight=3)
+    return result(cid, cat, title, "pass", "No suspicious lines in %d startup files." % scanned, why, weight=3)
+
+
+@check
+def check_ld_preload():
+    cid, cat, title = "ld-preload", "scan", "System-wide preload"
+    why = ("/etc/ld.so.preload forces a library into every program on the system. Normal desktops leave "
+           "it empty; rootkits use it to hide files and processes.")
+    try:
+        text = read_text(sys_path("/etc/ld.so.preload"), SMALL_FILE_MAX)
+    except Refused as e:
+        return result(cid, cat, title, "warn", "/etc/ld.so.preload exists but could not be read safely: %s" % e,
+                      why, weight=3)
+    entries = [l.strip() for l in (text or "").splitlines() if l.strip() and not l.strip().startswith("#")]
+    if entries:
+        return result(cid, cat, title, "fail", "/etc/ld.so.preload loads %d librar%s into every program." % (
+            len(entries), "y" if len(entries) == 1 else "ies"), why, clean_block(entries), weight=3)
+    return result(cid, cat, title, "pass", "Nothing is preloaded system-wide.", why, weight=3)
+
+
+@check
+def check_foreign_packages():
+    cid, cat, title = "aur-packages", "scan", "AUR and other foreign packages"
+    why = ("Packages from the AUR are written by volunteers and are not checked by Arch. Malicious AUR "
+           "packages have happened. Keep only the ones you recognise and still use.")
+    tool = "/usr/bin/pacman"
+    if not is_trusted_executable(sys_path(tool)):
+        return result(cid, cat, title, "na", "pacman is not available.", why, weight=0)
+    rc, out = run([tool, "-Qmq"], timeout=8, limit=CMD_MAX)
+    if rc is None:
+        return result(cid, cat, title, "unknown", "Could not list foreign packages.", why, weight=0)
+    names = [clean(n, 80) for n in out.split()][:2000]
+    if not names:
+        return result(cid, cat, title, "pass", "Every installed package comes from the official repositories.", why, weight=0)
+    return result(cid, cat, title, "info", "%d package%s from outside the official repositories." % (
+        len(names), "" if len(names) == 1 else "s"), why, clean_block(names), weight=0)
+
+
+SCANNERS = [
+    # id, binary, title, why, run action, install action
+    ("clamav", "clamscan", "ClamAV virus scanner",
+     "ClamAV checks files against a database of known viruses and malware. It is most useful for "
+     "downloads and files you share with Windows or macOS machines.", "scan-downloads", "install-clamav"),
+    ("rkhunter", "rkhunter", "Rootkit Hunter",
+     "rkhunter looks for known rootkits, changed system programs and suspicious files. Run it after "
+     "installing it once with --propupd so it learns what normal looks like.", "run-rkhunter", "install-rkhunter"),
+    ("lynis", "lynis", "Lynis audit",
+     "Lynis runs hundreds of hardening checks and gives a hardening index with concrete suggestions.",
+     "run-lynis", "install-lynis"),
+    ("arch-audit", "arch-audit", "Known vulnerabilities (arch-audit)",
+     "arch-audit compares installed packages with the Arch security tracker and lists the ones with "
+     "published vulnerabilities. It contacts security.archlinux.org when you run it.",
+     "run-arch-audit", "install-arch-audit"),
+]
+
+
+def _scanner_check(sid, binary, title, why, run_action, install_action):
+    path = "/usr/bin/" + binary
+    if not is_trusted_executable(sys_path(path)):
+        return result("scanner-" + sid, "scan", title, "info", "Not installed.", why,
+                      fix=fix("terminal", install_action, "Install"), weight=0)
+    summary = "Installed. Runs on demand in a terminal."
+    status = "info"
+    if sid == "clamav":
+        newest = 0
+        for name in ("daily.cld", "daily.cvd"):
+            try:
+                newest = max(newest, os.stat(sys_path("/var/lib/clamav/" + name)).st_mtime)
+            except OSError:
+                pass
+        if not newest:
+            return result("scanner-clamav", "scan", title, "warn", "Installed, but the virus database is missing.",
+                          why, fix=fix("terminal", "freshclam", "Download the database"), weight=0)
+        days = int((time.time() - newest) // 86400)
+        if days > 7:
+            return result("scanner-clamav", "scan", title, "warn",
+                          "Installed, but the virus database is %d days old." % days, why,
+                          fix=fix("terminal", "freshclam", "Update the database"), weight=0)
+        summary = "Installed; database updated %s." % ("today" if days == 0 else "%d day%s ago" % (days, "" if days == 1 else "s"))
+    return result("scanner-" + sid, "scan", title, status, summary, why,
+                  fix=fix("terminal", run_action, "Run"), weight=0)
+
+
+def _make_scanner(spec):
+    def fn():
+        return _scanner_check(*spec)
+    fn.__name__ = "check_scanner_" + spec[0].replace("-", "_")
+    return fn
+
+
+for _spec in SCANNERS:
+    check(_make_scanner(_spec))
+
+
+# --- Privacy ----------------------------------------------------------------
+
+@check
+def check_dns_fallback():
+    cid, cat, title = "dns-fallback", "privacy", "DNS fallback servers"
+    why = ("When your DNS servers stop answering, systemd-resolved quietly sends every lookup to "
+           "Google, Cloudflare or Quad9 instead. Behind a VPN that can leak where you browse.")
+    if systemctl("is-active", "systemd-resolved.service") != "active":
+        return result(cid, cat, title, "na", "systemd-resolved is not running.", why, weight=1)
+    cfg = _resolved_config()
+    if "FallbackDNS" in cfg and not cfg["FallbackDNS"].strip():
+        return result(cid, cat, title, "pass", "No fallback DNS servers are used.", why, weight=1)
+    value = cfg.get("FallbackDNS", "")
+    return result(cid, cat, title, "warn",
+                  "Fallback DNS is %s." % ("the built-in public list" if not value else clean(value, 80)), why,
+                  fix=fix("terminal", "dns-fallback-off", "Remove the fallback"), weight=1)
+
+
+def _nm_config():
+    paths = conf_d(sys_path("/usr/lib/NetworkManager/conf.d"))
+    paths.append(sys_path("/etc/NetworkManager/NetworkManager.conf"))
+    paths += conf_d(sys_path("/etc/NetworkManager/conf.d"))
+    return merged_ini(paths)
+
+
+@check
+def check_connectivity_check():
+    cid, cat, title = "connectivity-check", "privacy", "Connectivity check"
+    why = ("NetworkManager contacts a server every few minutes to see whether you are online. It is "
+           "harmless but tells that server, and anyone watching, when your laptop is on a network.")
+    if systemctl("is-active", "NetworkManager.service") != "active":
+        return result(cid, cat, title, "na", "NetworkManager is not running.", why, weight=0)
+    c = _nm_config().get("connectivity", {})
+    if c.get("enabled", "").lower() == "false" or not c.get("uri", "").strip() or c.get("interval", "") == "0":
+        return result(cid, cat, title, "pass", "The connectivity check is off.", why, weight=0)
+    return result(cid, cat, title, "info", "NetworkManager checks in with %s." % clean(c.get("uri"), 80), why,
+                  fix=fix("terminal", "connectivity-off", "Turn it off"), weight=0)
+
+
+@check
+def check_mac_randomization():
+    cid, cat, title = "mac-address", "privacy", "Hardware address on Wi-Fi"
+    why = ("Your Wi-Fi card's hardware (MAC) address is a permanent ID. Using a different, stable address "
+           "per network stops cafés, airports and shops from recognising you across visits.")
+    if systemctl("is-active", "NetworkManager.service") != "active":
+        return result(cid, cat, title, "na", "NetworkManager is not running.", why, weight=1)
+    nm = _nm_config()
+    backend = nm.get("device", {}).get("wifi.backend", "")
+    if backend == "iwd":
+        try:
+            iwd = parse_ini(read_text(sys_path("/etc/iwd/main.conf")) or "")
+        except Refused:
+            iwd = {}
+        mode = iwd.get("General", {}).get("AddressRandomization", "")
+        if mode in ("network", "once"):
+            return result(cid, cat, title, "pass", "iwd uses a separate address per network.", why, weight=1)
+        return result(cid, cat, title, "warn", "Wi-Fi uses the real hardware address.", why,
+                      fix=fix("terminal", "mac-randomize", "Use a separate address per network"), weight=1)
+    cloned = nm.get("connection", {}).get("wifi.cloned-mac-address", "")
+    if cloned in ("stable", "random", "stable-ssid"):
+        return result(cid, cat, title, "pass", "Wi-Fi uses a %s address per network." % cloned, why, weight=1)
+    return result(cid, cat, title, "warn", "Wi-Fi uses the real hardware address.", why,
+                  fix=fix("terminal", "mac-randomize", "Use a separate address per network"), weight=1)
+
+
+@check
+def check_avahi():
+    cid, cat, title = "avahi", "privacy", "Network announcements (Avahi)"
+    why = ("Avahi announces this computer's name and services to everyone on the local network. Finding "
+           "printers keeps working with announcements switched off.")
+    if systemctl("is-active", "avahi-daemon.service") != "active":
+        return result(cid, cat, title, "pass", "Avahi is not running.", why, weight=1)
+    try:
+        conf = parse_ini(read_text(sys_path("/etc/avahi/avahi-daemon.conf")) or "")
+    except Refused:
+        return result(cid, cat, title, "unknown", "Could not read the Avahi settings.", why, weight=1)
+    if conf.get("publish", {}).get("disable-publishing", "no").lower() == "yes":
+        return result(cid, cat, title, "pass", "Avahi listens but does not announce this machine.", why, weight=1)
+    return result(cid, cat, title, "warn", "This machine announces its name on the local network.", why,
+                  fix=fix("terminal", "avahi-quiet", "Stop announcing"), weight=1)
+
+
+def _opt_out_state():
+    """('ours'|'other'|'none', detail)."""
+    for parts in (OPT_OUT_DIR, (".config", "environment.d")):
+        d = home_path(*parts)
+        for name in list_dir(d, 200):
+            try:
+                text = read_text(d + "/" + name, SMALL_FILE_MAX, follow=True) or ""
+            except Refused:
+                continue
+            if re.search(r"^\s*(export\s+)?DO_NOT_TRACK=1\b", text, re.M):
+                return ("ours" if name == OPT_OUT_NAME and parts == OPT_OUT_DIR else "other"), name
+    return "none", ""
+
+
+@check
+def check_opt_out():
+    cid, cat, title = "telemetry-opt-out", "privacy", "Telemetry opt-out variables"
+    why = ("Many developer tools (Homebrew, .NET, Gatsby, Next.js and others) stop sending usage data when "
+           "variables such as DO_NOT_TRACK=1 are set for your session.")
+    state, name = _opt_out_state()
+    if state == "ours":
+        return result(cid, cat, title, "pass", "Set by Vigil for every new session.", why,
+                      fix=fix("helper", "optout-off", "Remove"), weight=0)
+    if state == "other":
+        return result(cid, cat, title, "pass", "DO_NOT_TRACK is set (%s)." % clean(name, 60), why, weight=0)
+    return result(cid, cat, title, "info", "Not set.", why, fix=fix("helper", "optout-on", "Set them"), weight=0)
+
+
+@check
+def check_black_ops():
+    cid, cat, title = "black-ops", "privacy", "Black Ops"
+    why = ("Black Ops is a separate plugin that blocks telemetry from Omarchy and common apps and keeps "
+           "watch that the protections stay in place. Vigil leaves the protections it manages to it.")
+    if exists(home_path(".config", "omarchy", "plugins", "brightwalker25.black-ops")):
+        return result(cid, cat, title, "pass", "Installed; it manages telemetry blocking.", why, weight=0)
+    return result(cid, cat, title, "info", "Not installed. Vigil covers the basics; Black Ops goes further.",
+                  why, weight=0)
+
+
+# --- Clean ------------------------------------------------------------------
+
+def _dir_size(path, deadline):
+    """Bytes under a directory, without following symlinks, within a budget."""
+    total, count = 0, 0
+    stack = [path]
+    while stack and count < WALK_MAX_ENTRIES and time.monotonic() < deadline:
+        cur = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                for e in it:
+                    count += 1
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(e.path)
+                        elif e.is_file(follow_symlinks=False):
+                            total += e.stat(follow_symlinks=False).st_blocks * 512
+                    except OSError:
+                        pass
+                    if count >= WALK_MAX_ENTRIES:
+                        break
+        except OSError:
+            continue
+    complete = not stack
+    return total, complete
+
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return ("%d %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
+        n /= 1024.0
+
+
+def _size_check(cid, title, path, why, action, label, big):
+    if not exists(path):
+        return result(cid, "clean", title, "pass", "Empty.", why, weight=0)
+    size, complete = _dir_size(path, time.monotonic() + WALK_MAX_SECONDS)
+    approx = "" if complete else "at least "
+    status = "warn" if size >= big else "info"
+    return result(cid, "clean", title, status if size else "pass", "%s%s." % (approx, human(size)) if size else "Empty.",
+                  why, fix=fix(*action, label) if size and action else None, weight=0)
+
+
+@check
+def check_thumbnails():
+    return _size_check("thumbnails", "Thumbnail cache", home_path(".cache", "thumbnails"),
+                       "Small previews of every image and video you have browsed. They can reveal files you "
+                       "have since deleted.", ("helper", "clean-thumbnails"), "Clear", 512 * 1024 * 1024)
+
+
+@check
+def check_trash():
+    return _size_check("trash", "Trash", home_path(".local", "share", "Trash"),
+                       "Files you deleted from the file manager are kept here until the trash is emptied.",
+                       ("helper", "empty-trash"), "Empty", 1024 * 1024 * 1024)
+
+
+@check
+def check_user_cache():
+    return _size_check("user-cache", "Application caches", home_path(".cache"),
+                       "Browsers and apps keep caches here. They rebuild themselves, so this is mostly about "
+                       "disk space.", None, "", 5 * 1024 * 1024 * 1024)
+
+
+@check
+def check_pacman_cache():
+    return _size_check("pacman-cache", "Package cache", sys_path("/var/cache/pacman/pkg"),
+                       "Every package version pacman ever downloaded. Keeping the last two of each is enough "
+                       "to roll back a bad update.", ("terminal", "clean-pacman-cache"), "Keep last two", 3 * 1024 ** 3)
+
+
+@check
+def check_orphans():
+    cid, cat, title = "orphans", "clean", "Orphaned packages"
+    why = ("Packages that were installed as dependencies of something you have since removed. They still "
+           "get updates and still count as installed software.")
+    tool = "/usr/bin/pacman"
+    if not is_trusted_executable(sys_path(tool)):
+        return result(cid, cat, title, "na", "pacman is not available.", why, weight=0)
+    rc, out = run([tool, "-Qdtq"], timeout=8, limit=CMD_MAX)
+    if rc is None:
+        return result(cid, cat, title, "unknown", "Could not list orphaned packages.", why, weight=0)
+    names = out.split()
+    if not names:
+        return result(cid, cat, title, "pass", "None.", why, weight=0)
+    return result(cid, cat, title, "info", "%d orphaned package%s." % (len(names), "" if len(names) == 1 else "s"),
+                  why, clean_block(names), fix("terminal", "clean-orphans", "Review and remove"), weight=0)
+
+
+@check
+def check_journal():
+    cid, cat, title = "journal", "clean", "System logs"
+    why = "The system journal keeps logs of everything that happened, which is useful but grows over time."
+    tool = "/usr/bin/journalctl"
+    if not is_trusted_executable(sys_path(tool)):
+        return result(cid, cat, title, "na", "journalctl is not available.", why, weight=0)
+    rc, out = run([tool, "--disk-usage"], timeout=6, limit=4096)
+    m = re.search(r"take up ([0-9.]+[KMGT]?B?)", out or "")
+    if rc is None or not m:
+        return result(cid, cat, title, "unknown", "Could not read the journal size.", why, weight=0)
+    return result(cid, cat, title, "info", "Logs take up %s." % clean(m.group(1), 20), why,
+                  fix=fix("terminal", "clean-journal", "Keep two weeks"), weight=0)
+
+
+# ---------------------------------------------------------------------------
+# State: previously seen findings and a short score history
+
+def _state_dir():
+    return _open_home_dir(list(STATE_DIR), create=True)
+
+
+def _read_state(dirfd):
+    try:
+        fd = os.open(STATE_NAME, O_READ | os.O_NOFOLLOW, dir_fd=dirfd)
+    except FileNotFoundError:
+        return {}
+    except OSError:
+        raise Refused("state file is not a regular file")
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != os.geteuid() or st.st_nlink != 1:
+            raise Refused("state file is not ours")
+        raw = _read_fd(fd, SMALL_FILE_MAX)
+    finally:
+        os.close(fd)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_atomic(dirfd, name, data, mode=0o600):
+    tmp = ".%s.%s.tmp" % (name, secrets.token_hex(8))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=dirfd)
+    try:
+        os.fchmod(fd, mode)
+        view = memoryview(data)
+        while view:
+            n = os.write(fd, view)
+            view = view[n:]
+        os.fsync(fd)
+        os.rename(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        os.fsync(dirfd)
+    except BaseException:
+        try:
+            os.unlink(tmp, dir_fd=dirfd)
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(fd)
+
+
+def fingerprint(c):
+    h = hashlib.sha256((c["status"] + "\n" + c["summary"] + "\n" + c["detail"]).encode()).hexdigest()[:12]
+    return c["id"] + ":" + h
+
+
+def update_state(report):
+    """Record findings; return the ids of fail/warn findings not seen before."""
+    try:
+        dirfd = _state_dir()
+    except (OSError, Refused):
+        return [], False
+    try:
+        try:
+            state = _read_state(dirfd)
+        except Refused:
+            return [], False
+        seen = [s for s in state.get("seen", []) if isinstance(s, str)][:SEEN_MAX]
+        current = [fingerprint(c) for c in report["checks"] if c["status"] in ("fail", "warn") and c["weight"] > 0]
+        first_run = "seen" not in state
+        new = [] if first_run else [f.split(":", 1)[0] for f in current if f not in seen]
+        history = [h for h in state.get("history", []) if isinstance(h, dict)][-(HISTORY_MAX - 1):]
+        history.append({"at": report["generatedAt"], "score": report["score"],
+                        "fail": report["counts"]["fail"], "warn": report["counts"]["warn"]})
+        out = {"schema": SCHEMA, "seen": current[:SEEN_MAX], "history": history}
+        try:
+            write_atomic(dirfd, STATE_NAME, json.dumps(out, separators=(",", ":")).encode())
+        except OSError:
+            pass
+        return sorted(set(new))[:LIST_MAX], True
+    finally:
+        os.close(dirfd)
+
+
+# ---------------------------------------------------------------------------
+# Audit
+
+def score_of(checks):
+    score = 100
+    for c in checks:
+        w = c["weight"]
+        if c["status"] == "fail":
+            score -= 10 * w
+        elif c["status"] == "warn":
+            score -= 4 * w
+    return max(0, min(100, score))
+
+
+def audit(peek=False):
+    started = time.monotonic()
+    _SYSTEMCTL_MEMO.clear()
+    checks = []
+    for fn in CHECKS:
+        try:
+            c = fn()
+        except Exception as e:  # one broken check must not hide the others
+            c = result(fn.__name__.replace("check_", "").replace("_", "-"), "harden", fn.__name__,
+                       "unknown", "This check failed to run (%s)." % type(e).__name__)
+        for k in ("title", "summary", "why"):
+            c[k] = clean(c[k], 400 if k == "why" else STR_MAX)
+        c["detail"] = clean(c["detail"], 3000) if "\n" not in c["detail"] else "\n".join(
+            clean(x, STR_MAX) for x in c["detail"].splitlines()[:LIST_MAX + 1])
+        checks.append(c)
+    counts = {k: 0 for k in ("fail", "warn", "pass", "info", "na", "unknown")}
+    for c in checks:
+        counts[c["status"]] = counts.get(c["status"], 0) + 1
+    scored = [c for c in checks if c["weight"] > 0]
+    level = "fail" if any(c["status"] == "fail" for c in scored) else (
+        "warn" if any(c["status"] == "warn" for c in scored) else "ok")
+    tools = {}
+    for name in ("omarchy-launch-floating-terminal-with-presentation", "omarchy-setup-security-usb-authorization",
+                 "omarchy-setup-security-thunderbolt-authorization", "omarchy-setup-security-fido2",
+                 "omarchy-sudo-passwordless", "omarchy-remove-security-sudoless-docker", "omarchy-update",
+                 "omarchy-pkg-add", "omarchy-update-orphan-pkgs", "omarchy-toggle-idle"):
+        p = find_tool(name)
+        tools[name] = p.rsplit("/", 1)[0] if p else ""
+    report = {
+        "schema": SCHEMA, "version": VERSION,
+        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "durationMs": int((time.monotonic() - started) * 1000),
+        "score": score_of(checks), "level": level, "counts": counts,
+        "checks": checks, "tools": tools, "new": [], "stateSaved": False,
+    }
+    if not peek:
+        report["new"], report["stateSaved"] = update_state(report)
+    return report
+
+
+# ---------------------------------------------------------------------------
+# User-level fixes (no root, no network). Each is a fixed action id.
+
+OPT_OUT_TEXT = (
+    "# Written by Vigil (io.github.keasbeexd.vigil). Remove from the Vigil panel or delete this file.\n"
+    "# Read by uwsm at login; takes effect from the next session.\n"
+    "export DO_NOT_TRACK=1\n"
+    "export DOTNET_CLI_TELEMETRY_OPTOUT=1\n"
+    "export HOMEBREW_NO_ANALYTICS=1\n"
+    "export GATSBY_TELEMETRY_DISABLED=1\n"
+    "export NEXT_TELEMETRY_DISABLED=1\n"
+    "export NUXT_TELEMETRY_DISABLED=1\n"
+    "export ASTRO_TELEMETRY_DISABLED=1\n"
+    "export AZURE_CORE_COLLECT_TELEMETRY=0\n"
+    "export SAM_CLI_TELEMETRY=0\n"
+    "export POWERSHELL_TELEMETRY_OPTOUT=1\n"
+    "export STORYBOOK_DISABLE_TELEMETRY=1\n"
+    "export TURBO_TELEMETRY_DISABLED=1\n"
+    "export SCARF_ANALYTICS=false\n"
+)
+
+
+def fix_ssh_perms():
+    dfd = _open_home_dir([".ssh"])
+    changed = 0
+    try:
+        if stat.S_IMODE(os.fstat(dfd).st_mode) != 0o700:
+            os.fchmod(dfd, 0o700)
+            changed += 1
+        with os.scandir(dfd) as it:
+            names = sorted(e.name for e in it)[:256]
+        for name in names:
+            try:
+                fd = os.open(name, O_READ | os.O_NOFOLLOW, dir_fd=dfd)
+            except OSError:
+                continue
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
+                    continue
+                if st.st_size <= SMALL_FILE_MAX and _private_key_state(_read_fd(fd, SMALL_FILE_MAX))[0]:
+                    if stat.S_IMODE(st.st_mode) & 0o077:
+                        os.fchmod(fd, 0o600)
+                        changed += 1
+            except Refused:
+                continue
+            finally:
+                os.close(fd)
+    finally:
+        os.close(dfd)
+    return "Fixed %d permission%s in ~/.ssh." % (changed, "" if changed == 1 else "s")
+
+
+def fix_gnupg_perms():
+    dfd = _open_home_dir([".gnupg"])
+    try:
+        os.fchmod(dfd, 0o700)
+    finally:
+        os.close(dfd)
+    return "~/.gnupg is now readable only by you."
+
+
+def fix_optout_on():
+    dfd = _open_home_dir(list(OPT_OUT_DIR), create=True)
+    try:
+        write_atomic(dfd, OPT_OUT_NAME, OPT_OUT_TEXT.encode(), 0o644)
+    finally:
+        os.close(dfd)
+    return "Opt-out variables set. They apply from your next login."
+
+
+def fix_optout_off():
+    try:
+        dfd = _open_home_dir(list(OPT_OUT_DIR))
+    except FileNotFoundError:
+        return "Nothing to remove."
+    try:
+        try:
+            fd = os.open(OPT_OUT_NAME, O_READ | os.O_NOFOLLOW, dir_fd=dfd)
+        except FileNotFoundError:
+            return "Nothing to remove."
+        try:
+            st = os.fstat(fd)
+            data = _read_fd(fd, SMALL_FILE_MAX)
+        finally:
+            os.close(fd)
+        # Remove only a file whose bytes prove Vigil wrote it.
+        if data != OPT_OUT_TEXT.encode() or st.st_uid != os.geteuid():
+            raise Refused("the file was changed by hand; leaving it alone")
+        os.unlink(OPT_OUT_NAME, dir_fd=dfd)
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+    return "Opt-out variables removed. They stop applying from your next login."
+
+
+def _clear_dir_contents(dfd, budget):
+    """Delete regular files and empty subdirectories below dfd without ever
+    following a symlink; symlinks themselves are unlinked, never followed."""
+    removed = 0
+    with os.scandir(dfd) as it:
+        entries = [(e.name, e.is_dir(follow_symlinks=False)) for e in it][:budget[0]]
+    for name, is_dir in entries:
+        if budget[0] <= 0:
+            break
+        budget[0] -= 1
+        if is_dir:
+            try:
+                sub = os.open(name, O_DIR, dir_fd=dfd)
+            except OSError:
+                continue
+            try:
+                if os.fstat(sub).st_uid != os.geteuid():
+                    continue
+                removed += _clear_dir_contents(sub, budget)
+            finally:
+                os.close(sub)
+            try:
+                os.rmdir(name, dir_fd=dfd)
+            except OSError:
+                pass
+        else:
+            try:
+                os.unlink(name, dir_fd=dfd)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def fix_clean_thumbnails():
+    try:
+        dfd = _open_home_dir([".cache", "thumbnails"])
+    except FileNotFoundError:
+        return "The thumbnail cache is already empty."
+    try:
+        n = _clear_dir_contents(dfd, [WALK_MAX_ENTRIES])
+    finally:
+        os.close(dfd)
+    return "Removed %d thumbnail%s." % (n, "" if n == 1 else "s")
+
+
+def fix_empty_trash():
+    gio = "/usr/bin/gio"
+    if not is_trusted_executable(sys_path(gio)):
+        raise Refused("gio is not installed")
+    rc, _ = run([gio, "trash", "--empty"], timeout=60, limit=4096)
+    if rc != 0:
+        raise Refused("gio could not empty the trash")
+    return "Trash emptied."
+
+
+FIXES = {
+    "ssh-perms": fix_ssh_perms,
+    "gnupg-perms": fix_gnupg_perms,
+    "optout-on": fix_optout_on,
+    "optout-off": fix_optout_off,
+    "clean-thumbnails": fix_clean_thumbnails,
+    "empty-trash": fix_empty_trash,
+}
+
+
+def run_fix(action):
+    fn = FIXES.get(action)
+    if fn is None:
+        return {"ok": False, "action": "", "message": "Unknown action."}
+    try:
+        msg = fn()
+        return {"ok": True, "action": action, "message": clean(msg)}
+    except FileNotFoundError:
+        return {"ok": False, "action": action, "message": "Nothing to change."}
+    except Refused as e:
+        return {"ok": False, "action": action, "message": clean("Refused: %s" % e)}
+    except OSError as e:
+        return {"ok": False, "action": action, "message": clean("Failed: %s" % (os.strerror(e.errno or 0) or e))}
+
+
+# ---------------------------------------------------------------------------
+
+def emit(obj):
+    data = json.dumps(obj, separators=(",", ":"), ensure_ascii=True)
+    sys.stdout.write(data + "\n")
+    sys.stdout.flush()
+
+
+def main(argv):
+    os.umask(0o077)
+    if len(argv) in (2, 3) and argv[1] == "audit" and argv[2:] in ([], ["--peek"]):
+        # --peek: report only, leave the seen-findings state alone (used by bar
+        # instances on secondary monitors so only one instance notifies).
+        emit(audit(peek=len(argv) == 3))
+        return 0
+    if len(argv) == 3 and argv[1] == "fix" and re.fullmatch(r"[a-z][a-z0-9-]{0,31}", argv[2]):
+        emit(run_fix(argv[2]))
+        return 0
+    if len(argv) == 2 and argv[1] == "version":
+        emit({"version": VERSION})
+        return 0
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil version\n")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
