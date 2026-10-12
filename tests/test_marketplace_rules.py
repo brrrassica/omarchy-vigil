@@ -78,7 +78,7 @@ def test_versions_agree():
 
 def test_ipc_methods_take_no_parameters():
     src = (REPO / "Panel.qml").read_text()
-    block = src[src.index("ShellIpc {"):]
+    block = src[src.index("IpcHandler {"):]
     block = block[:block.index("\n  }\n")]
     for m in re.finditer(r"function (\w+)\(([^)]*)\)", block):
         assert m.group(2).strip() == "", m.group(0)
@@ -129,3 +129,26 @@ def test_readme_documents_removal_and_files():
     for path in ("~/.local/state/omarchy-vigil", "90-omarchy-vigil-opt-out", "/etc/sysctl.d/90-omarchy-vigil.conf"):
         assert path in readme, path
     assert (REPO / "LICENSE").is_file()
+
+
+# Types a third-party plugin can use. qs.Ui exports exactly what its qmldir
+# lists (Omarchy quattro, shell/Ui/qmldir); anything else in that folder, such
+# as ShellIpc, is internal and fails to load in a plugin ("is not a type").
+QS_UI_EXPORTS = {
+    "BarIndicator", "BarIconButton", "BarIconContent", "BarWidget", "BackgroundMedia", "BorderOverlay",
+    "BorderSurface", "Button", "ButtonGroup", "ConfirmDialog", "CursorSurface", "Dropdown", "IconContentBounds",
+    "KeyboardPanel", "MultiSelect", "NumberField", "OpticalGlyph", "OverlayWindow", "Panel", "PanelActionButton",
+    "PanelController", "PanelKeyCatcher", "PanelHero", "PanelSectionHeader", "PanelSeparator", "PanelSlider",
+    "PanelToolTip", "PluginBarApi", "PointerMoveGate", "ScreenMoveRemap", "PopupCard", "SearchableDropdown",
+    "SpeedTestOverlay", "TextField", "Toggle", "ToggleSwitch", "WidgetButton",
+}
+QT_TYPES = {"Item", "Text", "Column", "Row", "Flow", "Repeater", "Rectangle", "MouseArea", "Timer", "Flickable",
+            "Connections", "ScrollBar", "Process", "SplitParser", "IpcHandler"}
+
+
+def test_only_types_available_to_plugins():
+    src = (REPO / "Panel.qml").read_text()
+    inline = set(re.findall(r"^\s*component (\w+):", src, re.M))
+    used = set(re.findall(r"(?:^|[:\s])([A-Z][A-Za-z0-9]+)\s*\{", src, re.M))
+    unknown = used - QS_UI_EXPORTS - QT_TYPES - inline
+    assert unknown == set(), unknown

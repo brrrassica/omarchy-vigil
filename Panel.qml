@@ -378,7 +378,7 @@ Panel {
     onTriggered: root.runAudit()
   }
 
-  ShellIpc {
+  IpcHandler {
     enabled: root.isPrimary
     target: root.ipcTarget
     function open(): void { root.open() }
