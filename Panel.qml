@@ -17,8 +17,8 @@ import "Model.js" as Model
 // visible terminal, before they run.
 Panel {
   id: root
-  moduleName: "io.github.keasbeexd.vigil"
-  ipcTarget: "io.github.keasbeexd.vigil"
+  moduleName: "keasbeexd.vigil"
+  ipcTarget: "keasbeexd.vigil"
   manageIpc: false
 
   readonly property int maxReportChars: 512 * 1024
@@ -57,7 +57,7 @@ Panel {
   property bool statusIsError: false
 
   property string tab: "overview"
-  readonly property var tabs: ["overview", "harden", "scan", "privacy", "clean"]
+  readonly property var tabs: ["overview", "harden", "detect", "supply", "privacy", "care"]
   property int rowIndex: 0
   property bool cursorActive: false
   property string expandedId: ""
@@ -119,7 +119,13 @@ Panel {
 
   function requestFix(check) {
     if (!check || !report || busy) return
-    if (!Model.canRun(check.fix, report.tools)) return
+    if (!Model.canRun(check.fix, report.tools, report.apps)) return
+    if (check.fix.kind === "app") {
+      // Opening an app you installed changes nothing, so it needs no confirmation.
+      var argv = Model.appCommand(check.fix.action, report.apps)
+      if (argv.length > 0) { Quickshell.execDetached(argv); root.close() }
+      return
+    }
     pendingKind = check.fix.kind
     pendingAction = check.fix.action
   }
@@ -353,7 +359,7 @@ Panel {
       onTextKey: function(t) {
         if (t === "r" || t === "R") root.runAudit()
         else if (t === "f" || t === "F") root.requestFix(root.selectedCheck())
-        else if (t >= "1" && t <= "5") root.selectTab(root.tabs[Number(t) - 1])
+        else if (t >= "1" && t <= "6") root.selectTab(root.tabs[Number(t) - 1])
       }
 
       Flickable {
@@ -387,9 +393,10 @@ Panel {
             options: [
               { value: "overview", label: "Overview" },
               { value: "harden", label: "Harden" },
-              { value: "scan", label: "Scan" },
+              { value: "detect", label: "Detect" },
+              { value: "supply", label: "Supply" },
               { value: "privacy", label: "Privacy" },
-              { value: "clean", label: "Clean" }
+              { value: "care", label: "Care" }
             ]
             value: root.tab
             foreground: root.foreground
@@ -495,7 +502,7 @@ Panel {
               wrapMode: Text.WordWrap
             }
             Repeater {
-              model: root.report ? ["harden", "scan", "privacy", "clean"] : []
+              model: root.report ? ["harden", "detect", "supply", "privacy", "care"] : []
               delegate: CategoryRow {
                 required property var modelData
                 width: column.width
@@ -518,10 +525,11 @@ Panel {
             textFormat: Text.PlainText
             visible: root.tab !== "overview" && root.report !== null
             width: parent.width
-            text: root.tab === "harden" ? "Settings that make this machine harder to break into."
-              : root.tab === "scan" ? "Signs of malware, and scanners you can run. Scanners open in a terminal."
-              : root.tab === "privacy" ? "Settings that limit what this machine tells the network about you."
-              : "Space you can reclaim, and traces you can clear."
+            text: root.tab === "harden" ? "Can someone get in? Settings that make this machine harder to break into."
+              : root.tab === "detect" ? "Is something bad already here? Signs of malware, virus scanning with ClamUI, and rootkit checks."
+              : root.tab === "supply" ? "Can you trust what you installed? Packages, known vulnerabilities, known-compromised components and plugins."
+              : root.tab === "privacy" ? "What does this machine tell the networks it joins?"
+              : "Is the system tidy? Space you can reclaim and traces you can clear."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -596,7 +604,7 @@ Panel {
     property var check: null
     property bool selected: false
     property bool expanded: false
-    readonly property bool runnable: check !== null && root.report !== null && Model.canRun(check.fix, root.report.tools)
+    readonly property bool runnable: check !== null && root.report !== null && Model.canRun(check.fix, root.report.tools, root.report.apps)
     signal clicked()
 
     hasCursor: selected
@@ -687,7 +695,7 @@ Panel {
         textFormat: Text.PlainText
         visible: row.expanded && !row.runnable && row.check !== null && row.check.fix.kind !== "none"
         width: parent.width
-        text: "This fix needs an Omarchy command that was not found on this system."
+        text: "This needs a command that was not found on this system."
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption

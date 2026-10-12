@@ -1,83 +1,102 @@
 # Roadmap
 
-Vigil grows in phases. Each phase ships on its own and keeps the marketplace
-rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
+Vigil is organised in five pillars and grows in phases. Each phase ships on
+its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 
-## Phase 1: foundation (0.1, this release)
+| Pillar | Question | Hands off to |
+|---|---|---|
+| Harden | Can someone get in? | Omarchy's own security commands |
+| Detect | Is something bad already here? | ClamUI for virus scanning and quarantine |
+| Supply chain | Can I trust what I installed? | Bumblebee for known-compromised components |
+| Privacy | What am I leaking? | Black Ops for telemetry blocking |
+| Care | Is the system tidy and recoverable? | Omarchy's orphan and update commands |
 
-- [x] Bar shield with score, five-tab panel, keyboard navigation.
-- [x] 37 local, read-only checks across Harden, Scan, Privacy and Clean.
-- [x] Fixes: six no-root helper actions; terminal actions for root changes,
-      each a constant script that explains itself and waits for Enter.
-- [x] Omarchy's own security commands (USB, Thunderbolt, FIDO2,
-      passwordless sudo, docker group, updates) launched from the panel.
-- [x] ClamAV, rkhunter, Lynis and arch-audit installed and run on demand.
-- [x] Background re-check with one notification for new findings.
-- [x] Tests for every check and fix, for the report contract, and for the
-      marketplace review rules.
+## Decisions
 
-## Phase 2: one-click hardening and undo
+- **Root changes run in a visible terminal, permanently.** Vigil will not
+  install a root helper, sudoers rule or polkit policy. Every privileged step
+  is a constant script you see before it runs, or an Omarchy command.
+- **Hand off rather than rebuild.** Where a maintained tool already does the
+  job well (ClamUI, Bumblebee, Black Ops, Omarchy's own commands), Vigil
+  shows its status and opens it. It does not copy it.
+- **No scheduling outside the shell.** Background checks are timers inside
+  the bar widget; Vigil installs no systemd units or cron jobs, so removing
+  the plugin leaves nothing running.
 
-- A root helper with fixed verbs, installed once into
-  `/usr/local/libexec/omarchy-vigil/` from a visible terminal, root-owned,
-  and called through `pkexec` so every change shows Omarchy's password
-  dialog. No sudoers rule. Verbs replace the terminal scripts for the
-  `/etc` drop-ins, and each has an undo verb.
-- Undo for every change from the panel (today undo is a documented `rm`).
-- Dismiss a finding as reviewed, with the reason kept; heuristic findings
-  only, never the ones that are direct evidence (as Security Scan does).
-- Score history chart from the history Vigil already records.
-- `preview.png` and the marketplace submission (see below).
+## Phase 1 (0.1): foundation
 
-## Phase 3: scanning that reports back
+- [x] Bar shield with score, tabbed panel, keyboard navigation.
+- [x] Local, read-only checks; six no-root fixes; terminal actions for root.
+- [x] Omarchy's security commands launched from the panel.
+- [x] Scanners installed and run on demand.
+- [x] Tests for checks, fixes, the report contract and marketplace rules.
 
-- Scanner results parsed back into the panel instead of only shown in the
-  terminal: ClamAV detections, rkhunter warnings, the Lynis hardening index
-  and suggestions, arch-audit's vulnerable packages with severity.
-- Scheduled scans (opt-in), written by the root helper to
-  `/var/lib/omarchy-vigil/` so the unprivileged panel can read them.
-- Known-bad AUR package list and npm/PyPI compromise catalog, in the spirit
-  of AUR-Malware and Bumblebee, shipped as reviewed data in the repository
-  rather than fetched at run time.
-- Optional Bumblebee integration when its binary is installed.
-- File integrity baseline for a few high-value paths (`/etc/pam.d`,
-  `/etc/sudoers.d`, shell startup files) with change alerts.
+## Phase 2 (0.2, this release): pillars and hand-offs
 
-## Phase 4: privacy depth
+- [x] Five pillars: Harden, Detect, Supply chain, Privacy, Care.
+- [x] ClamUI: detected (Flatpak or system package), opened from the panel,
+      installed from Flathub on request.
+- [x] Bumblebee: its last result read (never written) and shown under
+      Supply chain.
+- [x] Inventory of other Omarchy plugins.
+- [x] Avahi edit made fail-closed: refuses an unexpected file layout, keeps
+      the original, rolls back if Avahi does not restart.
+- [x] ID `keasbeexd.vigil`, matching the other keasbeexd plugins.
 
-- Telemetry host blocking, Bluetooth pairing and Chromium policy, either
-  ported from Black Ops (MIT) with attribution or shown through Black Ops'
-  `rows.d` status contract when it is installed. Decide with its author.
-- Browser hardening checks (third-party cookies, DNS-over-HTTPS) for
-  Chromium and Firefox profiles.
-- Per-app network activity summary, deferring to OpenSnitch-based plugins
-  for blocking.
+## Phase 3: undo, dismissals, history
 
-## Phase 5: beyond the machine
+- Undo from the panel for each `/etc` drop-in, as a terminal action that
+  removes only a file that still starts with Vigil's marker line.
+- Dismiss a heuristic finding as reviewed (never findings that are direct
+  evidence), with the reason kept and the finding shown dimmed.
+- Score history from the history Vigil already records.
+- `preview.png` and the marketplace submission (checklist below).
 
-- Password manager and 2FA presence (Compliantish's fifth check).
-- Backup status (is there a recent backup, is it encrypted).
-- Audit of other installed Omarchy plugins (network, process and file
-  capabilities), as Omavet and Plugin Guard do.
-- Exportable report (plain text) for a help request or a work laptop audit.
+## Phase 4: deeper supply chain and detection
+
+- **Exposed secrets**: API keys and tokens in shell history, `.env` files in
+  the home directory, readable cloud credentials and `.netrc`. Reports the
+  file and line, never the secret itself.
+- Known-bad AUR package list, shipped as reviewed data in this repository
+  (no download at run time), checked against `pacman -Qm`.
+- arch-audit results parsed into the panel (severity per package), run on
+  demand only, since it contacts security.archlinux.org.
+- ClamUI quarantine count and last scan, read from `clamui quarantine list
+  --json` if ClamUI offers it on the installed version; restore and delete
+  stay in ClamUI.
+- File-change alerts for a few high-value paths (`/etc/pam.d`,
+  `/etc/sudoers.d`, `/etc/ld.so.preload`, shell startup files).
+- Read-only audit of other Omarchy plugins: network, process and file
+  capabilities found in their code, without loading or running them.
+
+## Phase 5: privacy and recovery
+
+- Black Ops status through its `rows.d` contract when installed.
+- Browser hardening checks for Chromium and Firefox profiles.
+- Snapshot and backup status (`omarchy-snapshot`, recent backups, whether
+  they are encrypted), and a short "what to do if Vigil finds something"
+  guide in the panel.
 
 ## Ideas to weigh
 
-- Firejail or bubblewrap profiles for risky apps (PDF readers, downloads).
-- AppArmor: Arch supports it with a kernel parameter; worth a guided setup.
-- Secure Boot with `sbctl`, guided, for people who want it.
 - A "travel mode" bundle: firewall strict, Bluetooth and LocalSend off, MAC
-  randomised, screen lock short.
+  randomised, short screen lock.
+- AppArmor and Secure Boot (`sbctl`) as guided Omarchy-style setups.
+- Firejail or bubblewrap profiles for risky apps.
+
+Deliberately out of scope: VPN, outbound firewalls, password managers.
+Dedicated plugins do these well; Vigil may show their status.
 
 ## Marketplace submission checklist
 
 - [ ] `preview.png` at the root, under 512 KiB, a real screenshot.
 - [ ] `omarchy plugin validate .` passes on an Omarchy machine.
 - [ ] Panel exercised on a real Omarchy install: each tab, each helper
-      action, and at least the firewall, sysctl and USB terminal actions.
+      action, Open ClamUI, and at least the firewall, sysctl, Avahi and USB
+      terminal actions.
 - [ ] Marketplace baseline scanner run locally against the final commit.
       Expect the `privilege`, `package-manager` and `service-management`
-      capabilities (sudo, `omarchy-pkg-add` and `systemctl` appear in the
-      terminal scripts); these mean manual review, not a block.
+      capabilities (sudo, `omarchy-pkg-add` and `systemctl` in the terminal
+      scripts); these mean manual review, not a block.
 - [ ] All fixes on one final commit; submit the `[Plugin]: Vigil` issue with
       that full SHA, category System, tags `bar`, `system`, `security`.

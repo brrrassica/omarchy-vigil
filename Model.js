@@ -12,9 +12,9 @@ var MAX_CHECKS = 80
 var MAX_STR = 400
 var MAX_DETAIL = 4000
 
-var CATEGORIES = ["harden", "scan", "privacy", "clean"]
+var CATEGORIES = ["harden", "detect", "supply", "privacy", "care"]
 var STATUSES = ["fail", "warn", "unknown", "info", "pass", "na"]
-var FIX_KINDS = ["terminal", "helper", "none"]
+var FIX_KINDS = ["terminal", "helper", "app", "none"]
 var TRUSTED_TOOL_DIRS = ["/usr/bin", "/usr/share/omarchy/bin"]
 var LAUNCHER = "omarchy-launch-floating-terminal-with-presentation"
 
@@ -87,7 +87,7 @@ function confirmation(kind, id) {
   return { title: a.title, lines: lines }
 }
 
-var VIGIL_MARK = "# Written by Vigil (io.github.keasbeexd.vigil). Delete this file to undo."
+var VIGIL_MARK = "# Written by Vigil (keasbeexd.vigil). Delete this file to undo."
 
 var SYSCTL_LINES = [
   VIGIL_MARK,
@@ -189,11 +189,21 @@ var TERMINAL_ACTIONS = {
   },
   "avahi-quiet": {
     title: "Stop announcing this machine on the network",
-    what: ["Backs up /etc/avahi/avahi-daemon.conf to avahi-daemon.conf.vigil-backup,",
-           "sets disable-publishing=yes and restarts Avahi. Printer discovery keeps working."],
-    run: "sudo /usr/bin/cp -a /etc/avahi/avahi-daemon.conf /etc/avahi/avahi-daemon.conf.vigil-backup && "
-         + "sudo /usr/bin/sed -i 's/^#\\{0,1\\}disable-publishing=.*/disable-publishing=yes/' /etc/avahi/avahi-daemon.conf && "
-         + "/usr/bin/grep -q '^disable-publishing=yes' /etc/avahi/avahi-daemon.conf && sudo /usr/bin/systemctl restart avahi-daemon.service"
+    what: ["Edits one line of /etc/avahi/avahi-daemon.conf: disable-publishing=yes, then restarts Avahi.",
+           "Stops without changing anything unless that line appears exactly once, under [publish].",
+           "The first original is kept as avahi-daemon.conf.vigil-backup; a failed restart rolls back.",
+           "Printer discovery keeps working."],
+    run: "f=/etc/avahi/avahi-daemon.conf; "
+         + "[ \"$(/usr/bin/awk '/^\\[/{s=$0} /^#?disable-publishing=/{n++; if (s != \"[publish]\") bad=1} "
+         + "END{print (n == 1 && !bad) ? \"ok\" : \"no\"}' \"$f\")\" = ok ] "
+         + "|| { echo 'avahi-daemon.conf does not have the expected layout, so nothing was changed.'; exit 1; }; "
+         + "t=$(sudo /usr/bin/mktemp /etc/avahi/.avahi-daemon.conf.XXXXXXXX) && sudo /usr/bin/cp -a \"$f\" \"$t\" && "
+         + "sudo /usr/bin/cp -a --update=none \"$f\" \"$f.vigil-backup\" && "
+         + "sudo /usr/bin/sed -i -E 's/^#?disable-publishing=.*/disable-publishing=yes/' \"$f\" && "
+         + "if /usr/bin/grep -qx 'disable-publishing=yes' \"$f\" && sudo /usr/bin/systemctl restart avahi-daemon.service; "
+         + "then sudo /usr/bin/rm -f \"$t\"; echo 'Avahi no longer announces this machine.'; "
+         + "else sudo /usr/bin/mv -f \"$t\" \"$f\"; sudo /usr/bin/systemctl restart avahi-daemon.service; "
+         + "echo 'The change did not apply cleanly, so the previous file was restored.'; exit 1; fi"
   },
   "sudo-passwordless-off": {
     title: "Turn passwordless sudo off",
@@ -240,6 +250,15 @@ var TERMINAL_ACTIONS = {
     title: "Update the ClamAV database",
     what: ["Runs: sudo freshclam (downloads signatures from the ClamAV servers)"],
     run: "sudo /usr/bin/freshclam"
+  },
+  "install-clamui": {
+    title: "Install ClamUI",
+    what: ["Installs flatpak and clamav with omarchy pkg add, adds the Flathub remote for your account,",
+           "installs ClamUI from Flathub (io.github.linx_systems.ClamUI), then downloads virus signatures.",
+           "Contacts the Arch mirrors, dl.flathub.org and the ClamAV servers."],
+    tool: "omarchy-pkg-add", args: " flatpak clamav && "
+      + "/usr/bin/flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo && "
+      + "/usr/bin/flatpak install --user flathub io.github.linx_systems.ClamUI && sudo /usr/bin/freshclam"
   },
   "scan-downloads": {
     title: "Scan ~/Downloads for viruses",
@@ -295,6 +314,27 @@ var TERMINAL_ACTIONS = {
   }
 }
 
+// App actions open another program you installed, with a fixed argv and no
+// shell. The helper reports how the app is installed; anything else is "".
+var APP_ACTIONS = {
+  "open-clamui": {
+    app: "clamui",
+    argv: {
+      "native": ["/usr/bin/clamui"],
+      "flatpak": ["/usr/bin/flatpak", "run", "io.github.linx_systems.ClamUI"]
+    }
+  }
+}
+
+function appCommand(id, apps) {
+  if (typeof id !== "string" || !Object.prototype.hasOwnProperty.call(APP_ACTIONS, id)) return []
+  var a = APP_ACTIONS[id]
+  if (!apps || typeof apps !== "object" || !Object.prototype.hasOwnProperty.call(apps, a.app)) return []
+  var kind = apps[a.app]
+  if (!Object.prototype.hasOwnProperty.call(a.argv, kind)) return []
+  return a.argv[kind].slice(0)
+}
+
 function terminalAction(id) {
   if (typeof id !== "string" || !Object.prototype.hasOwnProperty.call(TERMINAL_ACTIONS, id)) return null
   return TERMINAL_ACTIONS[id] || null
@@ -330,8 +370,9 @@ function launcherPath(tools) {
   return dir === "" ? "" : dir + "/" + LAUNCHER
 }
 
-function canRun(fixObj, tools) {
+function canRun(fixObj, tools, apps) {
   if (!fixObj) return false
+  if (fixObj.kind === "app") return appCommand(fixObj.action, apps).length > 0
   if (fixObj.kind === "helper") return isHelperAction(fixObj.action)
   if (fixObj.kind === "terminal") return launcherPath(tools) !== "" && terminalScript(fixObj.action, tools) !== ""
   return false
@@ -347,6 +388,7 @@ function validFix(f) {
   if (!isString(f.label, 60)) return null
   if (f.kind === "helper" && !inList(f.action, HELPER_ACTIONS)) return { kind: "none", action: "", label: "" }
   if (f.kind === "terminal" && !terminalAction(f.action)) return { kind: "none", action: "", label: "" }
+  if (f.kind === "app" && !Object.prototype.hasOwnProperty.call(APP_ACTIONS, f.action)) return { kind: "none", action: "", label: "" }
   return { kind: f.kind, action: f.action, label: plain(f.label, 60) }
 }
 
@@ -393,6 +435,15 @@ function parseReport(text) {
       tools[name] = dir
     }
   }
+  var apps = Object.create(null)
+  apps.clamui = ""
+  if (d.apps !== undefined) {
+    if (!d.apps || typeof d.apps !== "object" || Array.isArray(d.apps)) return null
+    if (d.apps.clamui !== undefined) {
+      if (!inList(d.apps.clamui, ["", "native", "flatpak"])) return null
+      apps.clamui = d.apps.clamui
+    }
+  }
   var fresh = []
   if (Array.isArray(d["new"])) {
     if (d["new"].length > 40) return null
@@ -404,7 +455,7 @@ function parseReport(text) {
   }
   return {
     version: plain(d.version, 20), generatedAt: plain(d.generatedAt, 40),
-    score: Math.round(d.score), level: d.level, checks: checks, tools: tools, fresh: fresh
+    score: Math.round(d.score), level: d.level, checks: checks, tools: tools, apps: apps, fresh: fresh
   }
 }
 
@@ -475,7 +526,8 @@ function levelText(report) {
 }
 
 function categoryLabel(category) {
-  return { overview: "Overview", harden: "Harden", scan: "Scan", privacy: "Privacy", clean: "Clean" }[category] || ""
+  return { overview: "Overview", harden: "Harden", detect: "Detect", supply: "Supply chain",
+           privacy: "Privacy", care: "Care" }[category] || ""
 }
 
 function tooltip(report, running) {
@@ -496,7 +548,7 @@ if (typeof module !== "undefined") {
     terminalAction: terminalAction, launcherPath: launcherPath, canRun: canRun, checksFor: checksFor,
     topFindings: topFindings, countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
     tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
-    categoryLabel: categoryLabel,
+    categoryLabel: categoryLabel, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,
     SYSCTL_LINES: SYSCTL_LINES
   }

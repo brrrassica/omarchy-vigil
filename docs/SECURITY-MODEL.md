@@ -5,6 +5,33 @@ explains how Vigil is built, mapped to the points the Omarchy plugin
 marketplace review checks. `tests/test_marketplace_rules.py` enforces the
 mechanical ones.
 
+## Design rules
+
+These hold for every pillar, now and in later phases:
+
+1. **No root from the plugin.** Root changes are constant scripts in a
+   visible terminal, or Omarchy's own commands. No root helper, sudoers rule,
+   polkit policy, service or timer, ever.
+2. **Everything Vigil reads is untrusted**, including its own helper's output,
+   other tools' result files and file names (a file name is chosen by whoever
+   created the file). It is size-capped, validated and shown as plain text,
+   never put into a command or a notification.
+3. **Virus scans run as you.** ClamAV scans (Vigil's quick scan and ClamUI)
+   never run as root: malware scanners have had parser bugs, and running
+   them unprivileged limits what a malicious file can do. Rootkit Hunter and
+   Lynis need root to inspect the system; they run only when you start them,
+   in the visible terminal.
+4. **Hand off, don't absorb.** ClamUI keeps quarantine, Bumblebee keeps its
+   catalog, Black Ops keeps telemetry blocking. Vigil reads their results and
+   opens them; it does not run their code or write their files.
+5. **No code or data fetched at run time.** Catalogs ship as reviewed data in
+   this repository. Network access happens only in actions you start, and
+   their confirmation says where they connect.
+6. **Nothing automatic.** Every change is confirmed; notifications carry
+   counts only; IPC methods take no parameters.
+7. **Removal leaves nothing running.** No units, cron jobs or daemons;
+   leftover files are listed in the README.
+
 ## What runs where
 
 | Part | Runs as | Does |
@@ -12,6 +39,7 @@ mechanical ones.
 | `Panel.qml` + `Model.js` | you, inside `omarchy-shell` | Draws the shield and panel, starts the helper, validates its output, launches confirmed actions. |
 | `bin/vigil` | you, as a child process | Reads local settings and returns one JSON report; performs the six helper actions. |
 | Terminal actions | you, in a visible terminal; `sudo` for root steps | Constant scripts from `Model.js`, and Omarchy's own commands. |
+| App actions | you | Open ClamUI with a fixed argv: `/usr/bin/clamui`, or `/usr/bin/flatpak run io.github.linx_systems.ClamUI`. |
 
 Nothing from the plugin folder ever runs as root. There is no sudoers rule,
 no polkit policy, no service, no timer and no daemon.
@@ -49,6 +77,18 @@ no polkit policy, no service, no timer and no daemon.
   are addressed by absolute path, from one of the two trusted directories.
   Each script prints what it will do and waits for Enter before running.
   `tests/model.test.mjs` runs `bash -n` on every script.
+- The one script that edits a shared file (Avahi) refuses unless the line
+  appears exactly once under `[publish]`, keeps the first original, takes a
+  rollback copy from `mktemp` in the same root-owned directory, and restores
+  it if the edit does not verify or Avahi does not restart.
+- App actions map an id and an install kind reported by the helper
+  (`native`, `flatpak` or nothing) to one of two fixed argv arrays. The
+  helper reports `flatpak` only when `/usr/bin/flatpak` is root-owned and the
+  ClamUI app directory exists.
+- Other tools' results (Bumblebee's `last-scan.json`) are read through a
+  descriptor walk from home with `O_NOFOLLOW` on every component, capped at
+  64 KiB, and accepted only if `ok` is `true` and `exposure_count` is a
+  non-negative integer. Vigil never writes there.
 
 ## Files
 
@@ -80,7 +120,7 @@ and say so on their confirmation.
 ## Repository hygiene
 
 No agent instruction files, no binaries, no file over 512 KiB, no NUL bytes,
-one ID (`io.github.keasbeexd.vigil`) everywhere, versions in the manifest and
+one ID (`keasbeexd.vigil`) everywhere, versions in the manifest and
 helper kept equal, MIT licence, and a Removing section in the README that
 names every file Vigil can leave behind.
 

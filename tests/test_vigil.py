@@ -563,8 +563,12 @@ def test_every_fix_in_helper_is_known_to_model(v):
     src = (REPO / "bin" / "vigil").read_text()
     used_terminal = set(re.findall(r'"terminal", "([a-z0-9-]+)"', src))
     used_helper = set(re.findall(r'"helper", "([a-z0-9-]+)"', src))
+    used_app = set(re.findall(r'"app", "([a-z0-9-]+)"', src))
+    msrc = (REPO / "Model.js").read_text()
+    for a in used_app:
+        assert '"%s": {\n    app:' % a in msrc, a
     for spec in v.SCANNERS:
-        used_terminal |= {spec[4], spec[5]}
+        used_terminal |= {spec[5], spec[6]}
     assert used_terminal <= terminal, used_terminal - terminal
     assert used_helper <= helper, used_helper - helper
     assert helper == set(v.FIXES)
@@ -577,7 +581,7 @@ def test_full_audit_shape(v):
     assert len(ids) == len(set(ids)) and len(ids) <= 80
     for c in report["checks"]:
         assert re.fullmatch(r"[a-z0-9-]{1,40}", c["id"])
-        assert c["category"] in ("harden", "scan", "privacy", "clean")
+        assert c["category"] in ("harden", "detect", "supply", "privacy", "care")
         assert c["status"] in ("pass", "warn", "fail", "info", "na", "unknown")
         assert c["fix"]["kind"] in ("terminal", "helper", "none")
         assert isinstance(c["weight"], int) and 0 <= c["weight"] <= 3
@@ -591,3 +595,87 @@ def test_cli_rejects_bad_arguments():
     for args in (["fix", "../../x"], ["fix"], ["audit", "--force"], []):
         p = subprocess.run(["/usr/bin/python3", "-I", "-S", vigil] + args, capture_output=True, timeout=30)
         assert p.returncode == 2, args
+
+
+# --------------------------------------------------------------------------
+# Pillars: ClamUI hand-off, Bumblebee, plugin inventory
+
+def test_categories_match_pillars(v):
+    cats = {c["category"] for c in v.audit(peek=True)["checks"]}
+    assert cats == {"harden", "detect", "supply", "privacy", "care"}
+
+
+def test_clamui_detection(v):
+    c = v.check_clamui()
+    assert c["status"] == "info" and c["fix"] == {"kind": "terminal", "action": "install-clamui", "label": "Install ClamUI"}
+    v.TRUSTED.add(v.ROOT + "/usr/bin/flatpak")
+    os.makedirs(os.path.join(v.HOME, ".local/share/flatpak/app/io.github.linx_systems.ClamUI/current"))
+    assert v.clamui_install() == "flatpak"
+    c = v.check_clamui()
+    assert c["status"] == "pass" and c["fix"]["kind"] == "app" and c["fix"]["action"] == "open-clamui"
+    v.TRUSTED.add(v.ROOT + "/usr/bin/clamui")
+    assert v.clamui_install() == "native"
+    assert v.audit(peek=True)["apps"] == {"clamui": "native"}
+
+
+def test_flatpak_clamui_needs_trusted_flatpak(v):
+    os.makedirs(os.path.join(v.HOME, ".local/share/flatpak/app/io.github.linx_systems.ClamUI/current"))
+    assert v.clamui_install() == ""
+
+
+def bumblebee(v, payload, raw=None):
+    os.makedirs(os.path.join(v.HOME, ".config/omarchy/plugins", v.BUMBLEBEE_ID), exist_ok=True)
+    homefile(v, ".local/state/omarchy/bumblebee/last-scan.json", raw if raw is not None else json.dumps(payload), 0o600)
+
+
+def test_bumblebee_states(v):
+    c = v.check_bumblebee()
+    assert c["status"] == "info" and c["weight"] == 0
+    os.makedirs(os.path.join(v.HOME, ".config/omarchy/plugins", v.BUMBLEBEE_ID))
+    assert v.check_bumblebee()["status"] == "unknown"
+    bumblebee(v, {"ok": True, "exposure_count": 0})
+    assert v.check_bumblebee()["status"] == "pass"
+    bumblebee(v, {"ok": True, "exposure_count": 2})
+    c = v.check_bumblebee()
+    assert c["status"] == "fail" and "2 known-compromised" in c["summary"]
+    bumblebee(v, {"ok": False, "exposure_count": 0})
+    assert v.check_bumblebee()["status"] == "unknown"
+    for bad in ({"ok": True, "exposure_count": True}, {"ok": True, "exposure_count": -1},
+                {"ok": True, "exposure_count": "3"}, ["x"]):
+        bumblebee(v, bad)
+        assert v.check_bumblebee()["status"] == "unknown", bad
+    bumblebee(v, None, raw="{not json")
+    assert v.check_bumblebee()["status"] == "unknown"
+
+
+def test_bumblebee_stale(v):
+    bumblebee(v, {"ok": True, "exposure_count": 0})
+    p = os.path.join(v.HOME, ".local/state/omarchy/bumblebee/last-scan.json")
+    old = os.path.getmtime(p) - 10 * 86400
+    os.utime(p, (old, old))
+    assert v.check_bumblebee()["status"] == "warn"
+
+
+def test_bumblebee_refuses_symlinked_cache(v, tmp_path):
+    os.makedirs(os.path.join(v.HOME, ".config/omarchy/plugins", v.BUMBLEBEE_ID))
+    real = put(tmp_path / "fake.json", json.dumps({"ok": True, "exposure_count": 0}))
+    d = Path(v.HOME, ".local/state/omarchy/bumblebee")
+    d.mkdir(parents=True)
+    os.symlink(real, d / "last-scan.json")
+    assert v.check_bumblebee()["status"] == "unknown"
+
+
+def test_bumblebee_oversized_cache(v):
+    bumblebee(v, None, raw='{"ok": true, "exposure_count": 0, "pad": "' + "x" * 70000 + '"}')
+    assert v.check_bumblebee()["status"] == "unknown"
+
+
+def test_plugin_inventory(v):
+    assert v.check_plugins()["status"] == "pass"
+    base = os.path.join(v.HOME, ".config/omarchy/plugins")
+    homefile(v, ".config/omarchy/plugins/acme.weather/manifest.json", json.dumps({"name": "<b>Weather</b>"}))
+    homefile(v, ".config/omarchy/plugins/keasbeexd.vigil/manifest.json", json.dumps({"name": "Vigil"}))
+    os.makedirs(os.path.join(base, "broken.plugin"))
+    c = v.check_plugins()
+    assert c["status"] == "info" and "2 third-party plugins" in c["summary"]
+    assert "Vigil" not in c["detail"] and "acme.weather" in c["detail"] and "broken.plugin" in c["detail"]

@@ -41,7 +41,8 @@ import sys
 import time
 from base64 import b64decode
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
+PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
 # ---------------------------------------------------------------------------
@@ -405,13 +406,13 @@ def conf_d(dirpath, suffix=".conf"):
 #
 # Each check returns a dict:
 #   id        stable identifier
-#   category  harden | scan | privacy | clean
+#   category  harden | detect | supply | privacy | care
 #   title     short name
 #   status    pass | warn | fail | info | na | unknown
 #   summary   one plain-language sentence about the current state
 #   detail    optional multi-line evidence
 #   why       one or two sentences on why it matters, for people new to this
-#   fix       {"kind": "terminal"|"helper"|"none", "action": id, "label": str}
+#   fix       {"kind": "terminal"|"helper"|"app"|"none", "action": id, "label": str}
 #   weight    0 (not scored) .. 3
 
 CHECKS = []
@@ -1100,7 +1101,7 @@ def check_listeners():
     return result(cid, cat, title, "info" if fw else "warn", summary, why, clean_block(lines), weight=1 if not fw else 0)
 
 
-# --- Scan -------------------------------------------------------------------
+# --- Detect -----------------------------------------------------------------
 
 PERSISTENCE_PATTERNS = [
     (re.compile(r"\b(curl|wget|fetch)\b[^|\n]*\|\s*(sudo\s+)?(ba|z|da|k)?sh\b", re.I), "downloads and runs a script"),
@@ -1135,7 +1136,7 @@ def _scan_text(label, text, hits):
 
 @check
 def check_persistence():
-    cid, cat, title = "persistence", "scan", "Startup files"
+    cid, cat, title = "persistence", "detect", "Startup files"
     why = ("Malware that wants to survive a reboot hides a line in a file that runs at login: a shell "
            "startup file, an autostart entry, a user service or a cron job. These patterns are suspicious, "
            "not proof; read each line and keep it only if you know where it came from.")
@@ -1169,7 +1170,7 @@ def check_persistence():
 
 @check
 def check_ld_preload():
-    cid, cat, title = "ld-preload", "scan", "System-wide preload"
+    cid, cat, title = "ld-preload", "detect", "System-wide preload"
     why = ("/etc/ld.so.preload forces a library into every program on the system. Normal desktops leave "
            "it empty; rootkits use it to hide files and processes.")
     try:
@@ -1186,7 +1187,7 @@ def check_ld_preload():
 
 @check
 def check_foreign_packages():
-    cid, cat, title = "aur-packages", "scan", "AUR and other foreign packages"
+    cid, cat, title = "aur-packages", "supply", "AUR and other foreign packages"
     why = ("Packages from the AUR are written by volunteers and are not checked by Arch. Malicious AUR "
            "packages have happened. Keep only the ones you recognise and still use.")
     tool = "/usr/bin/pacman"
@@ -1203,30 +1204,31 @@ def check_foreign_packages():
 
 
 SCANNERS = [
-    # id, binary, title, why, run action, install action
-    ("clamav", "clamscan", "ClamAV virus scanner",
-     "ClamAV checks files against a database of known viruses and malware. It is most useful for "
-     "downloads and files you share with Windows or macOS machines.", "scan-downloads", "install-clamav"),
-    ("rkhunter", "rkhunter", "Rootkit Hunter",
+    # id, binary, category, title, why, run action, install action
+    ("clamav", "clamscan", "detect", "ClamAV virus engine",
+     "ClamAV checks files against a database of known malware. Most of its signatures are for Windows "
+     "malware, so it matters most for downloads and files you pass on to other people. ClamUI (below) "
+     "is the easiest way to use it.", "scan-downloads", "install-clamav"),
+    ("rkhunter", "rkhunter", "detect", "Rootkit Hunter",
      "rkhunter looks for known rootkits, changed system programs and suspicious files. Run it after "
      "installing it once with --propupd so it learns what normal looks like.", "run-rkhunter", "install-rkhunter"),
-    ("lynis", "lynis", "Lynis audit",
+    ("lynis", "lynis", "harden", "Lynis audit",
      "Lynis runs hundreds of hardening checks and gives a hardening index with concrete suggestions.",
      "run-lynis", "install-lynis"),
-    ("arch-audit", "arch-audit", "Known vulnerabilities (arch-audit)",
+    ("arch-audit", "arch-audit", "supply", "Known vulnerabilities (arch-audit)",
      "arch-audit compares installed packages with the Arch security tracker and lists the ones with "
      "published vulnerabilities. It contacts security.archlinux.org when you run it.",
      "run-arch-audit", "install-arch-audit"),
 ]
 
 
-def _scanner_check(sid, binary, title, why, run_action, install_action):
+def _scanner_check(sid, binary, cat, title, why, run_action, install_action):
+    cid = "scanner-" + sid
     path = "/usr/bin/" + binary
     if not is_trusted_executable(sys_path(path)):
-        return result("scanner-" + sid, "scan", title, "info", "Not installed.", why,
+        return result(cid, cat, title, "info", "Not installed.", why,
                       fix=fix("terminal", install_action, "Install"), weight=0)
     summary = "Installed. Runs on demand in a terminal."
-    status = "info"
     if sid == "clamav":
         newest = 0
         for name in ("daily.cld", "daily.cvd"):
@@ -1235,16 +1237,16 @@ def _scanner_check(sid, binary, title, why, run_action, install_action):
             except OSError:
                 pass
         if not newest:
-            return result("scanner-clamav", "scan", title, "warn", "Installed, but the virus database is missing.",
+            return result(cid, cat, title, "warn", "Installed, but the virus database is missing.",
                           why, fix=fix("terminal", "freshclam", "Download the database"), weight=0)
         days = int((time.time() - newest) // 86400)
         if days > 7:
-            return result("scanner-clamav", "scan", title, "warn",
+            return result(cid, cat, title, "warn",
                           "Installed, but the virus database is %d days old." % days, why,
                           fix=fix("terminal", "freshclam", "Update the database"), weight=0)
-        summary = "Installed; database updated %s." % ("today" if days == 0 else "%d day%s ago" % (days, "" if days == 1 else "s"))
-    return result("scanner-" + sid, "scan", title, status, summary, why,
-                  fix=fix("terminal", run_action, "Run"), weight=0)
+        summary = "Installed; database updated %s." % (
+            "today" if days == 0 else "%d day%s ago" % (days, "" if days == 1 else "s"))
+    return result(cid, cat, title, "info", summary, why, fix=fix("terminal", run_action, "Run"), weight=0)
 
 
 def _make_scanner(spec):
@@ -1256,6 +1258,110 @@ def _make_scanner(spec):
 
 for _spec in SCANNERS:
     check(_make_scanner(_spec))
+
+
+CLAMUI_APP_ID = "io.github.linx_systems.ClamUI"
+
+
+def clamui_install():
+    """'native', 'flatpak' or '' — how ClamUI is installed, if at all."""
+    if is_trusted_executable(sys_path("/usr/bin/clamui")):
+        return "native"
+    if is_trusted_executable(sys_path("/usr/bin/flatpak")):
+        for base in (home_path(".local", "share", "flatpak", "app", CLAMUI_APP_ID),
+                     sys_path("/var/lib/flatpak/app/" + CLAMUI_APP_ID)):
+            if exists(base + "/current"):
+                return "flatpak"
+    return ""
+
+
+@check
+def check_clamui():
+    cid, cat, title = "clamui", "detect", "ClamUI"
+    why = ("ClamUI is a desktop app for ClamAV: scan files and folders, schedule scans, scan USB drives "
+           "when they are plugged in, and keep detected files in quarantine where they cannot run. Vigil "
+           "hands virus scanning to it rather than rebuilding it.")
+    kind = clamui_install()
+    if kind:
+        return result(cid, cat, title, "pass", "Installed (%s). Open it to scan or review quarantine." % (
+            "Flatpak" if kind == "flatpak" else "system package"), why,
+            fix=fix("app", "open-clamui", "Open ClamUI"), weight=0)
+    return result(cid, cat, title, "info", "Not installed.", why,
+                  fix=fix("terminal", "install-clamui", "Install ClamUI"), weight=0)
+
+
+BUMBLEBEE_ID = "io.github.duketopceo.bumblebee"
+
+
+@check
+def check_bumblebee():
+    cid, cat, title = "bumblebee", "supply", "Known-compromised packages (Bumblebee)"
+    why = ("Attackers sometimes take over a popular npm, PyPI or other package and publish a poisoned "
+           "version. The Bumblebee plugin checks your packages, lockfiles, editor extensions and MCP configs "
+           "against a catalog of known compromises. Vigil shows its last result.")
+    if not exists(home_path(".config", "omarchy", "plugins", BUMBLEBEE_ID)):
+        return result(cid, cat, title, "info",
+                      "Not installed. Add the Bumblebee plugin to check for compromised packages.", why, weight=0)
+    try:
+        fd = _open_home_dir([".local", "state", "omarchy", "bumblebee"])
+    except FileNotFoundError:
+        return result(cid, cat, title, "unknown", "Bumblebee has not scanned yet.", why, weight=3)
+    except (OSError, Refused):
+        return result(cid, cat, title, "unknown", "Could not read Bumblebee's results.", why, weight=3)
+    try:
+        try:
+            cfd = os.open("last-scan.json", O_READ | os.O_NOFOLLOW, dir_fd=fd)
+        except FileNotFoundError:
+            return result(cid, cat, title, "unknown", "Bumblebee has not scanned yet.", why, weight=3)
+        except OSError:
+            return result(cid, cat, title, "unknown", "Could not read Bumblebee's results.", why, weight=3)
+        try:
+            age_days = int((time.time() - os.fstat(cfd).st_mtime) // 86400)
+            raw = _read_fd(cfd, SMALL_FILE_MAX)
+        except (OSError, Refused):
+            return result(cid, cat, title, "unknown", "Could not read Bumblebee's results.", why, weight=3)
+        finally:
+            os.close(cfd)
+    finally:
+        os.close(fd)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        data = None
+    count = data.get("exposure_count") if isinstance(data, dict) else None
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0 or data.get("ok") is not True:
+        return result(cid, cat, title, "unknown", "Bumblebee's last scan did not complete.", why, weight=3)
+    if count > 0:
+        return result(cid, cat, title, "fail", "Bumblebee found %d known-compromised component%s. Open Bumblebee "
+                      "for the list." % (count, "" if count == 1 else "s"), why, weight=3)
+    if age_days > 7:
+        return result(cid, cat, title, "warn", "Bumblebee's last scan is %d days old." % age_days, why, weight=1)
+    return result(cid, cat, title, "pass", "Bumblebee found no known-compromised components.", why, weight=3)
+
+
+@check
+def check_plugins():
+    cid, cat, title = "omarchy-plugins", "supply", "Other Omarchy plugins"
+    why = ("Omarchy plugins run inside the desktop shell with everything your account can reach, and they "
+           "are not sandboxed. Keep only the ones you use, from authors you trust, and read the diff that "
+           "`omarchy plugin update` shows you.")
+    base = home_path(".config", "omarchy", "plugins")
+    names = [n for n in list_dir(base, 200) if not n.startswith(".") and n != PLUGIN_ID]
+    lines = []
+    for name in names[:100]:
+        label = name
+        try:
+            text = read_text(base + "/" + name + "/manifest.json", SMALL_FILE_MAX, follow=True)
+            m = json.loads(text) if text else None
+            if isinstance(m, dict) and isinstance(m.get("name"), str):
+                label = "%s (%s)" % (clean(m["name"], 60), clean(name, 80))
+        except (Refused, ValueError, OSError):
+            pass
+        lines.append(label)
+    if not lines:
+        return result(cid, cat, title, "pass", "No other third-party plugins are installed.", why, weight=0)
+    return result(cid, cat, title, "info", "%d third-party plugin%s installed." % (
+        len(lines), "" if len(lines) == 1 else "s"), why, clean_block(lines), weight=0)
 
 
 # --- Privacy ----------------------------------------------------------------
@@ -1379,7 +1485,7 @@ def check_black_ops():
                   why, weight=0)
 
 
-# --- Clean ------------------------------------------------------------------
+# --- Care -------------------------------------------------------------------
 
 def _dir_size(path, deadline):
     """Bytes under a directory, without following symlinks, within a budget."""
@@ -1415,11 +1521,11 @@ def human(n):
 
 def _size_check(cid, title, path, why, action, label, big):
     if not exists(path):
-        return result(cid, "clean", title, "pass", "Empty.", why, weight=0)
+        return result(cid, "care", title, "pass", "Empty.", why, weight=0)
     size, complete = _dir_size(path, time.monotonic() + WALK_MAX_SECONDS)
     approx = "" if complete else "at least "
     status = "warn" if size >= big else "info"
-    return result(cid, "clean", title, status if size else "pass", "%s%s." % (approx, human(size)) if size else "Empty.",
+    return result(cid, "care", title, status if size else "pass", "%s%s." % (approx, human(size)) if size else "Empty.",
                   why, fix=fix(*action, label) if size and action else None, weight=0)
 
 
@@ -1453,7 +1559,7 @@ def check_pacman_cache():
 
 @check
 def check_orphans():
-    cid, cat, title = "orphans", "clean", "Orphaned packages"
+    cid, cat, title = "orphans", "care", "Orphaned packages"
     why = ("Packages that were installed as dependencies of something you have since removed. They still "
            "get updates and still count as installed software.")
     tool = "/usr/bin/pacman"
@@ -1471,7 +1577,7 @@ def check_orphans():
 
 @check
 def check_journal():
-    cid, cat, title = "journal", "clean", "System logs"
+    cid, cat, title = "journal", "care", "System logs"
     why = "The system journal keeps logs of everything that happened, which is useful but grows over time."
     tool = "/usr/bin/journalctl"
     if not is_trusted_executable(sys_path(tool)):
@@ -1614,7 +1720,8 @@ def audit(peek=False):
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "durationMs": int((time.monotonic() - started) * 1000),
         "score": score_of(checks), "level": level, "counts": counts,
-        "checks": checks, "tools": tools, "new": [], "stateSaved": False,
+        "checks": checks, "tools": tools, "apps": {"clamui": clamui_install()},
+        "new": [], "stateSaved": False,
     }
     if not peek:
         report["new"], report["stateSaved"] = update_state(report)
@@ -1625,7 +1732,7 @@ def audit(peek=False):
 # User-level fixes (no root, no network). Each is a fixed action id.
 
 OPT_OUT_TEXT = (
-    "# Written by Vigil (io.github.keasbeexd.vigil). Remove from the Vigil panel or delete this file.\n"
+    "# Written by Vigil (keasbeexd.vigil). Remove from the Vigil panel or delete this file.\n"
     "# Read by uwsm at login; takes effect from the next session.\n"
     "export DO_NOT_TRACK=1\n"
     "export DOTNET_CLI_TELEMETRY_OPTOUT=1\n"

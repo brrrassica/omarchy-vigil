@@ -1,18 +1,15 @@
 # Vigil
 
 A security suite for [Omarchy](https://omarchy.org): one shield in the bar,
-one panel with everything security-related in it.
+one panel, five pillars.
 
-- **Harden** checks the settings that keep other people out: firewall, SSH,
-  kernel protections, disk encryption, screen lock, sudo, USB and
-  Thunderbolt authorization, updates and open ports.
-- **Scan** looks for signs of malware in the places it hides to survive a
-  reboot, and runs ClamAV, Rootkit Hunter, Lynis and arch-audit for you.
-- **Privacy** checks what this machine tells the networks it joins: DNS
-  fallback, hardware address, connectivity pings, network announcements and
-  telemetry opt-outs.
-- **Clean** shows thumbnails, trash, caches, old packages and logs, and
-  clears them when you ask.
+| Pillar | The question it answers |
+|---|---|
+| **Harden** | Can someone get in? Firewall, SSH, kernel protections, disk encryption, screen lock, sudo, USB and Thunderbolt authorization, updates, open ports. |
+| **Detect** | Is something bad already here? Malware hiding places, virus scanning through [ClamUI](https://github.com/linx-systems/clamui), rootkit checks. |
+| **Supply chain** | Can I trust what I installed? Known-compromised packages through [Bumblebee](https://github.com/duketopceo/omarchy-bumblebee), known vulnerabilities, AUR packages, your other Omarchy plugins. |
+| **Privacy** | What does this machine tell the networks it joins? DNS fallback, hardware address, connectivity pings, announcements, telemetry opt-outs. |
+| **Care** | Is the system tidy? Thumbnails, trash, caches, old packages and logs. |
 
 Every finding says, in plain language, what Vigil found and why it matters.
 Most come with a fix. Nothing changes until you press **Run** on a
@@ -22,8 +19,7 @@ root runs in a terminal you can watch.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.1, the first phase.** Checks, scanners and fixes all work. The
-> [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.2.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -34,8 +30,9 @@ omarchy plugin add https://github.com/keasbeexd/omarchy-vigil --enable
 ```
 
 The shield appears on the right of the bar. Nothing else is needed: Vigil
-uses Python and commands Omarchy already ships. The scanners are optional
-and Vigil installs each one for you, from the Scan tab, when you ask.
+uses Python and commands Omarchy already ships. ClamUI, the scanners and
+Bumblebee are optional; Vigil offers to install ClamUI and the scanners when
+you ask.
 
 ## Using it
 
@@ -43,22 +40,22 @@ and Vigil installs each one for you, from the Scan tab, when you ask.
 |---|---|
 | Left-click the shield | Open or close the panel |
 | Middle-click the shield | Check again now |
-| `←` `→` or `1`–`5` | Switch tabs |
+| `←` `→` or `1`–`6` | Switch tabs |
 | `↑` `↓`, `Enter` | Move through findings, open one |
 | `F` | Fix the selected finding (asks first) |
 | `R` | Check again |
 | `Esc` | Cancel a confirmation, or close |
 
 The shield is dim until the first check finishes, about eight seconds after
-login. It turns red when something needs fixing and a softer red when there
-are only improvements left. The **Overview** tab shows a score out of 100,
-how each area is doing, and the findings to fix first.
+login. It turns red when something needs fixing and a softer red when only
+improvements are left. The **Overview** tab shows a score out of 100, how
+each pillar is doing, and the findings to fix first.
 
 From a keybinding or script:
 
 ```sh
-omarchy-shell io.github.keasbeexd.vigil toggle
-omarchy-shell io.github.keasbeexd.vigil refresh
+omarchy-shell keasbeexd.vigil toggle
+omarchy-shell keasbeexd.vigil refresh
 ```
 
 ### Settings
@@ -98,18 +95,26 @@ score; checks with weight 0 are information and never lower it.
 | Security key or fingerprint | sudo takes only a password (information) | `omarchy-setup-security-fido2` (terminal) |
 | System updates | No full update in 14 days (warning) or 30 days (failure) | `omarchy-update` (terminal) |
 | Open network ports | Programs listen on the network with no firewall in front | |
+| Lynis | Installs Lynis and runs `lynis audit system --quick` for a hardening index and suggestions | |
 
-### Scan
+### Detect
 
 | Check | What it does |
 |---|---|
 | Startup files | Reads shell startup files, autostart entries, user services and timers, uwsm and environment.d files, Hyprland config and your crontab, and flags lines that download and run code, decode hidden code, open reverse shells, or set `LD_PRELOAD`. These are leads to read, not proof. |
 | System-wide preload | Fails if `/etc/ld.so.preload` loads anything; rootkits use it to hide. |
-| AUR and other foreign packages | Lists packages that did not come from the official repositories, so you can remove what you no longer recognise. |
-| ClamAV | Installs ClamAV, keeps its database fresh, and scans `~/Downloads`. |
+| ClamUI | Vigil hands virus scanning to [ClamUI](https://github.com/linx-systems/clamui): file and folder scans, scheduled scans, USB drive scans and quarantine. When it is installed, **Open ClamUI** starts it; otherwise Vigil offers to install it from Flathub. |
+| ClamAV virus engine | Whether ClamAV is installed and its signatures are under a week old; updates them with `freshclam`; quick scan of `~/Downloads` in a terminal. |
 | Rootkit Hunter | Installs rkhunter, records a baseline, and runs `rkhunter --check`. |
-| Lynis | Installs Lynis and runs `lynis audit system --quick` for a hardening index. |
-| arch-audit | Installs arch-audit and lists installed packages with published vulnerabilities that already have a fix. |
+
+### Supply chain
+
+| Check | What it does |
+|---|---|
+| Known-compromised packages | Shows the last result of the [Bumblebee](https://github.com/duketopceo/omarchy-bumblebee) plugin, which checks packages, lockfiles, editor extensions and MCP configs against a catalog of known compromises. Vigil only reads Bumblebee's result file; install Bumblebee yourself to use it. |
+| Known vulnerabilities | Installs arch-audit and lists installed packages with published vulnerabilities that already have a fix. |
+| AUR and other foreign packages | Lists packages that did not come from the official repositories, so you can remove what you no longer recognise. |
+| Other Omarchy plugins | Lists your third-party plugins. They run unsandboxed with your account's access, so keep only the ones you use. |
 
 ### Privacy
 
@@ -118,20 +123,20 @@ score; checks with weight 0 are information and never lower it.
 | DNS fallback servers | systemd-resolved falls back to Google, Cloudflare or Quad9 | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-fallback.conf` (terminal, sudo) |
 | Connectivity check | NetworkManager pings a server every few minutes (information) | `/etc/NetworkManager/conf.d/90-omarchy-vigil-connectivity.conf` (terminal, sudo) |
 | Hardware address on Wi-Fi | Networks see your real MAC address | `/etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf` (terminal, sudo) |
-| Network announcements | Avahi announces this machine's name | Sets `disable-publishing=yes` in `/etc/avahi/avahi-daemon.conf` after a backup (terminal, sudo) |
+| Network announcements | Avahi announces this machine's name | Sets `disable-publishing=yes` in `/etc/avahi/avahi-daemon.conf` (terminal, sudo). Refuses unless the setting appears exactly once under `[publish]`, keeps the first original as `avahi-daemon.conf.vigil-backup`, and restores the previous file if Avahi does not restart. |
 | Telemetry opt-out variables | `DO_NOT_TRACK` and similar are not set (information) | Writes `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` (no root) |
 | Black Ops | Shows whether [Black Ops](https://github.com/brightwalker25/omarchy-black-ops) is installed; it blocks app telemetry, which Vigil leaves to it | |
 
-### Clean
+### Care
 
 Thumbnail cache and trash (cleared without root), application caches (size
 only), package cache (`paccache -rk2`), orphaned packages
 (`omarchy-update-orphan-pkgs`, which asks before removing anything) and the
 system journal (`journalctl --vacuum-time=2weeks`).
 
-## How fixes run
+## How actions run
 
-There are three kinds of action, and the panel always says which:
+The panel always says which kind an action is:
 
 1. **No fix**: Vigil explains and leaves it to you.
 2. **Helper actions** run `bin/vigil fix <action>` as you, never as root:
@@ -145,17 +150,21 @@ There are three kinds of action, and the panel always says which:
    Thunderbolt authorization, FIDO2, passwordless sudo, the docker group,
    updates, orphans, package installs), Vigil runs that command rather than
    doing it itself.
+4. **Open an app**: **Open ClamUI** starts ClamUI directly, with a fixed
+   command and no shell. It changes nothing, so it does not ask first.
 
 Vigil never runs anything from its own folder as root, never adds a sudoers
-rule or polkit policy, and never changes a setting on its own.
+rule, polkit policy, service or timer, and never changes a setting on its
+own.
 
 ## Privacy
 
 Vigil makes no network connections. The checks read local files and ask
-`systemctl`, `pacman`, `journalctl` and `crontab` about local state. A few
-actions you start yourself do use the network, and say so before they run:
-installing a scanner (pacman mirrors), updating the ClamAV database
-(ClamAV's servers), `arch-audit` (security.archlinux.org) and `omarchy-update`.
+`systemctl`, `pacman`, `journalctl` and `crontab` about local state. Some
+actions you start yourself use the network, and their confirmation says so:
+installing ClamUI (Arch mirrors, dl.flathub.org, ClamAV's servers), installing
+a scanner (Arch mirrors), updating ClamAV's signatures (ClamAV's servers),
+`arch-audit` (security.archlinux.org) and `omarchy-update`.
 
 ## Files Vigil writes
 
@@ -169,17 +178,18 @@ installing a scanner (pacman mirrors), updating the ClamAV database
 | `/etc/ssh/sshd_config.d/00-omarchy-vigil.conf` | terminal action | only when you harden SSH |
 | `/etc/NetworkManager/conf.d/90-omarchy-vigil-connectivity.conf` | terminal action | only when you turn the connectivity check off |
 | `/etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf` | terminal action | only when you change the hardware address setting |
-| `/etc/avahi/avahi-daemon.conf` (backup at `avahi-daemon.conf.vigil-backup`) | terminal action | only when you stop Avahi announcements |
+| `/etc/avahi/avahi-daemon.conf` (first original kept at `avahi-daemon.conf.vigil-backup`) | terminal action | only when you stop Avahi announcements |
 
 Every file in `/etc` that Vigil creates starts with the line
-`# Written by Vigil (io.github.keasbeexd.vigil)`. The Omarchy commands Vigil
-launches (USB authorization and the rest) write their own files; see
-Omarchy's documentation for those.
+`# Written by Vigil (keasbeexd.vigil)`. Vigil reads, but never writes,
+Bumblebee's result file (`~/.local/state/omarchy/bumblebee/last-scan.json`).
+ClamUI, the scanners and the Omarchy commands Vigil launches keep their own
+files; see their documentation.
 
 ## Removing
 
 ```sh
-omarchy plugin remove io.github.keasbeexd.vigil
+omarchy plugin remove keasbeexd.vigil
 ```
 
 This removes the plugin folder. Vigil runs no services, timers or daemons, so
@@ -193,10 +203,11 @@ nothing keeps running. These stay behind until you remove them:
 - Settings you applied in `/etc`. They are your system settings now and keep
   protecting you after Vigil is gone. To undo one, delete its file from the
   table above with `sudo rm <file>`, then reboot (or restart the service
-  named in the table). For Avahi, restore the backup with
+  named in the table). For Avahi, restore the original with
   `sudo mv /etc/avahi/avahi-daemon.conf.vigil-backup /etc/avahi/avahi-daemon.conf`.
-- Scanners you installed (`clamav`, `rkhunter`, `lynis`, `arch-audit`). Remove
-  them with `omarchy pkg drop <name>` if you no longer want them.
+- Apps and scanners you installed through Vigil. Remove ClamUI with
+  `flatpak uninstall --user io.github.linx_systems.ClamUI`, and `clamav`,
+  `rkhunter`, `lynis` or `arch-audit` with `omarchy pkg drop <name>`.
 
 ## Requirements
 
@@ -216,14 +227,15 @@ The QML cannot be checked outside Omarchy: it imports `qs.Commons` and
 
 ## Credits
 
-Vigil is new code, but it stands on the work of the plugins it set out to
-bring together, all MIT licensed:
+Vigil is new code, but it stands on the work of the projects it brings
+together, all MIT licensed:
 [Black Ops](https://github.com/brightwalker25/omarchy-black-ops) (privacy
 protections and its research on Omarchy's defaults),
 [Security Scan](https://github.com/Percius04/security-scan) (scheduled
 scanners and the startup-file heuristics),
 [Bumblebee](https://github.com/duketopceo/omarchy-bumblebee) (supply-chain
-catalogs), and [SysCare](https://github.com/cytracon/omarchy-syscare)
+catalogs), [ClamUI](https://github.com/linx-systems/clamui) (virus scanning
+and quarantine), and [SysCare](https://github.com/cytracon/omarchy-syscare)
 (cleaning). The terminal-only approach to root comes from the reasoning in
 [omarchy-firewall](https://github.com/illegalstudio/omarchy-firewall).
 

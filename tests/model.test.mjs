@@ -148,11 +148,38 @@ test("ordering and counts", () => {
     check({ id: "b", status: "warn", weight: 1 }),
     check({ id: "c", status: "fail", weight: 1 }),
     check({ id: "d", status: "warn", weight: 0 }),
-    check({ id: "e", status: "info", category: "scan", weight: 0 })
+    check({ id: "e", status: "info", category: "detect", weight: 0 })
   ] }))
   assert.deepEqual(M.topFindings(r).map((c) => c.id), ["c", "b"])
   assert.deepEqual(M.checksFor(r, "harden").map((c) => c.id), ["c", "b", "d", "a"])
   assert.equal(M.countBy(r, "harden", "warn"), 2)
   assert.equal(M.countBy(r, "", "info"), 1)
   assert.match(M.tooltip(r, false), /^Vigil 70\/100/)
+})
+
+test("app actions: fixed argv per install kind, nothing else", () => {
+  assert.deepEqual(M.appCommand("open-clamui", { clamui: "flatpak" }), ["/usr/bin/flatpak", "run", "io.github.linx_systems.ClamUI"])
+  assert.deepEqual(M.appCommand("open-clamui", { clamui: "native" }), ["/usr/bin/clamui"])
+  assert.deepEqual(M.appCommand("open-clamui", { clamui: "" }), [])
+  assert.deepEqual(M.appCommand("open-clamui", { clamui: "__proto__" }), [])
+  assert.deepEqual(M.appCommand("open-clamui", {}), [])
+  assert.deepEqual(M.appCommand("constructor", { clamui: "native" }), [])
+  assert.equal(M.canRun({ kind: "app", action: "open-clamui" }, {}, { clamui: "native" }), true)
+  assert.equal(M.canRun({ kind: "app", action: "open-clamui" }, {}, { clamui: "" }), false)
+})
+
+test("apps field is validated", () => {
+  assert.equal(parse(report({ apps: { clamui: "/tmp/evil" } })), null)
+  assert.equal(parse(report({ apps: "native" })), null)
+  assert.equal(parse(report({ apps: { clamui: "flatpak" } })).apps.clamui, "flatpak")
+  assert.equal(parse(report()).apps.clamui, "")
+  const r = parse(report({ checks: [check({ fix: { kind: "app", action: "open-anything", label: "x" } })] }))
+  assert.equal(r.checks[0].fix.kind, "none")
+})
+
+test("pillars are the only categories", () => {
+  for (const cat of ["harden", "detect", "supply", "privacy", "care"]) {
+    assert.ok(parse(report({ checks: [check({ category: cat })] })), cat)
+  }
+  assert.equal(parse(report({ checks: [check({ category: "scan" })] })), null)
 })

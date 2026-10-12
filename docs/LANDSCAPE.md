@@ -20,6 +20,14 @@ the specialised plugins where they go deeper.
 | [Security Scan](https://github.com/Percius04/security-scan) (`io.github.elynch303.security-scan`) | Badge for scheduled AUR-Malware and bumblebee scans, a persistence heuristic for autostart/units/crontab, dismissals and history. | Vigil's Startup files check generalises its persistence heuristic (more locations, more patterns) and needs no install step or timer. AUR-Malware integration is deferred: it is a third-party script cloned from a fork, which the marketplace treats as unpinned remote code. |
 | [SysCare](https://github.com/cytracon/omarchy-syscare) (`io.github.cytracon.syscare`) | Bar front-end for the SysCare GTK app: CPU, memory, disk, updates, and a safe user-cache clean. | Vigil's Clean tab covers the security-relevant part (thumbnails, trash, package cache, orphans, logs) without needing a separate app. System monitoring stays out of scope. |
 
+## ClamUI
+
+[ClamUI](https://github.com/linx-systems/clamui) (MIT, Flathub
+`io.github.linx_systems.ClamUI`) is an actively maintained GTK4 front end for
+ClamAV: scan profiles, scheduled scans, removable-drive scans, quarantine with
+SHA-256 checks on restore, and an advisory audit. Rather than rebuild it, Vigil
+detects it under Detect, opens it, and offers to install it from Flathub.
+
 ## Plugins that already aim to be "the security plugin"
 
 | Plugin | Approach | Gap Vigil fills |

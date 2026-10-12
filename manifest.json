@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.keasbeexd.vigil",
+  "id": "keasbeexd.vigil",
   "name": "Vigil",
-  "version": "0.1.0",
-  "author": "keasbeexd",
+  "version": "0.2.0",
+  "author": "Marc Ferro",
   "license": "MIT",
-  "description": "A security suite for Omarchy: hardening checks, malware and rootkit scanners, privacy settings and cleanup in one bar panel, with plain-language explanations and fixes you approve one by one. Runs locally and sends nothing anywhere.",
+  "description": "A security suite for Omarchy in five pillars: hardening, malware detection (with ClamUI), supply-chain checks (with Bumblebee), privacy and system care. Plain-language findings and fixes you approve one by one; root changes run in a visible terminal. Sends nothing anywhere.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Vigil",
-    "description": "Security score in the bar; harden, scan, privacy and clean tabs in the panel",
+    "description": "Security score in the bar; Harden, Detect, Supply chain, Privacy and Care tabs in the panel",
     "category": "System",
     "aliases": [
       "vigil",
@@ -23,7 +23,9 @@
       "firewall",
       "malware",
       "antivirus",
+      "clamav",
       "rootkit",
+      "supply-chain",
       "privacy",
       "cleaner"
     ],
