@@ -55,7 +55,8 @@ def v(tmp_path, monkeypatch):
     commands = {}
     mod.COMMANDS = commands
 
-    def fake_run(argv, timeout=8, limit=0, on_line=None, raw=False):
+    def fake_run(argv, timeout=8, limit=0, on_line=None, raw=False, env=None):
+        envs.append(env)
         key = tuple(argv)
         if key not in commands:
             return None, b"" if raw else ""
@@ -64,6 +65,8 @@ def v(tmp_path, monkeypatch):
             out = "".join(l + "\n" for l in out.splitlines() if on_line(l))
         return rc, out
 
+    envs = []
+    mod.ENVS = envs
     monkeypatch.setattr(mod, "run", fake_run)
     trusted = set()
     mod.TRUSTED = trusted
@@ -1249,8 +1252,24 @@ def scan_argv(v):
 
 
 def clamscan_ok(v, out="", rc=0):
+    """A scan with this output. Detected files are created, and the second scan
+    that confirms each one (by its own path) agrees, unless the test says otherwise."""
     v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
     v.COMMANDS[scan_argv(v)] = (rc, out)
+    found = [l[:-len(" FOUND")].rsplit(": ", 1) for l in out.splitlines() if l.endswith(" FOUND") and ": " in l]
+    paths = [p for p, _ in found if p.startswith(v.HOME + "/")]
+    for p in paths:
+        Path(p).parent.mkdir(parents=True, exist_ok=True)
+        if not Path(p).exists():
+            Path(p).write_bytes(b"MZ")
+    if paths:
+        v.COMMANDS[confirm_argv(paths)] = (1, "".join("%s: %s FOUND\n" % (p, sig) for p, sig in found
+                                                       if p.startswith(v.HOME + "/")))
+
+
+def confirm_argv(paths):
+    return ("/usr/bin/nice", "-n", "19", "/usr/bin/clamscan", "--no-summary", "--stdout",
+            "--follow-file-symlinks=0", "--") + tuple(paths)
 
 
 def test_clamscan_never_follows_links_or_leaves_the_disk(v):
@@ -2329,7 +2348,7 @@ def test_a_virus_scan_that_runs_out_of_time_waits_a_week(v, monkeypatch):
     clock = [0.0]                                                   # the start, then an hour later
     monkeypatch.setattr(v.time, "monotonic", lambda: clock.pop() if clock else 3600.0)
     v.COMMANDS[scan_argv(v)] = (None, "")                           # killed at the deadline
-    monkeypatch.setattr(v, "count_home_files", lambda: 10)
+    monkeypatch.setattr(v, "count_home_files", lambda **kw: 10)
     with pytest.raises(v.TimedOut):
         v.refresh_virus_scan()
     meta = json.loads(Path(v.HOME, ".local/state/omarchy-vigil/virus-scan.json").read_text())
@@ -2340,7 +2359,7 @@ def test_a_virus_scan_that_runs_out_of_time_waits_a_week(v, monkeypatch):
 
 def test_a_quick_failure_is_still_retried_tomorrow(v, monkeypatch):
     clamscan_ok(v, rc=2)
-    monkeypatch.setattr(v, "count_home_files", lambda: 10)
+    monkeypatch.setattr(v, "count_home_files", lambda **kw: 10)
     with pytest.raises(v.Refused) as e:
         v.refresh_virus_scan()
     assert not isinstance(e.value, v.TimedOut)
@@ -2363,3 +2382,55 @@ def test_progress_shares_give_the_virus_scan_most_of_the_bar(v, capsys, monkeypa
         firsts.setdefault(p["step"], p)
     assert abs(sum(p["span"] for p in firsts.values()) - 1) < 0.01         # the shares fill the bar exactly
     v.PROGRESS["on"] = False
+
+
+def test_catalog_archive_is_unpacked_with_a_hard_cap(v, monkeypatch):
+    import gzip
+    monkeypatch.setattr(v, "CATALOG_TAR_MAX", 1024 * 1024)
+    # A tiny download that unpacks to far more than the cap (like a huge PAX header) is refused
+    # before tarfile reads any of it.
+    bomb = gzip.compress(b"\0" * (8 * 1024 * 1024))
+    assert len(bomb) < 64 * 1024
+    assert v.catalog_from_tarball(bomb) is None
+    assert v.catalog_from_tarball(tarball({"bumblebee-main/threat_intel/a.json": CAT_A}))["entries"]
+
+
+
+def test_a_file_name_with_a_line_break_cannot_fake_a_detection(v):
+    key = Path(v.HOME, ".ssh/id_ed25519")
+    key.parent.mkdir(parents=True)
+    key.write_text("secret")
+    evil = Path(v.HOME, "Downloads", "x\n%s: Win.Trojan.Agent-1 FOUND\ny" % key)
+    evil.parent.mkdir(parents=True)
+    try:
+        Path(v.HOME, "Downloads", "x\n").mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
+    # The scan prints the odd name as it is, which reads like a detection of the SSH key.
+    v.COMMANDS[scan_argv(v)] = (1, "%s/Downloads/x\n%s: Win.Trojan.Agent-1 FOUND\ny: OK\n" % (v.HOME, key))
+    v.COMMANDS[confirm_argv([str(key)])] = (0, "%s: OK\n" % key)             # scanned by itself: clean
+    odd_name = Path(v.HOME, "Downloads/x\ny")
+    odd_name.write_text("")
+    v.refresh_virus_scan()
+    c = v.check_virus_scan()
+    assert "id_ed25519" not in c["detail"] or c["status"] != "fail"
+    assert c["status"] == "warn" and "line break" in c["summary"]
+    assert "~/Downloads/x\\ny" in c["detail"]
+
+
+def test_too_many_detections_do_not_break_the_scan(v):
+    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
+    lines = "".join("%s/f%d: Win.X-1 FOUND\n" % (v.HOME, i) for i in range(2000))
+    v.COMMANDS[scan_argv(v)] = (1, lines)
+    v.refresh_virus_scan()                                                  # does not fail
+    assert v.check_virus_scan()["status"] in ("pass", "fail")
+
+
+
+def test_checkupdates_keeps_its_databases_in_the_private_state_folder(v):
+    updates_tools(v)
+    v.COMMANDS[("/usr/bin/checkupdates", "--nocolor")] = (2, "")
+    v.refresh_pending_updates()
+    assert {"CHECKUPDATES_DB": v.HOME + "/.local/state/omarchy-vigil/checkup-db"} in v.ENVS
+    assert oct(Path(v.HOME, ".local/state/omarchy-vigil").stat().st_mode & 0o777) == "0o700"

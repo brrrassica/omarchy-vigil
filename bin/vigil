@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta
 
-VERSION = "0.20.2"
+VERSION = "0.21.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -285,7 +285,7 @@ def _kill_group(proc):
             continue
 
 
-def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False):
+def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False, env=None):
     """Run an absolute argv; return (returncode, stdout_text) or (None, '').
 
     Own session, scrubbed env, deadline, stdout read incrementally against a
@@ -298,13 +298,18 @@ def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False):
     try:
         proc = subprocess.Popen(
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, env=dict(SAFE_ENV, HOME=HOME),
+            stderr=subprocess.DEVNULL, env=dict(SAFE_ENV, HOME=HOME, **(env or {})),
             start_new_session=True, close_fds=True,
             pass_fds=(RUN_LOCK["fd"],) if RUN_LOCK["fd"] is not None else (),
         )
     except OSError:
         return None, b"" if raw else ""
     CURRENT["proc"] = proc
+    if STOP["on"]:                                      # Stop arrived while it was starting
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except OSError:
+            pass
     if RUN_LOCK["fd"] is not None:
         save_run_info(proc.pid)
     buf = bytearray()
@@ -2213,8 +2218,10 @@ def _skip_dir(path, name):
     return rel in HOME_SCAN_SKIP
 
 
-def count_home_files(deadline_s=20.0):
-    """How many files the home scan will look at (same skips, no links, one disk); 0 if unknown."""
+def count_home_files(deadline_s=20.0, odd=None):
+    """How many files the home scan will look at (same skips, no links, one disk); 0 if unknown.
+    Names with a line break or other control character are added to `odd`: they can
+    fake or hide lines in a scanner's output."""
     try:
         dev = os.lstat(HOME).st_dev
     except OSError:
@@ -2234,6 +2241,8 @@ def count_home_files(deadline_s=20.0):
                                 stack.append(e.path)
                         elif e.is_file(follow_symlinks=False):
                             n += 1
+                        if odd is not None and len(odd) < 20 and any(ord(c) < 32 or ord(c) == 127 for c in e.name):
+                            odd.append(e.path)
                     except OSError:
                         continue
         except OSError:
@@ -2242,6 +2251,26 @@ def count_home_files(deadline_s=20.0):
 
 
 VIRUS_SCAN_SECONDS = 3 * 3600
+
+
+def confirm_detections(found):
+    """Scan each detected file again, by itself, with its exact path as the argument.
+    clamscan prints file names as they are, so a name with a line break in it can
+    print a fake "...: X FOUND" line for another file (a scare, say, about your SSH
+    key). Only what the second scan confirms is kept. Lines without a real path
+    (a name too odd to keep) stay as shown. If the second scan cannot run, all stay."""
+    files = [f for f in found if isinstance(f.get("file"), str)]
+    rest = [f for f in found if not isinstance(f.get("file"), str)]
+    real = [f for f in files if _stat_key(f["file"]) is not None][:500]
+    if not real:
+        return rest
+    argv = ["/usr/bin/nice", "-n", "19", "/usr/bin/clamscan", "--no-summary", "--stdout",
+            "--follow-file-symlinks=0", "--"] + [f["file"] for f in real]
+    rc, out = run(argv, timeout=1800, limit=4 * 1024 * 1024, on_line=lambda line: line.endswith(" FOUND"))
+    if rc not in (0, 1):
+        return real + rest
+    lines = set(out.splitlines())
+    return [f for f in real if "%s: %s FOUND" % (f["file"], f["signature"]) in lines] + rest
 
 
 class TimedOut(Refused):
@@ -2253,12 +2282,14 @@ def refresh_virus_scan(on_progress=None):
     if not exists(HOME):
         save_feed("virus-scan", {"found": [], "scanned": ""})
         return "There is no home folder to scan."
-    total = count_home_files()
-    seen, last = [0], [0.0]
+    odd = []
+    total = count_home_files(odd=odd)
+    seen, last, kept = [0], [0.0], [0]
 
     def on_line(line):
         if line.endswith(" FOUND"):
-            return True
+            kept[0] += 1
+            return kept[0] <= 500                       # more cannot crowd out the result
         seen[0] += 1
         now = time.monotonic()
         if on_progress and now - last[0] >= 2:
@@ -2277,8 +2308,9 @@ def refresh_virus_scan(on_progress=None):
     if rc not in (0, 1):
         save_feed("virus-scan", {}, ok=False)
         raise Refused("the virus scan did not finish (missing signatures?)")
-    found = parse_clamscan(out) if rc == 1 else []
-    save_feed("virus-scan", {"found": found, "scanned": "~", "files": seen[0]})
+    found = confirm_detections(parse_clamscan(out)) if rc == 1 else []
+    odd_shown = [clean(_shown(p).replace("\n", "\\n").replace("\r", "\\r"), 200) for p in odd]
+    save_feed("virus-scan", {"found": found, "scanned": "~", "files": seen[0], "oddNames": odd_shown})
     ignored = ignored_detections()
     live = sum(1 for f in found if not detection_ignored(f, ignored))
     note = " %d marked as a false positive." % (len(found) - live) if len(found) > live else ""
@@ -2309,6 +2341,16 @@ def check_virus_scan():
             live.append(text)
     n_ignored = len(found) - len(live)
     note = " %d marked as a false positive." % n_ignored if n_ignored else ""
+    odd = [clean(x, 200) for x in cache.get("oddNames", []) if isinstance(x, str)][:20] \
+        if isinstance(cache.get("oddNames"), list) else []
+    if odd and not live:
+        out = result(cid, cat, title, "warn", "No infected files, but %d file name%s contain%s a line break (%s)." % (
+            len(odd), "" if len(odd) == 1 else "s", "s" if len(odd) == 1 else "", feed_when(cache).replace(
+                "checked", "scanned")), why, clean_block(odd), fix=now, weight=1,
+            howto="Normal programs never name files like this; it is a trick to confuse virus scanners. "
+                  "Look at where these files came from, and delete them if you do not know them.")
+        out["items"] = items
+        return out
     if live:
         handoff = fix("app", "open-clamui", "Open ClamUI to quarantine them") if clamui_install() else now
         out = result(cid, cat, title, "fail", "%d infected file%s in %s (%s).%s" % (
@@ -2485,7 +2527,14 @@ def parse_checkupdates(text):
 
 
 def refresh_pending_updates():
-    rc, out = run([CHECKUPDATES, "--nocolor"], timeout=180, limit=2 * 1024 * 1024)
+    # Its copy of the package databases goes in Vigil's own private folder, not the
+    # shared /tmp, where another account could plant one first and fake the answer.
+    try:
+        os.close(_state_dir())
+    except (OSError, Refused):
+        raise Refused("could not open the Vigil state folder")
+    rc, out = run([CHECKUPDATES, "--nocolor"], timeout=180, limit=2 * 1024 * 1024,
+                  env={"CHECKUPDATES_DB": home_path(*STATE_DIR, "checkup-db")})
     if rc not in (0, 2):                                   # 0: updates waiting, 2: none, else an error
         save_feed("pending-updates", {}, ok=False)
         raise Refused("could not check for updates (offline?)")
@@ -2619,8 +2668,17 @@ def catalog_from_tarball(data):
     """One merged exposure catalog from the threat_intel/*.json files in a
     repository tarball, or None. Only those files are read, never extracted;
     sizes, counts and time are capped."""
+    # Unpack in memory with a hard cap first: tarfile reads some headers (PAX,
+    # GNU long names) whole before any per-member limit could apply.
     try:
-        tf = tarfile.open(fileobj=io.BytesIO(data), mode="r:gz")
+        z = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        raw = z.decompress(data, CATALOG_TAR_MAX + 1)
+    except zlib.error:
+        return None
+    if len(raw) > CATALOG_TAR_MAX or z.unconsumed_tail:
+        return None
+    try:
+        tf = tarfile.open(fileobj=io.BytesIO(raw), mode="r:")
     except (tarfile.TarError, OSError, EOFError):
         return None
     deadline = time.monotonic() + 20
@@ -2658,6 +2716,7 @@ def catalog_from_tarball(data):
 
 
 CATALOG_SCHEMAS = ("0.1.0", "0.2.0")
+CATALOG_TAR_MAX = 96 * 1024 * 1024        # the whole repository unpacked (about 20 MiB today)
 _CATALOG_TEXT = re.compile(r"^[^\x00-\x1f\x7f]{1,300}$")
 
 

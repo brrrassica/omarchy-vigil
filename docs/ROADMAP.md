@@ -111,7 +111,20 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.20 (this release): updates and firmware
+## 0.21 (this release): resource and security pass
+
+- [x] Nothing loops or repeats hours of work: every background error counts
+      as tried, the automatic run starts at most every six hours, a virus
+      scan that runs out of time waits a week; checks and runs at lowered
+      priority; a progress bar weighted by how long each step takes.
+- [x] From an independent review: Bumblebee pinned by a SHA-256 in Vigil
+      (not the release's own checksums) and never installed through a link;
+      the catalog archive unpacked with a hard memory cap; the hand-over
+      script re-checks what it turns off; virus detections confirmed by a
+      second scan of each file, names with line breaks flagged, detections
+      capped at 500; checkupdates' databases in Vigil's private folder.
+
+## 0.20: updates and firmware
 
 - [x] System updates says when a newer Omarchy is out (checkupdates, in
       Update sources and the Full scan) and offers Omarchy's updater.

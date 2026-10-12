@@ -31,7 +31,9 @@ These hold for every pillar, now and in later phases:
    you would in that app (ClamUI's user timer and its one
    `scheduled_scans_enabled` setting, `omarchy plugin disable` for the
    Bumblebee plugin), leaves a marker per change, and its Undo reverses
-   only what the markers name. Perplexity's Bumblebee is a
+   only what the markers name. The script checks again itself: it touches
+   ClamUI only when every scheduled folder is inside your home folder, and
+   the plugin only when Vigil's own Bumblebee is installed. Perplexity's Bumblebee is a
    standalone program Vigil installs from Perplexity's own release and runs
    as you, read-only.
 5. **Maintained sources, never executed.** Vigil keeps no threat lists. Data
@@ -128,16 +130,19 @@ accepted) cannot be signalled; the panel then says so.
   writable by anyone else, in a root-owned directory.
 - **Install** (shown in red as "MISSING … INSTALL" when a helper is
   missing) is one constant root script: `pacman -S --needed --noconfirm`
-  for ClamAV, arch-audit, osv-scanner and Flatpak, then Bumblebee, then
-  ClamUI from Flathub as you. Bumblebee is a pinned version from
+  for ClamAV, arch-audit, osv-scanner, fwupd and Flatpak, then Bumblebee,
+  then ClamUI from Flathub as you. Bumblebee is a pinned version from
   `https://github.com/perplexityai/bumblebee/releases/download/v<version>`:
-  the archive and the release's `checksums.txt` are downloaded over HTTPS
-  only (`--proto =https --proto-redir =https`, time-limited) into a fresh
-  `mktemp -d`, the archive's SHA-256 must match its line in
-  `checksums.txt` or nothing is installed, and only the `bumblebee` program
-  is extracted and installed as `/usr/local/bin/bumblebee`, owned by root,
-  mode 0755. Updating it means a new Vigil release with a new pinned
-  version.
+  the archive is downloaded over HTTPS only (`--proto =https --proto-redir
+  =https`, time- and size-limited) into a fresh `mktemp -d`, and its SHA-256
+  must equal the one written in `Model.js` for that architecture
+  (`BUMBLEBEE_SHA256`, taken from the release's `checksums.txt` and checked
+  against the archives when the version was pinned). A release changed
+  after that is refused, since nothing fetched with the archive is trusted.
+  Only the `bumblebee` member is extracted (`--no-same-owner
+  --no-same-permissions`), and only a regular file, not a link, is
+  installed as `/usr/local/bin/bumblebee`, owned by root, mode 0755.
+  Updating it means a new Vigil release with a new pinned version and hash.
 - Terminal actions are constant strings in `Model.js`. The report only names
   an action id; an id that is not in the table does nothing. Omarchy tools
   are addressed by absolute path, from one of the two trusted directories.
@@ -210,8 +215,10 @@ The weekly refresh (and **Update sources** or **Full scan**) is the only network
 by itself, and only once the relevant tool is installed:
 
 - `checkupdates --nocolor` (pacman-contrib, which Omarchy ships) syncs a
-  private copy of the package databases into `/tmp/checkup-db-<uid>` as
-  you and lists waiting updates; only `name old -> new` lines matching a
+  private copy of the package databases into
+  `~/.local/state/omarchy-vigil/checkup-db` (`CHECKUPDATES_DB`; not the
+  shared `/tmp`, where another account could plant one first) as you and
+  lists waiting updates; only `name old -> new` lines matching a
   strict pattern are kept. It installs nothing.
 - In the Full scan, `fwupdmgr refresh --no-unreported-check` (fwupd's
   polkit policy lets a logged-in user refresh firmware metadata without a
@@ -231,9 +238,11 @@ by itself, and only once the relevant tool is installed:
 - Bumblebee's catalogs are one `curl -q -sS --fail --proto =https
   --proto-redir =https --max-time 60 --max-filesize 33554432 -- <url>` to a
   fixed address, Perplexity's repository archive on `codeload.github.com`.
-  The archive is never unpacked to disk: Vigil reads it in memory and takes
-  only `threat_intel/*.json` members (at most 5,000 members, 8 MiB each,
-  64 MiB in total, 20 seconds). Each entry is checked the way Bumblebee
+  The archive is never unpacked to disk. It is decompressed in memory with
+  a hard cap of 96 MiB first (tar headers such as PAX are read whole before
+  any per-member limit could apply), then only `threat_intel/*.json`
+  members are read (at most 5,000 members, 8 MiB each, 64 MiB in total,
+  20 seconds). Each entry is checked the way Bumblebee
   checks it (id, ecosystem, package and a list of versions; no control
   characters), since one bad entry would make Bumblebee refuse the whole
   list, and only those fields plus name, severity and source are kept, at
@@ -252,10 +261,16 @@ by itself, and only once the relevant tool is installed:
   --no-summary --stdout --cross-fs=no --follow-dir-symlinks=0
   --follow-file-symlinks=0 --exclude-dir=... -- ~` as you, never as root.
   Its output is read line by line: lines for clean files are only counted
-  (for the progress bar) and dropped, and only `FOUND` lines are kept,
-  within a byte cap. File names in them are chosen by whoever named the
-  file, so they are cleaned, capped and shown as plain text, and never reach
-  a command or notification.
+  (for the progress bar) and dropped, and only the first 500 `FOUND` lines
+  are kept, so a flood of them cannot push the result past its cap. File
+  names in them are chosen by whoever named the file, so they are cleaned,
+  capped and shown as plain text, and never reach a command or
+  notification. clamscan prints names as they are, so a name with a line
+  break could print a fake `...: X FOUND` line for another file (your SSH
+  key, say). Every detection is therefore confirmed by a second scan of
+  that file alone, with its exact path as the argument; only confirmed
+  detections are kept. File names with a line break or other control
+  character are reported as a warning in their own right.
 - Results are parsed with byte caps and strict patterns, and only names,
   severities, IDs and counts are kept. A failed refresh keeps the last good
   result and retries after a day, so an offline machine is not hammered.

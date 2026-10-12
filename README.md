@@ -27,7 +27,7 @@ the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.20.2.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.21.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -229,7 +229,7 @@ lower it. A warning you mark as reviewed stops counting.
 
 | Check | What it does |
 |---|---|
-| Known-compromised packages | Runs Perplexity's [Bumblebee](https://github.com/perplexityai/bumblebee) in each Full scan. It checks your packages, lockfiles, editor and browser extensions and MCP configs against the compromised releases Perplexity tracks, and reads files only. **Install** downloads Perplexity's pinned release, installs it only if it matches the SHA-256 in the release's own `checksums.txt`, and puts it in `/usr/local/bin/bumblebee` (owned by root). |
+| Known-compromised packages | Runs Perplexity's [Bumblebee](https://github.com/perplexityai/bumblebee) in each Full scan. It checks your packages, lockfiles, editor and browser extensions and MCP configs against the compromised releases Perplexity tracks, and reads files only. **Install** downloads Perplexity's pinned release, installs it only if it matches the SHA-256 written in Vigil for that release, and puts it in `/usr/local/bin/bumblebee` (owned by root). |
 | Known-malicious npm and Bun packages | Runs [osv-scanner](https://github.com/google/osv-scanner) over your AUR build folders (`~/.cache/yay`, `~/.cache/paru`) and global npm, Bun, mise and pnpm installs, against [OSV.dev](https://osv.dev), which includes the [OpenSSF Malicious Packages](https://github.com/ossf/malicious-packages) reports. This is how the 2026 Atomic Arch AUR attack (which pulled malware in with `bun install`) and the npm worms that run on Bun are caught. Only confirmed malware (`MAL-` entries) counts; ordinary vulnerabilities in development dependencies are left out. |
 | Known vulnerabilities | Installs arch-audit, which uses the Arch security team's tracker, and lists only the problems an update fixes. |
 | AUR package status | Asks the AUR about your AUR packages: which have left the AUR, which are now in the official repositories, and which have no maintainer (most 2026 AUR attacks took over such orphans). Information only, since packages leave the AUR for ordinary reasons too. |
@@ -388,6 +388,7 @@ service (ClamAV's servers), and `omarchy-update`.
 | `~/.config/clamui/settings.json` (or ClamUI's Flatpak copy) | the Let Vigil run them action, and its Undo | only `scheduled_scans_enabled`, with everything else in the file kept |
 | `~/.local/state/omarchy-vigil/pending-updates.json` | the helper, mode 0600 | each Update sources and Full scan: how many updates are waiting, and the Omarchy version if one is |
 | `~/.local/state/omarchy-vigil/firmware.json` | the helper, mode 0600 | each Full scan: device names and firmware versions with an update waiting |
+| `~/.local/state/omarchy-vigil/checkup-db/` | `checkupdates`, as you | each update check: its private copy of the package databases (a few MB) |
 | `~/.local/state/omarchy-vigil/ignored-detections.json` | the helper, mode 0600 | when you mark a virus detection as a false positive: the file's path, the signature name and the file's SHA-256 |
 | `~/.local/state/omarchy-vigil/busy/` | the helper, mode 0700, empty | once: the folder Vigil locks so only one scan or update runs at a time |
 | `~/.local/state/omarchy-vigil/last-run.json` | the helper, mode 0600 | after each weekly or button update: its date, time and whether every source updated |

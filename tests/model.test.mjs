@@ -555,16 +555,55 @@ test("missing helpers: a red Install button that names them, and one plan for al
   assert.equal(M.missingLabel(parse(report({ missing: ["bumblebee"] }))), "MISSING Bumblebee. INSTALL")
 })
 
-test("Bumblebee comes only from Perplexity's pinned release, checked against its checksum", () => {
+test("Bumblebee comes only from Perplexity's pinned release, checked against a hash written in Vigil", () => {
   const body = M.actionPlan("install-helpers", TOOLS, "/home/marc")[0].argv[5]
   assert.match(body, /https:\/\/github\.com\/perplexityai\/bumblebee\/releases\/download\/v\$\{v\}/)
   assert.match(body, /v=\d+\.\d+\.\d+\n/)
+  assert.ok(!body.includes("checksums.txt"), "the hash is pinned here, not fetched with the archive")
+  for (const arch of ["amd64", "arm64"]) {
+    assert.match(M.BUMBLEBEE_SHA256[arch], /^[0-9a-f]{64}$/)
+    assert.ok(body.includes("a=" + arch + "; want=" + M.BUMBLEBEE_SHA256[arch]))
+  }
   for (const c of body.split("\n").filter(l => l.includes("/usr/bin/curl")))
-    assert.match(c, /--proto =https --proto-redir =https --max-time \d+/)
-  const check = body.indexOf("sha256sum"), extract = body.indexOf("tar -xzf"), install = body.indexOf("/usr/bin/install")
-  assert.ok(check > 0 && check < extract && extract < install)
-  assert.match(body, /\[ -z "\$want" \] \|\| \[ "\$want" != "\$have" \]; then .*exit 1; fi/)
+    assert.match(c, /--proto =https --proto-redir =https --max-time \d+ --max-filesize \d+/)
+  const check = body.indexOf("sha256sum"), extract = body.indexOf("tar --no-same-owner --no-same-permissions -xzf"),
+        plain = body.indexOf('[ -L "$t/bumblebee" ]'), install = body.indexOf("/usr/bin/install")
+  assert.ok(check > 0 && check < extract && extract < plain && plain < install)
+  assert.match(body, /if \[ "\$want" != "\$have" \]; then .*exit 1; fi/)
   assert.match(body, /install -D -o root -g root -m 0755 "\$t\/bumblebee" \/usr\/local\/bin\/bumblebee/)
+})
+
+test("the Bumblebee install refuses a tampered archive and a link in place of the program", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "vigil-bb-"))
+  const make = (name, link) => {
+    const src = path.join(dir, name); mkdirSync(src)
+    if (link) symlinkSync("/etc/hostname", path.join(src, "bumblebee"))
+    else writeFileSync(path.join(src, "bumblebee"), "#!/bin/sh\necho bee\n", { mode: 0o755 })
+    const tgz = path.join(dir, name + ".tar.gz")
+    execFileSync("/usr/bin/tar", ["-czf", tgz, "-C", src, "bumblebee"])
+    return [tgz, execFileSync("/usr/bin/sha256sum", [tgz], { encoding: "utf8" }).split(" ")[0]]
+  }
+  const run = (tgz, hash) => {
+    const out = path.join(dir, "out", "bumblebee")
+    // The real script, with the download replaced by a copy and the target moved into the test folder.
+    const body = M.BUMBLEBEE_INSTALL
+      .replace(/\/usr\/bin\/curl [^\n]*\n/, `/usr/bin/cp "${tgz}" "$t/$f"\n`)
+      .replace(/want=[0-9a-f]{64}/g, "want=" + hash)
+      .replaceAll("/usr/local/bin/bumblebee", out)
+      .replace("-o root -g root ", "")
+    rmSync(path.join(dir, "out"), { recursive: true, force: true })
+    const r = spawnSync("/usr/bin/bash", ["-c", "set -e\n" + body], { encoding: "utf8" })
+    return { status: r.status, text: r.stdout, installed: existsSync(out) }
+  }
+  const [good, goodHash] = make("good", false)
+  let r = run(good, goodHash)
+  assert.equal(r.status, 0, r.text); assert.ok(r.installed)
+  r = run(good, "0".repeat(64))
+  assert.notEqual(r.status, 0); assert.ok(!r.installed); assert.match(r.text, /did not match its checksum/)
+  const [linked, linkHash] = make("linked", true)
+  r = run(linked, linkHash)
+  assert.notEqual(r.status, 0); assert.ok(!r.installed); assert.match(r.text, /not a plain program file/)
+  rmSync(dir, { recursive: true, force: true })
 })
 
 test("an action in the panel shows how far it got; the words come from Vigil, not the output", () => {
@@ -635,20 +674,24 @@ test("hand-over turns off exactly the duplicate schedules, and Undo turns exactl
   put(".config/systemd/user/clamui-scheduled-scan.timer", "[Timer]\n")
   mkdirSync(path.dirname(path.join(home, wants)), { recursive: true })
   symlinkSync("../clamui-scheduled-scan.timer", path.join(home, wants))
-  const settings = put(".config/clamui/settings.json",
-    JSON.stringify({ scheduled_scans_enabled: true, schedule_time: "02:00", language: "de" }), 0o600)
+  const settings = put(".config/clamui/settings.json", JSON.stringify({ scheduled_scans_enabled: true,
+    schedule_time: "02:00", language: "de", schedule_targets: [home + "/Downloads", "~/Documents"] }), 0o600)
+  const bee = path.join(dir, "bumblebee")
+  writeFileSync(bee, "#!/bin/sh\n", { mode: 0o755 })
   mkdirSync(path.join(home, ".config/omarchy/plugins/io.github.duketopceo.bumblebee"), { recursive: true })
   const shell = put(".config/omarchy/shell.json",
     JSON.stringify({ bar: { layout: { right: [{ id: "io.github.duketopceo.bumblebee" }] } } }))
   const run = (id) => {
     const body = M.actionPlan(id, TOOLS, home)[0].argv[2].replaceAll("/usr/bin/systemctl", path.join(bin, "systemctl"))
+      .replaceAll("/usr/local/bin/bumblebee", bee)
     return spawnSync("/usr/bin/bash", ["-c", body], { env: { HOME: home, PATH: bin + ":/usr/bin:/bin" }, encoding: "utf8" })
   }
   const marks = path.join(home, ".local/state/omarchy-vigil/handed-over")
   let r = run("hand-over-schedules")
   assert.equal(r.status, 0, r.stderr)
   const after = JSON.parse(readFileSync(settings, "utf8"))
-  assert.deepEqual(after, { scheduled_scans_enabled: false, schedule_time: "02:00", language: "de" })
+  assert.deepEqual(after, { scheduled_scans_enabled: false, schedule_time: "02:00", language: "de",
+                            schedule_targets: [home + "/Downloads", "~/Documents"] })
   assert.equal(statSync(settings).mode & 0o777, 0o600)
   assert.deepEqual(readdirSync(marks).sort(), ["bumblebee-plugin", "clamui-setting-native", "clamui-timer"])
   assert.match(readFileSync(log, "utf8"), /systemctl --user disable --now clamui-scheduled-scan.timer\nomarchy-plugin-disable io.github.duketopceo.bumblebee\n/)
@@ -666,6 +709,21 @@ test("hand-over turns off exactly the duplicate schedules, and Undo turns exactl
   assert.equal(r.status, 0, r.stderr)
   assert.equal(readFileSync(log, "utf8"), "")
   assert.deepEqual(readdirSync(marks), [])
+  // A ClamUI scan that reaches outside the home folder, and the plugin when Vigil has no
+  // Bumblebee of its own, are never turned off, whatever the panel was shown.
+  symlinkSync("../clamui-scheduled-scan.timer", path.join(home, wants))
+  for (const targets of [[home, "/srv"], ["~/../../etc"], [], "x"]) {
+    writeFileSync(settings, JSON.stringify({ scheduled_scans_enabled: true, schedule_targets: targets }))
+    writeFileSync(shell, JSON.stringify({ plugins: [{ id: "io.github.duketopceo.bumblebee" }] }))
+    rmSync(bee)
+    r = run("hand-over-schedules")
+    assert.equal(r.status, 0, r.stderr)
+    assert.equal(readFileSync(log, "utf8"), "", JSON.stringify(targets))
+    assert.equal(JSON.parse(readFileSync(settings, "utf8")).scheduled_scans_enabled, true)
+    writeFileSync(bee, "#!/bin/sh\n", { mode: 0o755 })
+    writeFileSync(shell, JSON.stringify({ disabledPlugins: ["io.github.duketopceo.bumblebee"] }))
+  }
+  rmSync(path.join(home, wants))
   // Undo with nothing recorded changes nothing.
   r = run("undo-schedules")
   assert.equal(r.status, 0, r.stderr)

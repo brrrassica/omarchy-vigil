@@ -10,7 +10,7 @@
 // Must match manifest.json and VERSION in bin/vigil (a test checks). The
 // helper runs from disk every time, but this file stays loaded until the
 // shell restarts, so after an update the two can differ for a while.
-var VERSION = "0.20.2"
+var VERSION = "0.21.0"
 var MAX_REPORT_CHARS = 512 * 1024
 var MAX_CHECKS = 160
 var MAX_STR = 400
@@ -282,23 +282,29 @@ var PACCACHE_RUN = "before=" + PKG_DU + "; sudo /usr/bin/paccache -rk2; sudo /us
 var OLD_SERVICES = ["telnet.socket", "rsh.socket", "rlogin.socket", "ftpd.service", "tftpd.socket",
                     "tftpd.service", "xinetd.service", "ypserv.service", "ypbind.service"]
 
-// Bumblebee by Perplexity: a pinned release, installed only if it matches the
-// SHA-256 in the release's own checksums.txt. Only the program is kept.
+// Bumblebee by Perplexity: a pinned release whose archive must match the
+// SHA-256 written here (taken from that release's checksums.txt and checked
+// against the archives when this version was pinned), so a release changed
+// later is refused. Only the program is kept, and only if it is a regular file.
 var BUMBLEBEE_VERSION = "0.1.2"
+var BUMBLEBEE_SHA256 = {
+  "amd64": "53b080cf3ddb692b0c4e5492ef4785b4c54daf1624fcd0fcba3958116a0be8d9",
+  "arm64": "cb641a1023b12cd7b1411ebef5c7d426f7ecd81770a15a85873c5334a0e6b74d"
+}
 var BUMBLEBEE_INSTALL = "v=" + BUMBLEBEE_VERSION + "\n"
-  + "case \"$(/usr/bin/uname -m)\" in x86_64) a=amd64 ;; aarch64) a=arm64 ;; *) a= ;; esac\n"
+  + "case \"$(/usr/bin/uname -m)\" in x86_64) a=amd64; want=" + BUMBLEBEE_SHA256.amd64 + " ;; "
+  + "aarch64) a=arm64; want=" + BUMBLEBEE_SHA256.arm64 + " ;; *) a= ;; esac\n"
   + "if [ ! -x /usr/local/bin/bumblebee ] && [ -n \"$a\" ]; then\n"
   + "  t=$(/usr/bin/mktemp -d); trap '/usr/bin/rm -rf \"$t\"' EXIT\n"
   + "  f=\"bumblebee_${v}_linux_${a}.tar.gz\"; u=\"https://github.com/perplexityai/bumblebee/releases/download/v${v}\"\n"
-  + "  /usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 180 -o \"$t/$f\" \"$u/$f\"\n"
-  + "  /usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 60 -o \"$t/checksums.txt\" \"$u/checksums.txt\"\n"
-  + "  want=$(/usr/bin/awk -v f=\"$f\" '$2 == f { print $1 }' \"$t/checksums.txt\")\n"
+  + "  /usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 180 --max-filesize 67108864 -o \"$t/$f\" \"$u/$f\"\n"
   + "  have=$(/usr/bin/sha256sum \"$t/$f\" | /usr/bin/cut -d' ' -f1)\n"
-  + "  if [ -z \"$want\" ] || [ \"$want\" != \"$have\" ]; then echo 'Bumblebee did not match its checksum, so it was not installed.'; exit 1; fi\n"
-  + "  /usr/bin/tar -xzf \"$t/$f\" -C \"$t\" bumblebee\n"
+  + "  if [ \"$want\" != \"$have\" ]; then echo 'Bumblebee did not match its checksum, so it was not installed.'; exit 1; fi\n"
+  + "  /usr/bin/tar --no-same-owner --no-same-permissions -xzf \"$t/$f\" -C \"$t\" bumblebee\n"
+  + "  if [ ! -f \"$t/bumblebee\" ] || [ -L \"$t/bumblebee\" ]; then echo 'Bumblebee was not a plain program file, so it was not installed.'; exit 1; fi\n"
   + "  /usr/bin/install -D -o root -g root -m 0755 \"$t/bumblebee\" /usr/local/bin/bumblebee\n"
   + "  echo 'Bumblebee is installed.'\n"
-  + "fi"
+  + "fi\n"
 
 // The scheduled-scan hand-over: one marker per change, so Undo restores
 // exactly those. Must match HANDOVER_DIR and CLAMUI_SETTINGS in bin/vigil.
@@ -522,7 +528,7 @@ var TERMINAL_ACTIONS = {
            "(malicious packages), fwupd (firmware updates), ClamUI (virus scans and quarantine) and Bumblebee by Perplexity",
            "(known-compromised packages). Ones you already have are left alone.",
            "Bumblebee comes from Perplexity on GitHub and is installed only if it matches the checksum",
-           "Perplexity publishes with it. The rest come from the Arch mirrors, Flathub and ClamAV.",
+           "of the version Vigil was tested with. The rest come from the Arch mirrors, Flathub and ClamAV.",
            "Technical: pacman -S --needed clamav arch-audit osv-scanner fwupd flatpak, enable clamav-freshclam, bumblebee v" + BUMBLEBEE_VERSION + " to /usr/local/bin, flatpak install ClamUI"],
     // What the progress bar says at each "VIGIL-STEP n" line the script prints.
     stages: ["Installing ClamAV, arch-audit, osv-scanner and fwupd from the Arch mirrors",
@@ -593,23 +599,35 @@ var TERMINAL_ACTIONS = {
            "and the Bumblebee plugin, which Vigil replaces. Your scans still run, once, on the Vigil schedule.",
            "Undo turns back on exactly what this turned off. No password needed.",
            "Technical: systemctl --user disable --now clamui-scheduled-scan.timer, scheduled_scans_enabled false in ClamUI settings.json, omarchy plugin disable io.github.duketopceo.bumblebee"],
+    // The script checks again what the helper checked, so it never turns off a
+    // ClamUI scan that covers more than your home folder, or a Bumblebee plugin
+    // when Vigil has no Bumblebee of its own.
     run: HANDOVER_DIR_SH
+      + "home_only='.scheduled_scans_enabled == true and (.schedule_targets | type == \"array\" and length > 0 and "
+      + "all(.[]; type == \"string\" and (. == $h or startswith($h + \"/\") or . == \"~\" or startswith(\"~/\")) "
+      + "and (contains(\"/../\") | not) and (endswith(\"/..\") | not)))'\n"
+      + "ok=''\n"
+      + "for k in native flatpak; do\n"
+      + CLAMUI_SETTINGS_SH
+      + "  if [ -f \"$f\" ] && [ ! -L \"$f\" ] && /usr/bin/jq -e --arg h \"$HOME\" \"$home_only\" \"$f\" >/dev/null 2>&1; then\n"
+      + "    ok=\"$ok $k\"\n"
+      + "  fi\n"
+      + "done\n"
       + "w=\"$HOME/.config/systemd/user/timers.target.wants/clamui-scheduled-scan.timer\"\n"
-      + "if [ -e \"$w\" ] || [ -L \"$w\" ]; then\n"
+      + "if [ -n \"$ok\" ] && { [ -e \"$w\" ] || [ -L \"$w\" ]; }; then\n"
       + "  /usr/bin/systemctl --user disable --now clamui-scheduled-scan.timer\n"
       + "  : > \"$s/clamui-timer\"; echo 'ClamUI scheduled scan: off.'\n"
       + "fi\n"
-      + "for k in native flatpak; do\n"
+      + "for k in $ok; do\n"
       + CLAMUI_SETTINGS_SH
-      + "  if [ -f \"$f\" ] && [ ! -L \"$f\" ] && /usr/bin/jq -e '.scheduled_scans_enabled == true' \"$f\" >/dev/null 2>&1; then\n"
-      + "    t=$(/usr/bin/mktemp \"$f.vigil-XXXXXX\")\n"
-      + "    /usr/bin/jq '.scheduled_scans_enabled = false' \"$f\" > \"$t\"\n"
-      + "    /usr/bin/chmod --reference=\"$f\" \"$t\"; /usr/bin/mv -f -- \"$t\" \"$f\"\n"
-      + "    : > \"$s/clamui-setting-$k\"; echo 'ClamUI setting Scheduled scans: off.'\n"
-      + "  fi\n"
+      + "  t=$(/usr/bin/mktemp \"$f.vigil-XXXXXX\")\n"
+      + "  /usr/bin/jq '.scheduled_scans_enabled = false' \"$f\" > \"$t\"\n"
+      + "  /usr/bin/chmod --reference=\"$f\" \"$t\"; /usr/bin/mv -f -- \"$t\" \"$f\"\n"
+      + "  : > \"$s/clamui-setting-$k\"; echo 'ClamUI setting Scheduled scans: off.'\n"
       + "done\n"
       + "p=io.github.duketopceo.bumblebee; c=\"$HOME/.config/omarchy/shell.json\"\n"
-      + "if [ -d \"$HOME/.config/omarchy/plugins/$p\" ] && [ -f \"$c\" ] && /usr/bin/jq -e --arg id \"$p\" "
+      + "if [ -x /usr/local/bin/bumblebee ] && [ ! -L /usr/local/bin/bumblebee ] "
+      + "&& [ -d \"$HOME/.config/omarchy/plugins/$p\" ] && [ -f \"$c\" ] && /usr/bin/jq -e --arg id \"$p\" "
       + "'((.disabledPlugins // []) | index($id) | not) and (tostring | contains(\"\\\"\" + $id + \"\\\"\"))' \"$c\" >/dev/null 2>&1; then\n"
       + "  omarchy-plugin-disable \"$p\"\n"
       + "  : > \"$s/bumblebee-plugin\"; echo 'Bumblebee plugin: off. Vigil runs Bumblebee in its Full scan.'\n"
@@ -1469,6 +1487,7 @@ if (typeof module !== "undefined") {
     howTo: howTo, docsUrl: docsUrl, docsCommand: docsCommand, DOCS: DOCS, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
     shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
     relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine, countdown: countdown, scheduleLines: scheduleLines,
+    BUMBLEBEE_SHA256: BUMBLEBEE_SHA256, BUMBLEBEE_INSTALL: BUMBLEBEE_INSTALL,
     parseProgress: parseProgress, parseRunning: parseRunning, detectionItem: detectionItem, actionStage: actionStage, actionProgress: actionProgress,
     actionOutputText: actionOutputText, progressText: progressText, lastRunRows: lastRunRows, missingLabel: missingLabel,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,
