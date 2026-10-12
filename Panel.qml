@@ -169,6 +169,12 @@ Panel {
     pendingAction = "all"
   }
 
+  function requestInstallHelpers() {
+    if (!report || busy || actionProc.running) return
+    pendingKind = "terminal"
+    pendingAction = "install-helpers"
+  }
+
   function requestFullScan() {
     if (!report || busy || feedProc.running) return
     pendingKind = "full-scan"
@@ -484,7 +490,12 @@ Panel {
         for (var i = 0; i < lines.length; i++) {
           if (lines[i] === "") continue
           var p = Model.parseProgress(lines[i])
-          if (p) root.scanProgress = p
+          if (p) {
+            // A step finished: re-read, so its Last run line updates now,
+            // not after the (long) virus scan at the end.
+            if (root.scanProgress && p.step !== root.scanProgress.step) root.runAudit()
+            root.scanProgress = p
+          }
           else if (lines[i].length <= root.maxFixChars) root.feedResult = lines[i]
         }
       }
@@ -842,7 +853,19 @@ Panel {
                 enabled: !feedProc.running && !root.busy && root.pending === null
                 onClicked: root.requestFullScan()
               }
+              // When tools Vigil works with are missing, installing them comes first.
               Button {
+                visible: Model.missingLabel(root.report) !== ""
+                text: Model.missingLabel(root.report)
+                tooltipText: "Install everything Vigil works with that is missing, in one go"
+                foreground: root.urgent
+                fontFamily: root.fontFamily
+                bordered: true
+                enabled: !root.busy && root.pending === null
+                onClicked: root.requestInstallHelpers()
+              }
+              Button {
+                visible: Model.missingLabel(root.report) === ""
                 text: feedProc.running && !root.feedFull ? "Updating\u2026" : "Update sources"
                 tooltipText: "Download the latest virus signatures and lists Vigil checks against. No scan"
                 foreground: root.foreground

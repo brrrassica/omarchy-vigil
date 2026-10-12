@@ -698,41 +698,6 @@ def bumblebee(v, payload, raw=None):
     homefile(v, ".local/state/omarchy/bumblebee/last-scan.json", raw if raw is not None else json.dumps(payload), 0o600)
 
 
-def test_bumblebee_states(v):
-    c = v.check_bumblebee()
-    assert c["status"] == "info" and c["weight"] == 0
-    os.makedirs(os.path.join(v.HOME, ".config/omarchy/plugins", v.BUMBLEBEE_ID))
-    assert v.check_bumblebee()["status"] == "unknown"
-    bumblebee(v, {"ok": True, "exposure_count": 0})
-    assert v.check_bumblebee()["status"] == "pass"
-    bumblebee(v, {"ok": True, "exposure_count": 2})
-    c = v.check_bumblebee()
-    assert c["status"] == "fail" and "2 known-compromised" in c["summary"]
-    bumblebee(v, {"ok": False, "exposure_count": 0})
-    assert v.check_bumblebee()["status"] == "unknown"
-    for bad in ({"ok": True, "exposure_count": True}, {"ok": True, "exposure_count": -1},
-                {"ok": True, "exposure_count": "3"}, ["x"]):
-        bumblebee(v, bad)
-        assert v.check_bumblebee()["status"] == "unknown", bad
-    bumblebee(v, None, raw="{not json")
-    assert v.check_bumblebee()["status"] == "unknown"
-
-
-
-def test_bumblebee_refuses_symlinked_cache(v, tmp_path):
-    os.makedirs(os.path.join(v.HOME, ".config/omarchy/plugins", v.BUMBLEBEE_ID))
-    real = put(tmp_path / "fake.json", json.dumps({"ok": True, "exposure_count": 0}))
-    d = Path(v.HOME, ".local/state/omarchy/bumblebee")
-    d.mkdir(parents=True)
-    os.symlink(real, d / "last-scan.json")
-    assert v.check_bumblebee()["status"] == "unknown"
-
-
-def test_bumblebee_oversized_cache(v):
-    bumblebee(v, None, raw='{"ok": true, "exposure_count": 0, "pad": "' + "x" * 70000 + '"}')
-    assert v.check_bumblebee()["status"] == "unknown"
-
-
 def test_plugin_inventory(v):
     assert v.check_plugins()["status"] == "pass"
     base = os.path.join(v.HOME, ".config/omarchy/plugins")
@@ -1067,14 +1032,6 @@ def test_secret_patterns_are_provider_formats_only(v):
 def test_persistence_ignores_ld_preload_in_env_files(v):
     homefile(v, ".config/environment.d/50-game.conf", "LD_PRELOAD=/usr/lib/libstrangle.so\n")
     assert v.check_persistence()["status"] == "pass"
-
-
-def test_bumblebee_stale_is_information(v):
-    bumblebee(v, {"ok": True, "exposure_count": 0})
-    p = os.path.join(v.HOME, ".local/state/omarchy/bumblebee/last-scan.json")
-    os.utime(p, (os.path.getmtime(p) - 10 * 86400,) * 2)
-    c = v.check_bumblebee()
-    assert c["status"] == "info" and c["weight"] == 0
 
 
 def test_plugin_capabilities_are_information(v):
@@ -1621,33 +1578,6 @@ def test_firewire_only_matters_with_a_port(v):
 # --------------------------------------------------------------------------
 # Full scan: the whole home folder, Bumblebee, and the next automatic update
 
-def bumblebee_install(v, mode=0o755):
-    base = Path(v.HOME, ".config/omarchy/plugins", v.BUMBLEBEE_ID)
-    script = put(base / "bin" / "scan_bumblebee.py", "print('{}')\n", mode)
-    v.TRUSTED.add(v.ROOT + "/usr/bin/python3")
-    return str(script)
-
-
-def test_full_scan_asks_bumblebee_to_rescan(v):
-    script = bumblebee_install(v)
-    v.COMMANDS[("/usr/bin/python3", script, "--force")] = (0, "{}")
-    res = v.refresh_due_feeds(full=True)
-    assert res["message"].startswith("Had Bumblebee rescan your packages.")
-    assert "Bumblebee" not in v.refresh_due_feeds(sources_only=True)["message"]
-
-
-def test_bumblebee_scanner_must_be_safe_to_run(v, tmp_path):
-    script = bumblebee_install(v, 0o777)                     # writable by anyone: refused
-    assert v.bumblebee_scanner() == ""
-    os.chmod(script, 0o755)
-    assert v.bumblebee_scanner() == script
-    os.unlink(script)
-    os.symlink(put(tmp_path / "elsewhere.py", "x"), script)  # a link: refused
-    assert v.bumblebee_scanner() == ""
-
-
-
-
 def test_password_check_uses_omarchys_password_dialog(v):
     sysfile(v, "/etc/passwd", PASSWD + "ghost:x:1001:1001::/home/g:/bin/sh\n")
     v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash"}
@@ -1748,18 +1678,103 @@ def test_signature_update_wakes_clamavs_service_and_explains_failures(v):
     assert sig["state"] == "ok" and re.fullmatch(r"\d{2}:\d{2}", sig["time"])      # Vigil's own record
 
 
-def test_bumblebee_failure_is_reported_not_skipped(v):
-    Path(v.HOME, ".config/omarchy/plugins", v.BUMBLEBEE_ID).mkdir(parents=True)    # installed, no scanner
-    msg = v.refresh_due_feeds(full=True)["message"]
-    assert "Bumblebee could not rescan: its scanner is missing" in msg
-    script = bumblebee_install(v)
-    v.COMMANDS[("/usr/bin/python3", script, "--force")] = (0, '{"installed": false}\n')
-    assert "the bumblebee command it needs is not installed" in v.refresh_due_feeds(full=True)["message"]
+def test_missing_helpers_listed_in_order(v):
+    assert v.missing_helpers() == ["clamav", "arch-audit", "osv-scanner", "clamui", "bumblebee"]
+    v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan", v.ROOT + "/usr/bin/freshclam", v.ROOT + "/usr/bin/arch-audit"}
+    assert v.missing_helpers() == ["osv-scanner", "clamui", "bumblebee"]
+    assert v.audit(peek=True)["missing"] == ["osv-scanner", "clamui", "bumblebee"]
 
 
-def test_python_link_is_resolved_to_a_trusted_file(v):
-    real = put(Path(v.sys_path("/usr/bin/python3.13")), "#!", 0o755)
-    os.symlink("python3.13", v.sys_path("/usr/bin/python3"))
-    assert v.trusted_python() == ""                                       # the real file is not trusted yet
-    v.TRUSTED.add(str(real))
-    assert v.trusted_python() == "/usr/bin/python3.13"
+
+
+# --------------------------------------------------------------------------
+# Bumblebee by Perplexity
+
+import gzip as _gzip
+import tarfile as _tarfile
+import io as _io
+
+
+def tarball(files):
+    buf = _io.BytesIO()
+    with _tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, body in files.items():
+            data = body.encode() if isinstance(body, str) else body
+            info = _tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, _io.BytesIO(data))
+    return buf.getvalue()
+
+
+CAT_A = json.dumps({"schema_version": "0.2.0", "entries": [
+    {"id": "a", "name": "evil 1.0", "ecosystem": "npm", "package": "evil", "versions": ["1.0.0"]}]})
+CAT_B = json.dumps({"schema_version": "0.2.0", "entries": [
+    {"id": "b", "name": "bad 2", "ecosystem": "pypi", "package": "bad", "versions": ["2"]}, "junk"]})
+
+
+def bumblebee_installed(v):
+    v.TRUSTED |= {v.ROOT + "/usr/local/bin/bumblebee", v.ROOT + "/usr/bin/curl"}
+
+
+def test_catalog_reads_only_threat_intel_json(v):
+    data = tarball({"bumblebee-main/threat_intel/a.json": CAT_A, "bumblebee-main/threat_intel/b.json": CAT_B,
+                    "bumblebee-main/threat_intel/README.md": "x", "bumblebee-main/cmd/x.json": CAT_A,
+                    "bumblebee-main/threat_intel/old.json": json.dumps({"schema_version": "0.1.0", "entries": []}),
+                    "bumblebee-main/threat_intel/bad.json": "{not json"})
+    cat = v.catalog_from_tarball(data)
+    assert cat["schema_version"] == "0.2.0"
+    assert sorted(e["id"] for e in cat["entries"]) == ["a", "b"]
+    assert v.catalog_from_tarball(b"garbage") is None
+    assert v.catalog_from_tarball(tarball({"x/README.md": "x"})) is None
+
+
+def test_bumblebee_list_and_scan(v):
+    bumblebee_installed(v)
+    url_call = ("/usr/bin/curl", "-q", "-sS", "--fail", "--proto", "=https", "--proto-redir", "=https",
+                "--max-time", "60", "--max-filesize", "33554432", "--", v.BUMBLEBEE_CATALOG_URL)
+    data = tarball({"bumblebee-main/threat_intel/a.json": CAT_A})
+    real = v.run
+    v.run = lambda argv, **kw: (0, data) if tuple(argv) == url_call else real(argv, **kw)
+    assert v.refresh_bumblebee_list().startswith("Bumblebee list updated (1 known")
+    catalog = Path(v.HOME, ".local/state/omarchy-vigil", v.BUMBLEBEE_CATALOG)
+    assert json.loads(catalog.read_text())["entries"][0]["id"] == "a"
+    scan = ("/usr/local/bin/bumblebee", "scan", "--profile", "baseline", "--exposure-catalog", str(catalog),
+            "--findings-only", "--output", "stdout", "--max-duration", "5m")
+    finding = {"record_type": "finding", "catalog_name": "evil 1.0 (compromised)", "ecosystem": "npm",
+               "package_name": "evil", "version": "1.0.0", "source_file": "/home/x/p/package-lock.json",
+               "severity": "critical"}
+    v.COMMANDS[scan] = (0, json.dumps(finding) + "\n" + json.dumps({"record_type": "scan_summary",
+                                                                    "status": "complete"}) + "\n")
+    assert v.refresh_bumblebee() == "Bumblebee scanned."
+    c = v.check_bumblebee()
+    assert c["status"] == "fail" and "evil 1.0 (compromised): npm evil 1.0.0 in /home/x/p/package-lock.json" in c["detail"]
+    v.COMMANDS[scan] = (0, json.dumps({"record_type": "scan_summary", "status": "complete"}) + "\n")
+    v.refresh_bumblebee()
+    assert v.check_bumblebee()["status"] == "pass"
+    v.COMMANDS[scan] = (1, json.dumps({"record_type": "scan_summary", "status": "error"}) + "\n")
+    with pytest.raises(v.Refused):
+        v.refresh_bumblebee()
+    assert v.check_bumblebee()["status"] == "pass"                       # the last good result stays
+
+
+def test_bumblebee_states_and_install(v):
+    c = v.check_bumblebee()
+    assert c["status"] == "info" and c["fix"]["action"] == "install-helpers"
+    bumblebee_installed(v)
+    c = v.check_bumblebee()
+    assert c["status"] == "info" and "next Full scan" in c["summary"]
+    with pytest.raises(v.Refused):
+        v.refresh_bumblebee()                                             # no list downloaded yet
+
+
+def test_full_scan_runs_bumblebee_before_the_long_virus_scan(v, capsys, monkeypatch):
+    v.PROGRESS["on"] = True
+    bumblebee_installed(v)
+    monkeypatch.setattr(v, "refresh_bumblebee", lambda: "ok")
+    monkeypatch.setattr(v, "refresh_bumblebee_list", lambda: v.save_feed("bumblebee-list", {}))
+    v.FEED_REFRESH["bumblebee-list"] = v.refresh_bumblebee_list
+    clamscan_ok(v)
+    v.refresh_due_feeds(full=True)
+    steps = [json.loads(l)["progress"]["doing"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
+    assert steps.index("Checking your packages with Bumblebee") < steps.index("Scanning your home folder for viruses")
+    assert steps[-1] == "Scanning your home folder for viruses"

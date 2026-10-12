@@ -7,7 +7,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 |---|---|---|
 | Harden | Can someone get in? | Omarchy's own security commands |
 | Detect | Is something bad already here? | ClamUI for virus scanning and quarantine |
-| Supply | Can I trust what I installed? | Bumblebee for known-compromised components |
+| Supply | Can I trust what I installed? | Perplexity's Bumblebee for known-compromised components |
 | Privacy | What am I leaking? | Black Ops for telemetry blocking |
 | Care | Is the system tidy and recoverable? | Omarchy's orphan and update commands |
 
@@ -111,7 +111,19 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.16 (this release): no terminal pop-ups
+## 0.17 (this release): Bumblebee from Perplexity
+
+- [x] Bumblebee comes straight from Perplexity: **Install** fetches a pinned
+      release and installs it only if it matches the release's published
+      SHA-256. The weekly update downloads Perplexity's `threat_intel`
+      catalogs; each Full scan runs Bumblebee against them. The third-party
+      Omarchy wrapper plugin is no longer needed. Black Ops stays out.
+- [x] When a helper is missing, a red **MISSING … INSTALL** button takes the
+      place of **Update sources** and installs all of them at once.
+- [x] Full scan runs Bumblebee before the long virus scan, and the Last run
+      list updates as each step finishes.
+
+## 0.16: no terminal pop-ups
 
 - [x] Fixes, Undo, Clean all and installs run from the panel: the
       confirmation explains them, then Omarchy's password dialog asks

@@ -7,7 +7,7 @@ one panel, five pillars.
 |---|---|
 | **Harden** | Can someone get in? Firewall, SSH, kernel protections, disk encryption, screen lock, sudo, USB and Thunderbolt authorization, updates, open ports. |
 | **Detect** | Is something bad already here? Malware hiding places, virus scanning through [ClamUI](https://github.com/linx-systems/clamui), rootkit checks. |
-| **Supply** | Can I trust what I installed? Known-compromised packages through [Bumblebee](https://github.com/duketopceo/omarchy-bumblebee), known vulnerabilities, AUR packages, your other Omarchy plugins. |
+| **Supply** | Can I trust what I installed? Known-compromised packages through Perplexity's [Bumblebee](https://github.com/perplexityai/bumblebee), known vulnerabilities, AUR packages, your other Omarchy plugins. |
 | **Privacy** | What does this machine tell the networks it joins? DNS fallback, hardware address, connectivity pings, announcements, telemetry opt-outs. |
 | **Care** | Is the system tidy? Thumbnails, trash, caches, old packages and logs. |
 
@@ -27,7 +27,7 @@ the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.16.2.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.17.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -38,9 +38,10 @@ omarchy plugin add https://github.com/keasbeexd/omarchy-vigil --enable
 ```
 
 The shield appears on the right of the bar. Nothing else is needed: Vigil
-uses Python and commands Omarchy already ships. ClamUI, the scanners and
-Bumblebee are optional; Vigil offers to install ClamUI and the scanners when
-you ask.
+uses Python and commands Omarchy already ships. ClamUI, ClamAV, the
+scanners and Bumblebee are optional. When any are missing, the Overview shows
+a red **MISSING … INSTALL** button in place of **Update sources**; it lists
+what it will install, asks once more, and then asks for your password.
 
 ## Using it
 
@@ -73,7 +74,7 @@ reviewed) are dimmed.
 | Every check in every pillar (reading local settings) | every 30 minutes, and whenever you open the panel; offline, under a second |
 | **Update sources**: known vulnerabilities, malicious packages, AUR status | once a week, and when you press **Update sources** or **Full scan** |
 | ClamAV virus signatures, on demand | when you press **Update sources** (asks for your password) |
-| **Full scan**, background part: a virus scan of your home folder, a Bumblebee rescan | once a week, and when you press **Full scan** |
+| **Full scan**, background part: a Bumblebee scan, then a virus scan of your home folder | once a week, and when you press **Full scan** |
 | Password check (accounts without a password) | only when you press **Full scan**, since it needs your password |
 | ClamAV virus signatures | continuously, by ClamAV's own update service |
 | Cleaning (Care) | only when you ask; Vigil only measures sizes by itself |
@@ -84,8 +85,10 @@ The Overview has two buttons:
   order: the password check (Omarchy's own password dialog asks for your
   password), the lists of known holes, malicious packages and AUR status, a virus scan of your whole home
   folder (skipping caches, game libraries, `node_modules` and `.git`
-  folders, at low priority), a Bumblebee rescan if it is installed, then
-  every setting again. The panel shows a progress bar with the current step
+  folders, at low priority) last, then
+  every setting again. Bumblebee (if installed) runs before the virus scan,
+  and each line of the Last run list updates as its step finishes, so you
+  do not wait for the virus scan to see the rest. The panel shows a progress bar with the current step
   (and, during the virus scan, how many files are done), and a notification
   says when it is finished. Every tab then shows the results, and you fix
   what you choose from there.
@@ -110,8 +113,7 @@ last updated (virus signatures, known vulnerabilities, malicious packages,
 AUR status), with the time. Anything that failed or is out of date is red.
 Work done outside Vigil counts too: the virus signatures line includes
 ClamAV's own update service and updates made in ClamUI, the virus scan line
-includes scans you ran in ClamUI (marked "by ClamUI"), and the Bumblebee
-line is Bumblebee's own last scan. The vulnerability, malicious-package and
+includes scans you ran in ClamUI (marked "by ClamUI"). The vulnerability, malicious-package and
 AUR lines can only show Vigil's own updates, since those tools keep no record
 when run by hand.
 
@@ -162,7 +164,7 @@ settings:
 |---|---|---|
 | `refreshMinutes` | `30` | How often to check in the background (5 to 1440). |
 | `notifyOnNew` | `true` | One desktop notification when a check that was fine starts failing. It only says how many. |
-| `autoUpdate` | `true` | The weekly work: update the sources (see [Where the data comes from](#where-the-data-comes-from)), and the background part of a Full scan (a virus scan of your home folder and a Bumblebee rescan). Off means only when you press **Update sources** or **Full scan**. |
+| `autoUpdate` | `true` | The weekly work: update the sources (see [Where the data comes from](#where-the-data-comes-from)), and the background part of a Full scan (a Bumblebee scan and a virus scan of your home folder). Off means only when you press **Update sources** or **Full scan**. |
 
 ## What Vigil checks
 
@@ -212,7 +214,7 @@ lower it. A warning you mark as reviewed stops counting.
 
 | Check | What it does |
 |---|---|
-| Known-compromised packages | Shows the last result of the [Bumblebee](https://github.com/duketopceo/omarchy-bumblebee) plugin, which checks packages, lockfiles, editor extensions and MCP configs against a catalog of known compromises. Vigil only reads Bumblebee's result file; install Bumblebee yourself to use it. |
+| Known-compromised packages | Runs Perplexity's [Bumblebee](https://github.com/perplexityai/bumblebee) in each Full scan. It checks your packages, lockfiles, editor and browser extensions and MCP configs against the compromised releases Perplexity tracks, and reads files only. **Install** downloads Perplexity's pinned release, installs it only if it matches the SHA-256 in the release's own `checksums.txt`, and puts it in `/usr/local/bin/bumblebee` (owned by root). |
 | Known-malicious npm and Bun packages | Runs [osv-scanner](https://github.com/google/osv-scanner) over your AUR build folders (`~/.cache/yay`, `~/.cache/paru`) and global npm, Bun, mise and pnpm installs, against [OSV.dev](https://osv.dev), which includes the [OpenSSF Malicious Packages](https://github.com/ossf/malicious-packages) reports. This is how the 2026 Atomic Arch AUR attack (which pulled malware in with `bun install`) and the npm worms that run on Bun are caught. Only confirmed malware (`MAL-` entries) counts; ordinary vulnerabilities in development dependencies are left out. |
 | Known vulnerabilities | Installs arch-audit, which uses the Arch security team's tracker, and lists only the problems an update fixes. |
 | AUR package status | Asks the AUR about your AUR packages: which have left the AUR, which are now in the official repositories, and which have no maintainer (most 2026 AUR attacks took over such orphans). Information only, since packages leave the AUR for ordinary reasons too. |
@@ -283,7 +285,7 @@ The panel always says which kind an action is:
 4. **Open an app or a guide**: **Open ClamUI** starts ClamUI directly, and
    **Learn more** opens a page with `xdg-open`, each with a fixed command and
    no shell. Pages come only from a fixed list in `Model.js` (Arch Wiki,
-   MITRE ATT&CK, Bumblebee, Black Ops); nothing in the report becomes a URL.
+   MITRE ATT&CK, Perplexity's Bumblebee, Black Ops); nothing in the report becomes a URL.
    They change nothing, so they do not ask first.
 5. **Mark as reviewed** and **Show again** only change Vigil's own state
    file, so they do not ask first either.
@@ -302,7 +304,7 @@ Vigil keeps no threat lists of its own.
 | Known vulnerabilities in Arch packages | Arch Linux security team | arch-audit, once a week (and **Update sources**) |
 | Known-malicious npm, Bun and other packages | OSV.dev and the OpenSSF Malicious Packages project | osv-scanner, once a week (and **Update sources**) |
 | AUR package status | the AUR | AUR lookup, once a week (and **Update sources**) |
-| Known-compromised components | Bumblebee (Perplexity threat intel) | the Bumblebee plugin refreshes its own catalog |
+| Known-compromised packages, extensions and MCP configs | Perplexity (Bumblebee's `threat_intel` catalogs) | downloaded from Perplexity's repository once a week (and **Update sources**); Bumblebee scans in each Full scan |
 
 There is no maintained feed of malicious AUR packages; Arch's own list for
 the 2026 attacks was a one-off document. Vigil covers the AUR through what
@@ -335,13 +337,16 @@ service (ClamAV's servers), and `omarchy-update`.
 |---|---|---|
 | `~/.local/state/omarchy-vigil/state.json` | the helper, mode 0600 | every check: which findings you have already seen, which you marked as reviewed, and one score per day for 30 days |
 | `~/.local/state/omarchy-vigil/baseline.json` | the helper, mode 0600 | first check, and when you accept file changes: fingerprints (not contents) of the watched files |
-| `~/.local/state/omarchy-vigil/arch-audit.json` | the helper, mode 0600 | weekly and on Check now: package names and severities an update fixes |
-| `~/.local/state/omarchy-vigil/osv.json` | the helper, mode 0600 | weekly and on Check now: known-malicious packages found, if any, and which folders were checked |
-| `~/.local/state/omarchy-vigil/aur.json` | the helper, mode 0600 | weekly and on Check now: names of AUR packages that left the AUR or have no maintainer |
+| `~/.local/state/omarchy-vigil/arch-audit.json` | the helper, mode 0600 | weekly and on Update sources: package names and severities an update fixes |
+| `~/.local/state/omarchy-vigil/osv.json` | the helper, mode 0600 | weekly and on Update sources: known-malicious packages found, if any, and which folders were checked |
+| `~/.local/state/omarchy-vigil/aur.json` | the helper, mode 0600 | weekly and on Update sources: names of AUR packages that left the AUR or have no maintainer |
 | `~/.local/state/omarchy-vigil/virus-scan.json` | the helper, mode 0600 | weekly, in each Full scan and on Scan now: names of infected files found in your home folder, if any, and how many files were scanned |
 | `~/.local/state/omarchy-vigil/no-password.txt` | the helper, mode 0600 | each Full scan: names of accounts with an empty password, usually none |
 | `~/.local/state/omarchy-vigil/full-scan.json` | the helper, mode 0600 | after each Full scan, automatic or not: its date and time, for the countdown |
+| `~/.local/state/omarchy-vigil/bumblebee-catalog.json` | the helper, mode 0600 | weekly and on Update sources: Perplexity's list of compromised packages, for Bumblebee |
+| `~/.local/state/omarchy-vigil/bumblebee.json` | the helper, mode 0600 | each Full scan: the compromised packages Bumblebee found, if any |
 | `~/.local/state/omarchy-vigil/last-run.json` | the helper, mode 0600 | after each weekly or button update: its date, time and whether every source updated |
+| `/usr/local/bin/bumblebee` | the Install button, as root | only when you install Bumblebee: Perplexity's program, checked against its published checksum |
 | `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` | the helper | only when you set the opt-out variables |
 | `/etc/sysctl.d/90-omarchy-vigil.conf` | a script action, as root | only when you apply the kernel settings |
 | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf` | a script action, as root | only when you turn LLMNR off |
@@ -352,9 +357,7 @@ service (ClamAV's servers), and `omarchy-update`.
 | `/etc/avahi/avahi-daemon.conf` (first original kept at `avahi-daemon.conf.vigil-backup`) | a script action, as root | only when you stop Avahi announcements |
 
 Every file in `/etc` that Vigil creates starts with the line
-`# Written by Vigil (keasbeexd.vigil)`. Vigil reads, but never writes,
-Bumblebee's result file (`~/.local/state/omarchy/bumblebee/last-scan.json`).
-ClamUI, the scanners and the Omarchy commands Vigil launches keep their own
+`# Written by Vigil (keasbeexd.vigil)`. ClamUI, the scanners and the Omarchy commands Vigil launches keep their own
 files; see their documentation.
 
 ## Removing
@@ -380,7 +383,8 @@ nothing keeps running. These stay behind until you remove them:
 - Apps and scanners you installed through Vigil. Remove ClamUI with
   `flatpak uninstall --user io.github.linx_systems.ClamUI`, and `clamav`,
   `arch-audit` or `osv-scanner` with `omarchy pkg drop <name>` (and `lynis`
-  or `rkhunter`, if an earlier Vigil installed them).
+  or `rkhunter`, if an earlier Vigil installed them). Remove Bumblebee with
+  `sudo rm /usr/local/bin/bumblebee`.
   ClamAV's update service stops with `sudo systemctl disable --now clamav-freshclam.service`.
 
 ## Requirements
@@ -407,11 +411,17 @@ together, all MIT licensed:
 protections and its research on Omarchy's defaults),
 [Security Scan](https://github.com/Percius04/security-scan) (scheduled
 scanners and the startup-file heuristics),
-[Bumblebee](https://github.com/duketopceo/omarchy-bumblebee) (supply-chain
-catalogs), [ClamUI](https://github.com/linx-systems/clamui) (virus scanning
+[omarchy-bumblebee](https://github.com/duketopceo/omarchy-bumblebee) (the
+idea of bringing Perplexity's Bumblebee to Omarchy), [ClamUI](https://github.com/linx-systems/clamui) (virus scanning
 and quarantine), and [SysCare](https://github.com/cytracon/omarchy-syscare)
 (cleaning). The terminal-only approach to root comes from the reasoning in
 [omarchy-firewall](https://github.com/illegalstudio/omarchy-firewall).
+
+Known-compromised packages are found by Perplexity's
+[Bumblebee](https://github.com/perplexityai/bumblebee) (Apache 2.0) and its
+`threat_intel` catalogs. Vigil does not ship either: **Install** downloads
+the program from Perplexity's releases, and the catalogs come from
+Perplexity's repository.
 
 ## License
 

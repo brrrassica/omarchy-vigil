@@ -534,3 +534,30 @@ test("a scan or update done outside Vigil says so", () => {
   assert.equal(M.sourceLine(src, new Date(2026, 9, 12, 10, 0)), "ran yesterday at 21:30 (by ClamUI)")
   assert.equal(parse(report({ sources: [Object.assign({}, src, { by: "Someone" })] })), null)
 })
+
+test("missing helpers: a red Install button that names them, and one plan for all", () => {
+  assert.equal(M.missingLabel(parse(report())), "")
+  const r = parse(report({ missing: ["clamav", "clamui"] }))
+  assert.equal(M.missingLabel(r), "MISSING ClamAV, ClamUI. INSTALL")
+  assert.equal(parse(report({ missing: ["evil"] })), null)
+  assert.equal(parse(report({ missing: ["clamav", "clamav"] })), null)
+  const card = M.confirmation("terminal", "install-helpers", r)
+  assert.equal(card.lines[0], "Missing now: ClamAV, ClamUI.")
+  const plan = M.actionPlan("install-helpers", TOOLS, "/home/marc")
+  assert.equal(plan.length, 2)
+  assert.match(plan[0].argv[5], /pacman -S --needed --noconfirm clamav arch-audit osv-scanner flatpak/)
+  assert.ok(!plan[1].asRoot && plan[1].argv[2].includes("flatpak install --user --noninteractive --or-update"))
+  assert.equal(M.missingLabel(parse(report({ missing: ["bumblebee"] }))), "MISSING Bumblebee. INSTALL")
+})
+
+test("Bumblebee comes only from Perplexity's pinned release, checked against its checksum", () => {
+  const body = M.actionPlan("install-helpers", TOOLS, "/home/marc")[0].argv[5]
+  assert.match(body, /https:\/\/github\.com\/perplexityai\/bumblebee\/releases\/download\/v\$\{v\}/)
+  assert.match(body, /v=\d+\.\d+\.\d+\n/)
+  for (const c of body.split("\n").filter(l => l.includes("/usr/bin/curl")))
+    assert.match(c, /--proto =https --proto-redir =https --max-time \d+/)
+  const check = body.indexOf("sha256sum"), extract = body.indexOf("tar -xzf"), install = body.indexOf("/usr/bin/install")
+  assert.ok(check > 0 && check < extract && extract < install)
+  assert.match(body, /\[ -z "\$want" \] \|\| \[ "\$want" != "\$have" \]; then .*exit 1; fi/)
+  assert.match(body, /install -D -o root -g root -m 0755 "\$t\/bumblebee" \/usr\/local\/bin\/bumblebee/)
+})

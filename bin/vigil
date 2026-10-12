@@ -40,11 +40,13 @@ import signal
 import stat
 import subprocess
 import sys
+import io
+import tarfile
 import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta
 
-VERSION = "0.16.2"
+VERSION = "0.17.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -283,7 +285,7 @@ def _kill_group(proc):
             continue
 
 
-def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None):
+def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False):
     """Run an absolute argv; return (returncode, stdout_text) or (None, '').
 
     Own session, scrubbed env, deadline, stdout read incrementally against a
@@ -347,8 +349,8 @@ def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None):
         except OSError:
             pass
     if not ok or len(buf) > limit:
-        return None, ""
-    return proc.returncode, buf.decode("utf-8", "replace")
+        return None, b"" if raw else ""
+    return proc.returncode, bytes(buf) if raw else buf.decode("utf-8", "replace")
 
 
 _SYSTEMCTL_MEMO = {}
@@ -1444,6 +1446,24 @@ def refresh_signatures():
     return "Virus signatures updated."
 
 
+def missing_helpers():
+    """The tools Vigil works with that are not installed, in the order the
+    Install button lists them."""
+    out = []
+    if not (is_trusted_executable(sys_path("/usr/bin/clamscan"))
+            and is_trusted_executable(sys_path("/usr/bin/freshclam"))):
+        out.append("clamav")
+    if not is_trusted_executable(sys_path("/usr/bin/arch-audit")):
+        out.append("arch-audit")
+    if not is_trusted_executable(sys_path("/usr/bin/osv-scanner")):
+        out.append("osv-scanner")
+    if not clamui_install():
+        out.append("clamui")
+    if not bumblebee_ok():
+        out.append("bumblebee")
+    return out
+
+
 def can_ask_password():
     return is_trusted_executable(sys_path(PKEXEC)) and is_trusted_executable(sys_path("/usr/bin/bash"))
 
@@ -1621,10 +1641,11 @@ for _spec in SCANNERS:
 # cached in the state folder; checks read only the cache.
 
 FEED_FILES = {"arch-audit": "arch-audit.json", "osv": "osv.json", "aur": "aur.json", "virus-scan": "virus-scan.json",
-              "full-scan": "full-scan.json", "signatures": "signatures.json"}
+              "full-scan": "full-scan.json", "signatures": "signatures.json",
+              "bumblebee-list": "bumblebee-list.json", "bumblebee": "bumblebee.json"}
 # Two weekly timers: the sources (Update sources), and the automatic part of
 # a Full scan (the virus scan of the home folder and a Bumblebee rescan).
-SOURCE_FEEDS = ("arch-audit", "osv", "aur")
+SOURCE_FEEDS = ("arch-audit", "osv", "aur", "bumblebee-list")
 FEED_DAYS = 7
 FEED_RETRY_DAYS = 1
 
@@ -1652,6 +1673,8 @@ def feed_when(cache):
 def feed_available(name):
     if name == "full-scan":
         return True
+    if name in ("bumblebee-list", "bumblebee"):
+        return bumblebee_ok() and (name == "bumblebee" or is_trusted_executable(sys_path("/usr/bin/curl")))
     if name == "arch-audit":
         return is_trusted_executable(sys_path("/usr/bin/arch-audit"))
     if name == "osv":
@@ -1823,9 +1846,8 @@ def source_status():
         if ext[0] and _newer(ext, (mine["date"], mine["time"])) == ext and ext != (mine["date"], mine["time"]):
             out[-1] = dict(mine, date=ext[0], time=ext[1], state=fresh(ext[0], FEED_DAYS + FEED_RETRY_DAYS),
                            tried="", by="ClamUI")
-    if exists(home_path(".config", "omarchy", "plugins", BUMBLEBEE_ID)):
-        d, t = _mtime_stamp([home_path(".local", "state", "omarchy", "bumblebee", "last-scan.json")])
-        add("bumblebee", "Bumblebee scan", d, t, fresh(d, FEED_DAYS))
+    if feed_available("bumblebee"):
+        feed("bumblebee", "Bumblebee scan")
     d, _ = no_password_scan()
     _, t = _mtime_stamp([home_path(*STATE_DIR, NO_PASSWORD_NAME)]) if d else ("", "")
     add("password-check", "Password check (Full scan button only)", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
@@ -1844,7 +1866,7 @@ def source_status():
         d, t = _newer(ext, (d, t))
         add("signatures", "ClamAV virus signatures", d, t, fresh(d, FEED_DAYS), by=by)
     for name, label in (("arch-audit", "Arch vulnerability database"), ("osv", "OSV malicious-package database"),
-                        ("aur", "AUR package status")):
+                        ("aur", "AUR package status"), ("bumblebee-list", "Bumblebee compromised-package list")):
         if feed_available(name):
             feed(name, label)
     return out
@@ -2222,6 +2244,7 @@ def check_virus_scan():
 FEED_REFRESH = {"arch-audit": refresh_arch_audit, "osv": refresh_osv, "aur": refresh_aur}
 FEED_LABELS = {"arch-audit": "the Arch vulnerability database", "osv": "the OSV malicious-package database",
                "aur": "your AUR package status", "virus-scan": "the virus scan", "bumblebee": "the Bumblebee scan",
+               "bumblebee-list": "the Bumblebee list of compromised packages",
                "password-check": "the password check", "signatures": "the ClamAV virus signatures"}
 
 
@@ -2247,63 +2270,114 @@ def feed_findings():
     return out
 
 
-def _user_file_ok(path, base):
-    """True if every part of path below base, and base itself, is ours (or root's),
-    not a link, and not writable by anyone else."""
-    cur = base
-    parts = [""] + os.path.relpath(path, base).split(os.sep)
-    for i, part in enumerate(parts):
-        cur = os.path.join(cur, part) if part else cur
+# --- Bumblebee, from Perplexity ---------------------------------------------
+# Perplexity's open-source scanner (github.com/perplexityai/bumblebee) checks
+# installed packages, lockfiles, editor and browser extensions and MCP configs
+# against exposure catalogs of known-compromised releases that Perplexity
+# maintains in the same repository (threat_intel/). The Install button puts
+# the release binary, checksum-verified, at BUMBLEBEE_BIN; Update sources
+# fetches the current catalogs; the Full scan runs it as you, read-only.
+BUMBLEBEE_BIN = "/usr/local/bin/bumblebee"
+BUMBLEBEE_CATALOG_URL = "https://codeload.github.com/perplexityai/bumblebee/tar.gz/refs/heads/main"
+BUMBLEBEE_CATALOG = "bumblebee-catalog.json"
+_CATALOG_MEMBER = re.compile(r"^[A-Za-z0-9._-]{1,100}/threat_intel/[A-Za-z0-9._-]{1,100}\.json$")
+
+
+def bumblebee_ok():
+    return is_trusted_executable(sys_path(BUMBLEBEE_BIN))
+
+
+def catalog_from_tarball(data):
+    """One merged exposure catalog from the threat_intel/*.json files in a
+    repository tarball, or None. Only those files are read, never extracted;
+    sizes, counts and time are capped."""
+    try:
+        tf = tarfile.open(fileobj=io.BytesIO(data), mode="r:gz")
+    except (tarfile.TarError, OSError, EOFError):
+        return None
+    deadline = time.monotonic() + 20
+    by_schema, seen_bytes, members = {}, 0, 0
+    try:
+        for m in tf:
+            members += 1
+            seen_bytes += max(0, m.size)
+            if members > 5000 or seen_bytes > 64 * 1024 * 1024 or time.monotonic() > deadline:
+                return None
+            if not m.isfile() or not _CATALOG_MEMBER.match(m.name) or m.size > 8 * 1024 * 1024:
+                continue
+            f = tf.extractfile(m)
+            try:
+                doc = json.loads(f.read().decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if not isinstance(doc, dict) or not isinstance(doc.get("schema_version"), str) \
+                    or not isinstance(doc.get("entries"), list):
+                continue
+            entries = [e for e in doc["entries"] if isinstance(e, dict)]
+            by_schema.setdefault(clean(doc["schema_version"], 20), []).extend(entries)
+    except (tarfile.TarError, OSError, EOFError):
+        return None
+    if not by_schema:
+        return None
+    # Bumblebee merges only catalogs that share a schema version: keep the largest set.
+    schema, entries = max(by_schema.items(), key=lambda kv: len(kv[1]))
+    return {"schema_version": schema, "entries": entries[:50000]}
+
+
+def refresh_bumblebee_list():
+    rc, body = run(["/usr/bin/curl", "-q", "-sS", "--fail", "--proto", "=https", "--proto-redir", "=https",
+                    "--max-time", "60", "--max-filesize", "33554432", "--", BUMBLEBEE_CATALOG_URL],
+                   timeout=90, limit=32 * 1024 * 1024, raw=True)
+    catalog = catalog_from_tarball(body) if rc == 0 else None
+    if catalog is None:
+        save_feed("bumblebee-list", {}, ok=False)
+        raise Refused("the list could not be downloaded")
+    dirfd = _state_dir()
+    try:
+        _lock(dirfd)
+        write_atomic(dirfd, BUMBLEBEE_CATALOG, json.dumps(catalog, separators=(",", ":")).encode())
+    finally:
+        os.close(dirfd)
+    save_feed("bumblebee-list", {"entries": len(catalog["entries"])})
+    return "Bumblebee list updated (%d known-compromised releases)." % len(catalog["entries"])
+
+
+FEED_REFRESH["bumblebee-list"] = refresh_bumblebee_list
+
+
+def parse_bumblebee(text):
+    """(findings, status) from Bumblebee's NDJSON output; status None if no summary."""
+    findings, status = [], None
+    for line in text.splitlines()[:20000]:
         try:
-            st = os.lstat(cur)
-        except OSError:
-            return False
-        last = i == len(parts) - 1
-        if stat.S_ISLNK(st.st_mode) or (not last and not stat.S_ISDIR(st.st_mode)) \
-                or (last and not stat.S_ISREG(st.st_mode)):
-            return False
-        if st.st_uid not in (0, os.geteuid()) or st.st_mode & 0o022:
-            return False
-    return True
-
-
-def trusted_python():
-    """The real python3 interpreter, if trusted. On Arch /usr/bin/python3 is a
-    link to python3.X; Vigil resolves it and runs the file it points to only if
-    that is a trusted file in /usr/bin."""
-    link = sys_path("/usr/bin/python3")
-    real = os.path.realpath(link)
-    name = os.path.basename(real)
-    if os.path.dirname(real) != os.path.dirname(link) or not re.fullmatch(r"python3(\.\d{1,2})?", name):
-        return ""
-    return "/usr/bin/" + name if is_trusted_executable(sys_path("/usr/bin/" + name)) else ""
-
-
-def bumblebee_installed():
-    return exists(home_path(".config", "omarchy", "plugins", BUMBLEBEE_ID))
-
-
-def bumblebee_scanner():
-    """Bumblebee's own scanner, if it is installed and safe to run as you; else ''."""
-    base = home_path(".config", "omarchy", "plugins", BUMBLEBEE_ID)
-    script = os.path.join(base, "bin", "scan_bumblebee.py")
-    return script if _user_file_ok(script, base) and trusted_python() else ""
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(r, dict):
+            continue
+        if r.get("record_type") == "finding" and len(findings) < 500:
+            findings.append({k: clean(r.get(k), 200 if k == "source_file" else 120) for k in
+                             ("catalog_name", "ecosystem", "package_name", "version", "source_file", "severity")})
+        elif r.get("record_type") == "scan_summary" and r.get("status") in ("complete", "partial", "error"):
+            status = r["status"]
+    return findings, status
 
 
 def refresh_bumblebee():
-    """Ask Bumblebee to rescan: the same command its own service runs, as you."""
-    script = bumblebee_scanner()
-    if not script:
-        raise Refused("its scanner is missing, or its files can be changed by other accounts")
-    rc, out = run([trusted_python(), script, "--force"], timeout=300, limit=CMD_MAX)
-    if rc != 0:
+    """Scan with Bumblebee against the downloaded list, as you, read-only."""
+    if not bumblebee_ok():
+        raise Refused("it is not installed")
+    catalog = home_path(*STATE_DIR, BUMBLEBEE_CATALOG)
+    if not exists(catalog):
+        raise Refused("its list has not been downloaded yet; press Update sources")
+    rc, out = run([BUMBLEBEE_BIN, "scan", "--profile", "baseline", "--exposure-catalog", catalog,
+                   "--findings-only", "--output", "stdout", "--max-duration", "5m"],
+                  timeout=360, limit=4 * 1024 * 1024)
+    findings, status = parse_bumblebee(out or "")
+    if rc not in (0, 1) or status in (None, "error"):
+        save_feed("bumblebee", {}, ok=False)
         raise Refused("its scan did not finish")
-    try:
-        payload = json.loads(out.strip().splitlines()[-1]) if out.strip() else {}
-    except ValueError:
-        payload = {}
-    if isinstance(payload, dict) and payload.get("installed") is False:
-        raise Refused("the bumblebee command it needs is not installed")
+    save_feed("bumblebee", {"findings": findings, "status": status})
     return "Bumblebee scanned."
 
 
@@ -2311,7 +2385,8 @@ STEP_TEXT = {"arch-audit": "Updating the Arch vulnerability database",
              "osv": "Updating the OSV malicious-package database",
              "aur": "Checking your AUR packages",
              "virus-scan": "Scanning your home folder for viruses",
-             "bumblebee": "Asking Bumblebee to rescan your packages",
+             "bumblebee": "Checking your packages with Bumblebee",
+             "bumblebee-list": "Updating Bumblebee's list of compromised packages",
              "password-check": "Checking for accounts without a password (Omarchy asks for your password)",
              "signatures": "Updating ClamAV virus signatures (Omarchy asks for your password)"}
 
@@ -2329,10 +2404,11 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
     # and only when you press a button: never in the weekly background run.
     steps = (["password-check"] if full and can_ask_password() else []) \
         + (["signatures"] if sources_only and can_update_signatures() else []) + list(sources)
+    if run_full and bumblebee_ok():
+        steps.append("bumblebee")
     if (run_full or scan_only) and feed_available("virus-scan"):
-        steps.append("virus-scan")
-    if run_full and bumblebee_installed():
-        steps.append("bumblebee")                     # a failure says why, rather than being skipped
+        steps.append("virus-scan")                    # last: it takes longest
+    
     done, failed, why = [], [], {}
     for i, name in enumerate(steps, 1):
         progress(i, len(steps), STEP_TEXT[name])
@@ -2370,7 +2446,7 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
     if "virus-scan" in done:
         parts.append("scanned your home folder")
     if "bumblebee" in done:
-        parts.append("had Bumblebee rescan your packages")
+        parts.append("checked your packages with Bumblebee")
     if "password-check" in done:
         parts.append("checked for accounts without a password")
     msg = (_and(parts)[0].upper() + _and(parts)[1:] + ".") if parts else ""
@@ -2380,7 +2456,7 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
     if "password-check" in failed:
         msg += " The password check was skipped: no password was given."
     if "bumblebee" in failed:
-        msg += " Bumblebee could not rescan: %s." % why.get("bumblebee", "it did not finish")
+        msg += " Bumblebee could not scan: %s." % why.get("bumblebee", "it did not finish")
     if "signatures" in failed:
         msg += " The virus signatures were not updated: %s." % why.get("signatures", "ClamAV could not update them")
     msg += no_pkexec
@@ -2425,54 +2501,33 @@ def check_clamui():
                   fix=fix("terminal", "install-clamui", "Install ClamUI"), weight=0)
 
 
-BUMBLEBEE_ID = "io.github.duketopceo.bumblebee"
-
-
 @check
 def check_bumblebee():
     cid, cat, title = "bumblebee", "supply", "Known-compromised packages (Bumblebee)"
-    why = ("Attackers sometimes take over a popular npm, PyPI or other package and publish a "
-           "poisoned version. The Bumblebee plugin checks your packages, lockfiles, editor "
-           "extensions and MCP configs against a catalog of known compromises.")
-    if not exists(home_path(".config", "omarchy", "plugins", BUMBLEBEE_ID)):
-        return result(cid, cat, title, "info",
-                      "Not installed. Add the Bumblebee plugin to check for compromised packages.", why, weight=0)
-    try:
-        fd = _open_home_dir([".local", "state", "omarchy", "bumblebee"])
-    except FileNotFoundError:
-        return result(cid, cat, title, "unknown", "Bumblebee has not scanned yet.", why, weight=3)
-    except (OSError, Refused):
-        return result(cid, cat, title, "unknown", "Could not read Bumblebee's results.", why, weight=3)
-    try:
-        try:
-            cfd = os.open("last-scan.json", O_READ | os.O_NOFOLLOW, dir_fd=fd)
-        except FileNotFoundError:
-            return result(cid, cat, title, "unknown", "Bumblebee has not scanned yet.", why, weight=3)
-        except OSError:
-            return result(cid, cat, title, "unknown", "Could not read Bumblebee's results.", why, weight=3)
-        try:
-            age_days = int((time.time() - os.fstat(cfd).st_mtime) // 86400)
-            raw = _read_fd(cfd, SMALL_FILE_MAX)
-        except (OSError, Refused):
-            return result(cid, cat, title, "unknown", "Could not read Bumblebee's results.", why, weight=3)
-        finally:
-            os.close(cfd)
-    finally:
-        os.close(fd)
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except ValueError:
-        data = None
-    count = data.get("exposure_count") if isinstance(data, dict) else None
-    if isinstance(count, bool) or not isinstance(count, int) or count < 0 or data.get("ok") is not True:
-        return result(cid, cat, title, "unknown", "Bumblebee's last scan did not complete.", why, weight=3)
-    if count > 0:
-        return result(cid, cat, title, "fail", "Bumblebee found %d known-compromised component%s. Open Bumblebee "
-                      "for the list." % (count, "" if count == 1 else "s"), why, weight=3)
-    if age_days > 7:
-        return result(cid, cat, title, "info", "Bumblebee found nothing, but its last scan is %d days old." % age_days,
-                      why, weight=0)
-    return result(cid, cat, title, "pass", "Bumblebee found no known-compromised components.", why, weight=3)
+    why = ("Attackers sometimes take over a popular npm, PyPI or other package and publish a poisoned version. "
+           "Perplexity's Bumblebee checks your packages, editor and browser extensions and MCP configs "
+           "against the compromised releases Perplexity tracks.")
+    if not bumblebee_ok():
+        return result(cid, cat, title, "info", "Not installed.", why,
+                      fix=fix("terminal", "install-helpers", "Install"), weight=0,
+                      howto="Press Install: Vigil downloads Bumblebee from Perplexity, checks it against "
+                            "Perplexity's published checksum, and installs it.")
+    cache = feed_cache("bumblebee")
+    if cache is None:
+        return result(cid, cat, title, "info", "Installed. Its first check runs with the next Full scan.", why,
+                      weight=0, howto="Press Full scan on the Overview, or wait for the weekly one.")
+    found = [f for f in cache.get("findings", []) if isinstance(f, dict)][:500] \
+        if isinstance(cache.get("findings"), list) else []
+    when = feed_when(cache).replace("checked", "scanned")
+    if found:
+        lines = ["%s: %s %s %s in %s" % (clean(f.get("catalog_name"), 120), clean(f.get("ecosystem"), 30),
+                                          clean(f.get("package_name"), 100), clean(f.get("version"), 40),
+                                          clean(f.get("source_file"), 200)) for f in found]
+        return result(cid, cat, title, "fail", "%d known-compromised package%s found (%s)." % (
+            len(found), "" if len(found) == 1 else "s", when), why, clean_block(lines), weight=3,
+            howto="Remove or update each package listed (Details shows the file it came from), then change "
+                  "the passwords and keys used on this computer from another device.")
+    return result(cid, cat, title, "pass", "No known-compromised packages (%s)." % when, why, weight=3)
 
 
 @check
@@ -3523,8 +3578,8 @@ CHECK_HELP = {
                      ("docs", "arch-aur", "Learn more")),
     "virus-scan": ("Install ClamUI, which sets up ClamAV; Vigil then scans Downloads every week.",
                    ("terminal", "install-clamui", "Install ClamUI")),
-    "bumblebee": ("Install the Bumblebee plugin and let it scan; if it finds something, open it from the bar "
-                  "for the affected packages and what to do.", ("docs", "bumblebee", "Learn more")),
+    "bumblebee": ("Bumblebee runs with the Full scan. Perplexity explains what it checks and how its list "
+                  "is kept.", ("docs", "bumblebee", "Learn more")),
     "omarchy-plugins": ("Nothing to fix. Remove plugins you do not use with omarchy plugin remove <id>.",
                         ("terminal", "show-plugins", "List plugins")),
     "accounts": ("Get help before changing accounts; a mistake can lock you out.",
@@ -3610,6 +3665,7 @@ def audit(peek=False):
         "lastRun": last_run(),
         "nextUpdate": next_update(),
         "nextFullScan": next_full_scan(),
+        "missing": missing_helpers(),
     }
     if not peek:
         report["new"], report["stateSaved"] = update_state(report)

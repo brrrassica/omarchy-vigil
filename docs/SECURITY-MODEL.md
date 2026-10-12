@@ -24,14 +24,19 @@ These hold for every pillar, now and in later phases:
    them unprivileged limits what a malicious file can do. The one check
    that needs root, accounts without a password, runs only in a Full scan
    you start, and keeps only account names.
-4. **Hand off, don't absorb.** ClamUI keeps quarantine, Bumblebee keeps its
-   catalog, Black Ops keeps telemetry blocking. Vigil reads their results and
-   opens them; it does not run their code or write their files.
+4. **Hand off, don't absorb.** ClamUI keeps quarantine, Black Ops keeps
+   telemetry blocking. Vigil reads their results and opens them; it does not
+   run their code or write their files. Perplexity's Bumblebee is a
+   standalone program Vigil installs from Perplexity's own release and runs
+   as you, read-only.
 5. **Maintained sources, never executed.** Vigil keeps no threat lists. Data
    comes from the tools of the people who maintain it (arch-audit,
-   osv-scanner, ClamAV's freshclam) and one fixed AUR lookup, once a week
-   (the `autoUpdate` setting) or when you press Update sources or Full scan. Nothing fetched is
-   ever run; results are size-capped and validated like any other input.
+   osv-scanner, ClamAV's freshclam, Perplexity's Bumblebee catalogs) and one
+   fixed AUR lookup, once a week
+   (the `autoUpdate` setting) or when you press Update sources or Full scan. Nothing the weekly
+   update fetches is ever run; results are size-capped and validated like any
+   other input. The one program Vigil downloads, Bumblebee, is installed only
+   when you press Install, at a pinned version, after its checksum matches.
 6. **Nothing automatic.** Every change is confirmed; notifications carry
    counts only; IPC methods take no parameters.
 7. **Removal leaves nothing running.** No units, cron jobs or daemons;
@@ -90,9 +95,20 @@ no polkit policy, no service, no timer and no daemon.
   --signal=SIGUSR1` (it then checks at once; a second freshclam would fail
   on the service's log lock), and the script waits up to two minutes for the
   service's journal to report the result; otherwise it runs freshclam.
-- Programs Vigil runs must be trusted files, never links. `/usr/bin/python3`
-  is a link on Arch, so for Bumblebee's scanner Vigil resolves it and runs
-  the target only if it is a trusted `python3.X` file in `/usr/bin`.
+- Programs Vigil runs must be trusted files, never links: root-owned, not
+  writable by anyone else, in a root-owned directory.
+- **Install** (shown in red as "MISSING … INSTALL" when a helper is
+  missing) is one constant root script: `pacman -S --needed --noconfirm`
+  for ClamAV, arch-audit, osv-scanner and Flatpak, then Bumblebee, then
+  ClamUI from Flathub as you. Bumblebee is a pinned version from
+  `https://github.com/perplexityai/bumblebee/releases/download/v<version>`:
+  the archive and the release's `checksums.txt` are downloaded over HTTPS
+  only (`--proto =https --proto-redir =https`, time-limited) into a fresh
+  `mktemp -d`, the archive's SHA-256 must match its line in
+  `checksums.txt` or nothing is installed, and only the `bumblebee` program
+  is extracted and installed as `/usr/local/bin/bumblebee`, owned by root,
+  mode 0755. Updating it means a new Vigil release with a new pinned
+  version.
 - Terminal actions are constant strings in `Model.js`. The report only names
   an action id; an id that is not in the table does nothing. Omarchy tools
   are addressed by absolute path, from one of the two trusted directories.
@@ -137,10 +153,6 @@ no polkit policy, no service, no timer and no daemon.
   (`native`, `flatpak` or nothing) to one of two fixed argv arrays. The
   helper reports `flatpak` only when `/usr/bin/flatpak` is root-owned and the
   ClamUI app directory exists.
-- Other tools' results (Bumblebee's `last-scan.json`) are read through a
-  descriptor walk from home with `O_NOFOLLOW` on every component, capped at
-  64 KiB, and accepted only if `ok` is `true` and `exposure_count` is a
-  non-negative integer. Vigil never writes there.
 
 ## Files
 
@@ -176,6 +188,20 @@ by itself, and only once the relevant tool is installed:
 - The AUR lookup is one `curl -q -sS --fail --proto =https --proto-redir
   =https --max-time 30 --max-filesize 4194304 -- <url>` to a fixed host,
   with package names checked against a strict pattern and percent-encoded.
+- Bumblebee's catalogs are one `curl -q -sS --fail --proto =https
+  --proto-redir =https --max-time 60 --max-filesize 33554432 -- <url>` to a
+  fixed address, Perplexity's repository archive on `codeload.github.com`.
+  The archive is never unpacked to disk: Vigil reads it in memory and takes
+  only `threat_intel/*.json` members (at most 5,000 members, 8 MiB each,
+  64 MiB in total, 20 seconds), keeps the catalogs of the most common
+  schema version, at most 50,000 entries, and writes them as one JSON file
+  with mode 0600. Bumblebee then reads that file as data
+  (`--exposure-catalog`).
+- Bumblebee's scan is `/usr/local/bin/bumblebee scan --profile baseline
+  --exposure-catalog <file> --findings-only --output stdout --max-duration
+  5m`, as you, with the empty environment, and only finding fields (catalog
+  name, ecosystem, package, version, file, severity) are kept, cleaned and
+  capped. It reads files only and makes no network calls of its own.
   `tests/test_marketplace_rules.py` fails if any other network call appears.
 - The virus scan runs `/usr/bin/nice -n 19 /usr/bin/clamscan --recursive
   --no-summary --stdout --cross-fs=no --follow-dir-symlinks=0
@@ -201,14 +227,6 @@ say where they connect before they run.
 - The plugin capability scan reads other plugins' files as text, at most 300
   files per plugin, 512 KiB per file, 8 MiB and three seconds in total,
   without following symlinks. It never loads, imports or runs them.
-- The one exception to "never runs it": a Full scan you start asks
-  Bumblebee to rescan by running Bumblebee's own scanner exactly as
-  Bumblebee's service does, `/usr/bin/python3 <bumblebee>/bin/scan_bumblebee.py
-  --force`, as you, with Vigil's cleaned environment and a five-minute limit.
-  It is code that already runs as you every few hours, so nothing gains
-  privileges. Vigil runs it only if the plugin folder, its `bin` folder and
-  the script are not links, belong to you (or root) and cannot be changed by
-  anyone else.
 - For the Last run list Vigil reads ClamUI's log index
   (`clamui/logs/log_index.json` in its data folder, Flatpak or not) with
   the no-follow reader and a 2 MiB cap, and keeps only the newest

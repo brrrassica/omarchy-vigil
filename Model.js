@@ -131,6 +131,8 @@ function confirmation(kind, id, report) {
   var a = kind === "helper" ? helperInfo(id) : (kind === "terminal" ? terminalAction(id) : null)
   if (!a) return null
   var lines = a.what.slice(0)
+  if (id === "install-helpers" && report && report.missing && report.missing.length)
+    lines.unshift("Missing now: " + report.missing.map(function(m) { return HELPER_NAMES[m] }).join(", ") + ".")
   if (kind === "terminal") {
     var mode = runMode(id)
     lines.push(mode === "terminal" ? "Opens a terminal: this tool asks you questions as it goes."
@@ -250,6 +252,24 @@ var PACCACHE_RUN = "before=" + PKG_DU + "; sudo /usr/bin/paccache -rk2; sudo /us
 // Must match OLD_SERVICES in bin/vigil (a test checks).
 var OLD_SERVICES = ["telnet.socket", "rsh.socket", "rlogin.socket", "ftpd.service", "tftpd.socket",
                     "tftpd.service", "xinetd.service", "ypserv.service", "ypbind.service"]
+
+// Bumblebee by Perplexity: a pinned release, installed only if it matches the
+// SHA-256 in the release's own checksums.txt. Only the program is kept.
+var BUMBLEBEE_VERSION = "0.1.2"
+var BUMBLEBEE_INSTALL = "v=" + BUMBLEBEE_VERSION + "\n"
+  + "case \"$(/usr/bin/uname -m)\" in x86_64) a=amd64 ;; aarch64) a=arm64 ;; *) a= ;; esac\n"
+  + "if [ ! -x /usr/local/bin/bumblebee ] && [ -n \"$a\" ]; then\n"
+  + "  t=$(/usr/bin/mktemp -d); trap '/usr/bin/rm -rf \"$t\"' EXIT\n"
+  + "  f=\"bumblebee_${v}_linux_${a}.tar.gz\"; u=\"https://github.com/perplexityai/bumblebee/releases/download/v${v}\"\n"
+  + "  /usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 180 -o \"$t/$f\" \"$u/$f\"\n"
+  + "  /usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 60 -o \"$t/checksums.txt\" \"$u/checksums.txt\"\n"
+  + "  want=$(/usr/bin/awk -v f=\"$f\" '$2 == f { print $1 }' \"$t/checksums.txt\")\n"
+  + "  have=$(/usr/bin/sha256sum \"$t/$f\" | /usr/bin/cut -d' ' -f1)\n"
+  + "  if [ -z \"$want\" ] || [ \"$want\" != \"$have\" ]; then echo 'Bumblebee did not match its checksum, so it was not installed.'; exit 1; fi\n"
+  + "  /usr/bin/tar -xzf \"$t/$f\" -C \"$t\" bumblebee\n"
+  + "  /usr/bin/install -D -o root -g root -m 0755 \"$t/bumblebee\" /usr/local/bin/bumblebee\n"
+  + "  echo 'Bumblebee is installed.'\n"
+  + "fi"
 
 var TERMINAL_ACTIONS = {
   "firewall-on": {
@@ -444,6 +464,22 @@ var TERMINAL_ACTIONS = {
       + "if /usr/bin/systemctl is-enabled --quiet \"$u\" 2>/dev/null || /usr/bin/systemctl is-active --quiet \"$u\"; "
       + "then echo \"Switching off $u\"; sudo /usr/bin/systemctl disable --now \"$u\"; fi; done"
   },
+  "install-helpers": {
+    title: "Install the missing helpers",
+    what: ["Installs the tools Vigil works with that are missing: ClamAV (virus scanner) with its service",
+           "that keeps virus signatures up to date, arch-audit (known security holes), osv-scanner",
+           "(malicious packages), ClamUI (virus scans and quarantine) and Bumblebee by Perplexity",
+           "(known-compromised packages). Ones you already have are left alone.",
+           "Bumblebee comes from Perplexity on GitHub and is installed only if it matches the checksum",
+           "Perplexity publishes with it. The rest come from the Arch mirrors, Flathub and ClamAV.",
+           "Technical: pacman -S --needed clamav arch-audit osv-scanner flatpak, enable clamav-freshclam, bumblebee v" + BUMBLEBEE_VERSION + " to /usr/local/bin, flatpak install ClamUI"],
+    run: "/usr/bin/pacman -S --needed --noconfirm clamav arch-audit osv-scanner flatpak "
+      + "&& /usr/bin/systemctl enable --now clamav-freshclam.service && echo 'Packages installed.'\n"
+      + BUMBLEBEE_INSTALL,
+    then: "/usr/bin/flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo "
+      + "&& /usr/bin/flatpak install --user --noninteractive --or-update flathub io.github.linx_systems.ClamUI "
+      + "&& echo 'ClamUI is installed.'"
+  },
   "restart": {
     title: "Restart the computer",
     what: ["Restarts now so the updated kernel, with its security fixes, takes over.",
@@ -585,7 +621,7 @@ var DOCS = {
   "arch-faillock": "https://wiki.archlinux.org/title/Security#Lock_out_user_after_three_failed_login_attempts",
   "arch-autostart": "https://wiki.archlinux.org/title/Autostarting",
   "arch-aur": "https://wiki.archlinux.org/title/Arch_User_Repository",
-  "bumblebee": "https://github.com/duketopceo/omarchy-bumblebee",
+  "bumblebee": "https://github.com/perplexityai/bumblebee",
   "black-ops": "https://github.com/brightwalker25/omarchy-black-ops",
   "arch-users": "https://wiki.archlinux.org/title/Users_and_groups",
   "attack-history": "https://attack.mitre.org/techniques/T1070/003/"
@@ -752,7 +788,8 @@ function validCheck(c) {
   }
 }
 
-var SOURCE_IDS = ["signatures", "virus-scan", "arch-audit", "osv", "aur", "password-check", "bumblebee"]
+var SOURCE_IDS = ["signatures", "virus-scan", "arch-audit", "osv", "aur", "password-check", "bumblebee",
+                  "bumblebee-list"]
 var SOURCE_STATES = ["ok", "stale", "never", "failed"]
 var DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
@@ -901,6 +938,17 @@ function progressText(p) {
   return s
 }
 
+// What the red Install button lists, by id from the report's "missing".
+var HELPER_NAMES = { "clamav": "ClamAV", "arch-audit": "arch-audit", "osv-scanner": "osv-scanner", "clamui": "ClamUI",
+                     "bumblebee": "Bumblebee" }
+
+function missingLabel(report) {
+  if (!report || !report.missing || report.missing.length === 0) return ""
+  var names = []
+  for (var i = 0; i < report.missing.length; i++) names.push(HELPER_NAMES[report.missing[i]])
+  return "MISSING " + names.join(", ") + ". INSTALL"
+}
+
 // The Update sources card: what gets updated, and the one step that asks.
 function updateConfirmation(report) {
   if (!report) return null
@@ -915,9 +963,10 @@ function updateConfirmation(report) {
   if (has("arch-audit")) lines.push((n++) + ". The Arch security team list of known holes in packages.")
   if (has("osv")) lines.push((n++) + ". The OSV.dev list of malicious npm and Bun packages.")
   if (has("aur")) lines.push((n++) + ". The status of your AUR packages.")
+  if (has("bumblebee-list")) lines.push((n++) + ". Perplexity list of known-compromised packages, for Bumblebee.")
   if (n === 1) lines = ["Nothing to update yet. Install ClamAV, arch-audit or osv-scanner (Detect and Supply tabs) to add them."]
   lines.push("No scan runs, and nothing on your computer changes. The panel shows the progress.")
-  lines.push("Technical: pkexec freshclam, arch-audit --upgradable, osv-scanner, one AUR lookup with curl")
+  lines.push("Technical: wake clamav-freshclam (pkexec), arch-audit --upgradable, osv-scanner, an AUR lookup and Perplexity threat_intel, both with curl")
   return { title: "Update sources", lines: lines }
 }
 
@@ -1011,12 +1060,21 @@ function parseReport(text) {
   }
   var nextUpdate = optionalDate(d.nextUpdate)
   var nextFullScan = optionalDate(d.nextFullScan)
+  var missing = []
+  if (d.missing !== undefined) {
+    if (!Array.isArray(d.missing) || d.missing.length > 5) return null
+    for (var mi = 0; mi < d.missing.length; mi++) {
+      if (!Object.prototype.hasOwnProperty.call(HELPER_NAMES, d.missing[mi]) || missing.indexOf(d.missing[mi]) !== -1) return null
+      missing.push(d.missing[mi])
+    }
+  }
   if (nextUpdate === null || nextFullScan === null) return null
   return {
     sources: sources,
     lastRun: lastRun,
     nextUpdate: nextUpdate,
     nextFullScan: nextFullScan,
+    missing: missing,
     feedsDue: d.feedsDue === true,
     feedsUpdated: feedsUpdated,
     history: history,
@@ -1167,7 +1225,7 @@ if (typeof module !== "undefined") {
     howTo: howTo, docsUrl: docsUrl, docsCommand: docsCommand, DOCS: DOCS, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
     shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
     relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine, countdown: countdown, scheduleLines: scheduleLines,
-    parseProgress: parseProgress, progressText: progressText, lastRunRows: lastRunRows,
+    parseProgress: parseProgress, progressText: progressText, lastRunRows: lastRunRows, missingLabel: missingLabel,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,
     SYSCTL_LINES: SYSCTL_LINES
   }
