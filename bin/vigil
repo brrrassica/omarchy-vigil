@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta
 
-VERSION = "0.18.0"
+VERSION = "0.19.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -2133,7 +2133,12 @@ def parse_clamscan(text):
             continue
         path, sig = line[:-len(" FOUND")].rsplit(": ", 1)
         if re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", sig):
-            found.append({"path": clean(_shown(path), 200), "signature": sig})
+            item = {"path": clean(_shown(path), 200), "signature": sig}
+            # The real path, for Ignore: only a plain absolute path inside the home folder.
+            if path.startswith(HOME + "/") and len(path) <= 4096 and "/../" not in path \
+                    and not any(ord(ch) < 32 or ord(ch) == 127 for ch in path):
+                item["file"] = path
+            found.append(item)
         if len(found) >= 500:
             break
     return found
@@ -2216,8 +2221,11 @@ def refresh_virus_scan(on_progress=None):
         raise Refused("the virus scan did not finish (missing signatures, or it took too long)")
     found = parse_clamscan(out) if rc == 1 else []
     save_feed("virus-scan", {"found": found, "scanned": "~", "files": seen[0]})
-    return "Home folder scanned. " + ("Found %d infected file%s." % (len(found), "" if len(found) == 1 else "s")
-                                      if found else "No infected files.")
+    ignored = ignored_detections()
+    live = sum(1 for f in found if not detection_ignored(f, ignored))
+    note = " %d marked as a false positive." % (len(found) - live) if len(found) > live else ""
+    return "Home folder scanned. " + ("Found %d infected file%s." % (live, "" if live == 1 else "s")
+                                      if live else "No infected files.") + note
 
 
 @check
@@ -2232,17 +2240,168 @@ def check_virus_scan():
     if cache is None:
         return result(cid, cat, title, "info", "The first scan runs within a day.", why, fix=now, weight=0)
     found = [f for f in cache.get("found", []) if isinstance(f, dict)][:500] if isinstance(cache.get("found"), list) else []
-    if found:
-        lines = ["%s: %s" % (clean(f.get("path"), 200), clean(f.get("signature"), 120)) for f in found]
+    ignored = ignored_detections()
+    items, live = [], []
+    for f in found:
+        text = "%s: %s" % (clean(f.get("path"), 200), clean(f.get("signature"), 120))
+        did = detection_id(f)
+        is_ignored = did is not None and detection_ignored(f, ignored)
+        items.append({"id": did or "", "text": text, "ignored": is_ignored})
+        if not is_ignored:
+            live.append(text)
+    n_ignored = len(found) - len(live)
+    note = " %d marked as a false positive." % n_ignored if n_ignored else ""
+    if live:
         handoff = fix("app", "open-clamui", "Open ClamUI to quarantine them") if clamui_install() else now
-        return result(cid, cat, title, "fail", "%d infected file%s in %s (%s)." % (
-            len(found), "" if len(found) == 1 else "s", _scanned_where(cache),
-            feed_when(cache).replace("checked", "scanned")),
-            why, clean_block(lines), handoff, weight=3,
+        out = result(cid, cat, title, "fail", "%d infected file%s in %s (%s).%s" % (
+            len(live), "" if len(live) == 1 else "s", _scanned_where(cache),
+            feed_when(cache).replace("checked", "scanned"), note),
+            why, clean_block(live), handoff, weight=3,
             howto="Do not open these files. Quarantine or delete them in ClamUI; if you downloaded them "
-                  "on purpose, get them again from the official site.")
-    return result(cid, cat, title, "pass", "No infected files in %s (%s)." % (
-        _scanned_where(cache), feed_when(cache).replace("checked", "scanned")), why, fix=now, weight=3)
+                  "on purpose, get them again from the official site. Only if you are sure a file is safe "
+                  "(for example a game file ClamAV mistakes for malware), press False positive next to it.")
+    else:
+        out = result(cid, cat, title, "pass", "No infected files in %s (%s).%s" % (
+            _scanned_where(cache), feed_when(cache).replace("checked", "scanned"), note), why, fix=now, weight=3)
+    out["items"] = items
+    return out
+
+
+# --- Marking a virus detection as a false positive ---------------------------
+# One detection at a time, and only while the file is exactly the one you
+# looked at: its SHA-256 is recorded, and a file that changes (an update, or
+# something replacing it) is reported again.
+
+IGNORED_FILE = "ignored-detections.json"
+IGNORED_MAX = 200
+HASH_MAX = 2 * 1024 * 1024 * 1024
+
+
+def detection_file(f):
+    """The real path of a detected file. Scans from before 0.19 kept only the
+    shown "~/..." path; that is used when it names an existing regular file
+    (a shortened or cleaned name does not, and gets no Ignore)."""
+    path = f.get("file")
+    if isinstance(path, str):
+        return path
+    shown = f.get("path")
+    if isinstance(shown, str) and shown.startswith("~/") and len(shown) < 200 and "/../" not in shown:
+        candidate = HOME + shown[1:]
+        if _stat_key(candidate) is not None:
+            return candidate
+    return None
+
+
+def detection_id(f):
+    """A short stable id for one detection (file and signature), or None."""
+    path, sig = detection_file(f), f.get("signature")
+    if not isinstance(path, str) or not isinstance(sig, str):
+        return None
+    return hashlib.sha256(("%s\0%s" % (path, sig)).encode("utf-8", "surrogateescape")).hexdigest()[:16]
+
+
+def _file_identity(path):
+    """(stat key, sha256) of a regular file, read without following a final
+    link, or (None, None). stat key: device, inode, size, mtime and ctime."""
+    try:
+        fd = os.open(path, O_READ | os.O_NOFOLLOW)
+    except OSError:
+        return None, None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > HASH_MAX:
+            return None, None
+        os.set_blocking(fd, True)
+        h = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+        return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns], h.hexdigest()
+    except OSError:
+        return None, None
+    finally:
+        os.close(fd)
+
+
+def _stat_key(path):
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+
+
+def ignored_detections():
+    data = _state_json(IGNORED_FILE)
+    entries = data.get("ignored") if isinstance(data, dict) else None
+    out = {}
+    for e in (entries if isinstance(entries, list) else [])[:IGNORED_MAX]:
+        if isinstance(e, dict) and isinstance(e.get("id"), str) and re.fullmatch(r"[0-9a-f]{16}", e["id"]) \
+                and isinstance(e.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", e["sha256"]):
+            out[e["id"]] = e
+    return out
+
+
+def detection_ignored(f, ignored):
+    """True while the detected file is byte-for-byte the one you marked safe.
+    An unchanged stat key (ctime included, which a program cannot set back)
+    skips re-reading the file; anything else re-hashes it."""
+    e = ignored.get(detection_id(f) or "")
+    if not e:
+        return False
+    path = detection_file(f)
+    key = _stat_key(path) if path else None
+    if key is None:
+        return False
+    if key == e.get("stat"):
+        return True
+    _, digest = _file_identity(path)
+    return digest == e["sha256"]
+
+
+def _current_detection(did):
+    cache = feed_cache("virus-scan") or {}
+    for f in cache.get("found", []) if isinstance(cache.get("found"), list) else []:
+        if isinstance(f, dict) and detection_id(f) == did:
+            return f
+    return None
+
+
+def set_ignored(did, on):
+    """`vigil ignore <id>` / `vigil unignore <id>` for one detection of the last scan."""
+    if not re.fullmatch(r"[0-9a-f]{16}", did):
+        return {"ok": False, "action": "", "message": "Unknown detection."}
+    f = _current_detection(did) if on else None
+    if on and f is None:
+        return {"ok": False, "action": "", "message": "That detection is no longer in the last scan."}
+    if on:
+        key, digest = _file_identity(detection_file(f))
+        if digest is None:
+            return {"ok": False, "action": "", "message": "Could not read the file, so it was not ignored."}
+    try:
+        dirfd = _state_dir()
+    except (OSError, Refused):
+        return {"ok": False, "action": "", "message": "Could not open the Vigil state folder."}
+    try:
+        _lock(dirfd)
+        current = [e for e in ignored_detections().values() if e["id"] != did]
+        if on:
+            current.append({"id": did, "file": detection_file(f), "signature": f["signature"], "sha256": digest,
+                            "stat": key, "at": time.strftime("%Y-%m-%d")})
+        write_atomic(dirfd, IGNORED_FILE, json.dumps({"schema": SCHEMA, "ignored": current[-IGNORED_MAX:]},
+                                                     separators=(",", ":")).encode())
+    finally:
+        os.close(dirfd)
+    # You just looked at this row: what it shows now is not "new", so no notification follows.
+    c = next((x for x in audit(peek=True)["checks"] if x["id"] == "virus-scan"), None)
+    if c is not None and c["status"] in ("fail", "warn"):
+        mark_seen(fingerprint(c))
+    return {"ok": True, "action": "", "message": "Marked as a false positive. It comes back if the file changes." if on
+            else "Counting it again."}
 
 
 FEED_REFRESH = {"arch-audit": refresh_arch_audit, "osv": refresh_osv, "aur": refresh_aur}
@@ -2269,8 +2428,10 @@ def feed_findings():
         out.append("%d known-malicious package%s" % (n, "" if n == 1 else "s"))
     v = feed_cache("virus-scan") if feed_available("virus-scan") else None
     if v and isinstance(v.get("found"), list) and v["found"]:
-        n = len(v["found"])
-        out.append("%d infected file%s in %s" % (n, "" if n == 1 else "s", _scanned_where(v)))
+        ignored = ignored_detections()
+        n = sum(1 for f in v["found"] if isinstance(f, dict) and not detection_ignored(f, ignored))
+        if n:
+            out.append("%d infected file%s in %s" % (n, "" if n == 1 else "s", _scanned_where(v)))
     return out
 
 
@@ -3671,6 +3832,29 @@ def update_state(report):
         os.close(dirfd)
 
 
+def mark_seen(fp):
+    """Add one finding fingerprint to the seen list, so it does not notify."""
+    try:
+        dirfd = _state_dir()
+    except (OSError, Refused):
+        return
+    try:
+        _lock(dirfd)
+        try:
+            state = _read_state(dirfd)
+        except Refused:
+            return
+        seen = [x for x in state.get("seen", []) if isinstance(x, str) and x != fp]
+        state["seen"] = (seen + [fp])[-SEEN_MAX:]
+        state["schema"] = SCHEMA
+        try:
+            write_atomic(dirfd, STATE_NAME, json.dumps(state, separators=(",", ":")).encode())
+        except OSError:
+            pass
+    finally:
+        os.close(dirfd)
+
+
 def set_dismissed(check_id, on):
     """Mark the current warning of `check_id` as reviewed, or show it again."""
     report = audit(peek=True)
@@ -4429,6 +4613,9 @@ def main(argv):
     if len(argv) == 3 and argv[1] == "fix" and re.fullmatch(r"[a-z][a-z0-9-]{0,31}", argv[2]):
         emit(run_fix(argv[2]))
         return 0
+    if len(argv) == 3 and argv[1] in ("ignore", "unignore") and re.fullmatch(r"[0-9a-f]{16}", argv[2]):
+        emit(set_ignored(argv[2], argv[1] == "ignore"))
+        return 0
     if len(argv) == 3 and argv[1] in ("dismiss", "undismiss") and re.fullmatch(r"[a-z0-9-]{1,40}", argv[2]):
         emit(set_dismissed(argv[2], argv[1] == "dismiss"))
         return 0
@@ -4455,7 +4642,7 @@ def main(argv):
     if len(argv) == 2 and argv[1] == "version":
         emit({"version": VERSION})
         return 0
-    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil refresh-feeds [--force|--sources|--full|--scan] | vigil running | vigil stop | vigil version\n")
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection> | vigil refresh-feeds [--force|--sources|--full|--scan] | vigil running | vigil stop | vigil version\n")
     return 2
 
 

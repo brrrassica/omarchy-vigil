@@ -1270,8 +1270,14 @@ def test_clamscan_parse():
            "/home/alice/Downloads/<b>x</b>: Bad sig with spaces FOUND\n"
            "some warning line\n")
     got = mod.parse_clamscan(out)
-    assert got == [{"path": "~/Downloads/invoice.pdf.exe", "signature": "Win.Trojan.Agent-123"},
-                   {"path": "~/Downloads/odd: name: with colons.zip", "signature": "Eicar-Signature"}]
+    assert got == [{"path": "~/Downloads/invoice.pdf.exe", "signature": "Win.Trojan.Agent-123",
+                    "file": "/home/alice/Downloads/invoice.pdf.exe"},
+                   {"path": "~/Downloads/odd: name: with colons.zip", "signature": "Eicar-Signature",
+                    "file": "/home/alice/Downloads/odd: name: with colons.zip"}]
+    # The real path is kept only for plain paths inside the home folder.
+    for odd in ("/etc/x: Eicar-Signature FOUND", "/home/alice/a\x1bb: Eicar-Signature FOUND",
+                "/home/alice/../bob/x: Eicar-Signature FOUND"):
+        assert "file" not in mod.parse_clamscan(odd)[0], odd
 
 
 def test_virus_scan_states(v):
@@ -2104,3 +2110,85 @@ def test_hand_over_markers_bring_undo(v):
     (marks / "unexpected").write_text("")
     assert v.handover_marks() == ["clamui-timer"]
     assert other_schedules(v)["undo"] == {"action": "undo-schedules", "label": "Turn them back on"}
+
+
+# --------------------------------------------------------------------------
+# Ignoring a virus detection you know is safe
+
+def scanned_with(v, *files):
+    """A finished virus scan that found these files (real files in the fake home)."""
+    found = []
+    for rel, body in files:
+        p = Path(v.HOME, rel)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(body)
+        found.append({"path": "~/" + rel, "signature": "Win.Trojan.Agent-1", "file": str(p)})
+    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
+    v.save_feed("virus-scan", {"found": found, "scanned": "~", "files": 10})
+    return found
+
+
+def test_ignore_one_detection_keeps_the_others(v):
+    game, other = scanned_with(v, ("Games/witcher/dx11.dll", b"MZ game"), ("Downloads/crack.exe", b"MZ bad"))
+    c = v.check_virus_scan()
+    assert c["status"] == "fail" and c["summary"].startswith("2 infected files")
+    ids = [i["id"] for i in c["items"]]
+    assert all(len(i) == 16 for i in ids) and ids[0] != ids[1]
+    assert v.set_ignored(ids[0], True)["message"].startswith("Marked as a false positive.")
+    c = v.check_virus_scan()
+    assert c["status"] == "fail" and c["summary"].startswith("1 infected file in") and "1 marked as a false positive" in c["summary"]
+    assert "dx11.dll" not in c["detail"] and "crack.exe" in c["detail"]
+    assert [i["ignored"] for i in c["items"]] == [True, False]
+    assert v.feed_findings()[0].startswith("1 infected file in")
+    v.set_ignored(ids[1], True)
+    c = v.check_virus_scan()
+    assert c["status"] == "pass" and "2 marked as a false positive" in c["summary"]
+    assert v.set_ignored(ids[0], False)["message"] == "Counting it again."
+    assert v.check_virus_scan()["status"] == "fail"
+
+
+def test_a_changed_file_is_reported_again(v):
+    (game,) = scanned_with(v, ("Games/witcher/dx11.dll", b"MZ game"))
+    did = v.check_virus_scan()["items"][0]["id"]
+    v.set_ignored(did, True)
+    assert v.check_virus_scan()["status"] == "pass"
+    Path(game["file"]).write_bytes(b"MZ something else")             # replaced: same name, new content
+    assert v.check_virus_scan()["status"] == "fail"
+    Path(game["file"]).write_bytes(b"MZ game")                       # the same bytes again: ignored again
+    assert v.check_virus_scan()["status"] == "pass"
+    Path(game["file"]).unlink()
+    Path(game["file"]).symlink_to("/etc/hostname")                   # a link in its place never counts
+    assert v.check_virus_scan()["status"] == "fail"
+
+
+def test_ignore_refuses_what_it_cannot_tie_to_a_file(v):
+    scanned_with(v, ("Games/dx11.dll", b"MZ"))
+    assert v.set_ignored("0" * 16, True)["ok"] is False                       # not in the last scan
+    assert v.set_ignored("not-an-id", True)["ok"] is False
+    v.save_feed("virus-scan", {"found": [{"path": "~/old.exe", "signature": "Win.X-1"}], "scanned": "~"})
+    item = v.check_virus_scan()["items"][0]
+    assert item["id"] == "" and item["ignored"] is False                       # no such file: no Ignore
+    Path(v.HOME, "old.exe").write_bytes(b"MZ")                                 # scan from before 0.19, file there
+    item = v.check_virus_scan()["items"][0]
+    assert len(item["id"]) == 16 and v.set_ignored(item["id"], True)["ok"] is True
+    assert v.check_virus_scan()["status"] == "pass"
+    assert v.main(["vigil", "ignore", "../../etc"]) == 2
+
+
+def test_ignored_list_is_validated(v):
+    (game,) = scanned_with(v, ("Games/dx11.dll", b"MZ"))
+    did = v.check_virus_scan()["items"][0]["id"]
+    put(Path(v.HOME, ".local/state/omarchy-vigil/ignored-detections.json"),
+        json.dumps({"ignored": [{"id": did, "sha256": "zz", "stat": None}]}))
+    assert v.check_virus_scan()["status"] == "fail"                            # a bad entry ignores nothing
+
+
+def test_ignoring_does_not_raise_a_new_finding_notification(v):
+    scanned_with(v, ("Games/dx11.dll", b"MZ game"), ("Downloads/crack.exe", b"MZ bad"))
+    v.audit()                                                              # first run: everything is "seen"
+    v.audit()
+    did = v.check_virus_scan()["items"][0]["id"]
+    v.set_ignored(did, True)
+    assert "virus-scan" not in v.audit()["new"]
+    v.set_ignored(did, False)
+    assert "virus-scan" not in v.audit()["new"]

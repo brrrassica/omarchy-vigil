@@ -27,7 +27,7 @@ the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.18.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.19.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -215,7 +215,7 @@ lower it. A warning you mark as reviewed stops counting.
 | Startup files | Reads shell startup files, autostart entries, user services and timers, uwsm and environment.d files, Hyprland config and your crontab, and flags lines that download and run code, decode hidden code, or open reverse shells. These are leads to read, not proof. |
 | System-wide preload | Fails if `/etc/ld.so.preload` loads anything; rootkits use it to hide. |
 | Changes to important files | Records a fingerprint of accounts, PAM, SSH settings, `~/.ssh/authorized_keys`, system and user services, autostart entries and your startup files, and lists anything changed, added or removed since. Changes that match exactly what a package update shipped (from pacman's own records) are not reported, nor are system users that packages add. Changes to who can log in or what runs at start are warnings; changes to your own shell files are information. **Accept these changes** records the current state as the new normal. |
-| Virus scan | ClamAV scans your home folder once a week and in every Full scan, as you, with signatures ClamAV keeps current. Infected files are listed with **Open ClamUI** to quarantine them. Only ClamAV's published signatures count; its guess-based "potentially unwanted" rules stay off. |
+| Virus scan | ClamAV scans your home folder once a week and in every Full scan, as you, with signatures ClamAV keeps current. Infected files are listed with **Open ClamUI** to quarantine them. If ClamAV is wrong about a file you know is safe (a game's DLL, say), press **False positive** next to it: Vigil records that exact file's SHA-256 and stops counting it, and reports it again if the file ever changes. **Not a false positive** counts it again. Only ClamAV's published signatures count; its guess-based "potentially unwanted" rules stay off. |
 | Scans scheduled twice | Finds other apps that repeat what Vigil already runs every week: a scheduled scan in ClamUI whose folders are all inside your home folder, and the older Bumblebee plugin (once Vigil runs Bumblebee itself). **Let Vigil run them** turns those off the way you would in each app: ClamUI's timer and its own Scheduled scans setting, and `omarchy plugin disable` for the plugin. Undo turns back on exactly what it turned off. A ClamUI schedule that also covers folders outside your home folder, and the Security Scan plugin (it runs AUR-Malware, which Vigil does not), are listed but left on. Nothing is offered when Vigil's own weekly run is off. |
 | ClamUI | Vigil hands virus scanning to [ClamUI](https://github.com/linx-systems/clamui): file and folder scans, scheduled scans, USB drive scans and quarantine. When it is installed, **Open ClamUI** starts it; otherwise Vigil offers to install it from Flathub. |
 | ClamAV virus engine | Whether ClamAV is installed and its signatures keep themselves up to date. Vigil turns on ClamAV's own update service (`clamav-freshclam`) when it installs ClamAV or ClamUI, and offers to if it is off. |
@@ -359,6 +359,7 @@ service (ClamAV's servers), and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/run.json` | the helper, mode 0600 | during a scan or update: the process IDs and start times of the run and the program it is running, so **Stop** can end it |
 | `~/.local/state/omarchy-vigil/handed-over/` | the Let Vigil run them action, mode 0700 | one empty marker per schedule it turned off, so Undo turns back on exactly those |
 | `~/.config/clamui/settings.json` (or ClamUI's Flatpak copy) | the Let Vigil run them action, and its Undo | only `scheduled_scans_enabled`, with everything else in the file kept |
+| `~/.local/state/omarchy-vigil/ignored-detections.json` | the helper, mode 0600 | when you mark a virus detection as a false positive: the file's path, the signature name and the file's SHA-256 |
 | `~/.local/state/omarchy-vigil/busy/` | the helper, mode 0700, empty | once: the folder Vigil locks so only one scan or update runs at a time |
 | `~/.local/state/omarchy-vigil/last-run.json` | the helper, mode 0600 | after each weekly or button update: its date, time and whether every source updated |
 | `/usr/local/bin/bumblebee` | the Install button, as root | only when you install Bumblebee: Perplexity's program, checked against its published checksum |

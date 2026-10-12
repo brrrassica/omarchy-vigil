@@ -277,6 +277,14 @@ say where they connect before they run.
   password; ClamUI's settings are edited with `jq` into a temporary file in
   the same folder, given the original's mode and moved over it, and only a
   regular file (not a link) is edited.
+- **False positive** on a virus detection is keyed to one detection (an id
+  from the real path and signature name, recorded at scan time only for
+  plain absolute paths inside your home folder) and to that file's SHA-256,
+  read with `O_NOFOLLOW` (regular files up to 2 GiB). On later checks an
+  unchanged device, inode, size, mtime and ctime skip re-reading; anything
+  else re-hashes, and a different hash, a missing file or a link in its
+  place counts the detection again. The panel asks first. The helper verbs
+  are `vigil ignore|unignore <16 hex digits>`.
 - For the Last run list Vigil reads ClamUI's log index
   (`clamui/logs/log_index.json` in its data folder, Flatpak or not) with
   the no-follow reader and a 2 MiB cap, and keeps only the newest

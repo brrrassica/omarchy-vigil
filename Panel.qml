@@ -240,6 +240,10 @@ Panel {
     var action = pendingAction
     cancelPending()
     if (!report) return
+    if (kind === "ignore") {
+      if (Model.detectionItem(report, action)) runHelper(["ignore", action])
+      return
+    }
     if (kind === "update-sources") {
       refreshFeeds("sources")
       return
@@ -313,11 +317,13 @@ Panel {
     runAudit()
   }
 
-  // Runs bin/vigil with one of three fixed verbs and an id the panel already
-  // validated: `fix <helper action>`, `dismiss <check id>`, `undismiss <check id>`.
+  // Runs bin/vigil with a fixed verb and an id the panel already validated:
+  // `fix <helper action>`, `dismiss|undismiss <check id>`, `ignore|unignore <detection id>`.
   function runHelper(args) {
     if (fixProc.running || args.length !== 2) return
-    if (["fix", "dismiss", "undismiss"].indexOf(args[0]) === -1 || !/^[a-z0-9-]{1,40}$/.test(args[1])) return
+    if (["fix", "dismiss", "undismiss", "ignore", "unignore"].indexOf(args[0]) === -1
+        || !/^[a-z0-9-]{1,40}$/.test(args[1])) return
+    if ((args[0] === "ignore" || args[0] === "unignore") && !/^[0-9a-f]{16}$/.test(args[1])) return
     fixBuffer = ""
     fixOverflow = false
     fixAction = args[1]
@@ -334,6 +340,18 @@ Panel {
     if (on && (!check.dismissible || check.dismissed)) return
     if (!on && !check.dismissed) return
     runHelper([on ? "dismiss" : "undismiss", check.id])
+  }
+
+  // Mark one virus detection as a false positive: asks first, on the usual card.
+  function requestIgnore(item) {
+    if (!report || busy || !item || item.id === "" || item.ignored) return
+    pendingKind = "ignore"
+    pendingAction = item.id
+  }
+
+  function requestUnignore(item) {
+    if (!report || busy || !item || item.id === "" || !item.ignored) return
+    runHelper(["unignore", item.id])
   }
 
   function requestUndo(check) {
@@ -1352,7 +1370,7 @@ Panel {
       }
       Text {
         textFormat: Text.PlainText
-        visible: row.expanded && row.check !== null && row.check.detail !== ""
+        visible: row.expanded && row.check !== null && (row.check.detail !== "" || row.check.items.length > 0)
         width: parent.width
         topPadding: Style.space(6)
         text: "DETAILS"
@@ -1364,13 +1382,46 @@ Panel {
       }
       Text {
         textFormat: Text.PlainText
-        visible: row.expanded && row.check !== null && row.check.detail !== ""
+        visible: row.expanded && row.check !== null && row.check.detail !== "" && row.check.items.length === 0
         width: parent.width
         text: row.check ? row.check.detail : ""
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
         wrapMode: Text.WrapAnywhere
+      }
+      // One line per detection, each with False positive (or Not a false positive).
+      Repeater {
+        model: row.expanded && row.check !== null ? row.check.items : []
+        delegate: Row {
+          id: itemRow
+          required property var modelData
+          width: parent ? parent.width : 0
+          spacing: Style.space(8)
+          Text {
+            textFormat: Text.PlainText
+            width: itemRow.width - itemButton.width - itemRow.spacing
+            anchors.verticalCenter: parent.verticalCenter
+            text: itemRow.modelData.text + (itemRow.modelData.ignored ? "  (false positive)" : "")
+            color: root.dim
+            opacity: itemRow.modelData.ignored ? 0.6 : 1
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WrapAnywhere
+          }
+          Button {
+            id: itemButton
+            visible: itemRow.modelData.id !== ""
+            text: itemRow.modelData.ignored ? "Not a false positive" : "False positive"
+            tooltipText: itemRow.modelData.ignored ? "Count this detection again"
+                                                   : "The file is safe and ClamAV is wrong. Only if you are sure; it comes back if the file changes"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            enabled: !root.busy && root.pending === null
+            onClicked: itemRow.modelData.ignored ? root.requestUnignore(itemRow.modelData)
+                                                 : root.requestIgnore(itemRow.modelData)
+          }
+        }
       }
       Flow {
         visible: row.expanded && (row.runnable || row.undoable || row.reviewable)

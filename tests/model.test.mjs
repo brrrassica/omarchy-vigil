@@ -678,3 +678,19 @@ test("with the Vigil weekly scan off, other schedules are not offered for hand-o
   assert.equal(off.fix.kind, "none")
   assert.equal(r.checks[0].status, "info")                      // the parsed report itself is untouched
 })
+
+test("virus detections each carry an id for Ignore, and the card says what ignoring means", () => {
+  const items = [{ id: "0123456789abcdef", text: "~/Games/dx11.dll: Win.Trojan.Agent-1", ignored: false },
+                 { id: "", text: "~/old.exe: Win.X-1", ignored: false }]
+  const r = parse(report({ checks: [check({ id: "virus-scan", category: "detect", items })] }))
+  assert.deepEqual(r.checks[0].items, items)
+  assert.equal(parse(report()).checks[0].items.length, 0)
+  const card = M.confirmation("ignore", "0123456789abcdef", r)
+  assert.equal(card.title, "Mark this as a false positive?")
+  assert.equal(card.lines[0], "~/Games/dx11.dll: Win.Trojan.Agent-1")
+  assert.ok(card.lines.some(l => /changes, Vigil reports it again/.test(l)))
+  assert.equal(M.confirmation("ignore", "ffffffffffffffff", r), null)          // not in the report
+  for (const bad of [{ id: "XYZ", text: "x", ignored: false }, { id: "", text: "x" },
+                     { id: "../../etc/passwd", text: "x", ignored: true }])
+    assert.equal(parse(report({ checks: [check({ items: [bad] })] })), null)
+})

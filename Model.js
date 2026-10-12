@@ -126,6 +126,7 @@ function howTo(check) {
 // Title and lines for the confirmation card of any runnable action.
 function confirmation(kind, id, report) {
   if (kind === "clean-all") return cleanAllConfirmation(report)
+  if (kind === "ignore") return ignoreConfirmation(id, report)
   if (kind === "update-sources") return updateConfirmation(report)
   if (kind === "full-scan") return fullScanConfirmation(report)
   var a = kind === "helper" ? helperInfo(id) : (kind === "terminal" ? terminalAction(id) : null)
@@ -140,6 +141,27 @@ function confirmation(kind, id, report) {
       : "Vigil shows the result here. No password needed.")
   }
   return { title: a.title, lines: lines }
+}
+
+// Find one detection in the report by its id.
+function detectionItem(report, id) {
+  if (!report || typeof id !== "string" || !/^[0-9a-f]{16}$/.test(id)) return null
+  for (var i = 0; i < report.checks.length; i++) {
+    var items = report.checks[i].items || []
+    for (var j = 0; j < items.length; j++) if (items[j].id === id) return items[j]
+  }
+  return null
+}
+
+function ignoreConfirmation(id, report) {
+  var item = detectionItem(report, id)
+  if (!item || item.ignored) return null
+  return { title: "Mark this as a false positive?", lines: [
+    item.text,
+    "A false positive is a safe file ClamAV mistakes for a virus. Only mark it if you are sure, for example a game or app file you got from its official source.",
+    "Not sure? Open ClamUI: it can look the file up on VirusTotal, where many virus scanners check it.",
+    "Vigil stops counting this file only while it stays exactly as it is now. If it ever changes, Vigil reports it again.",
+    "Technical: records the SHA-256 of this file in ~/.local/state/omarchy-vigil/ignored-detections.json"] }
 }
 
 var VIGIL_MARK = "# Written by Vigil (keasbeexd.vigil). Delete this file to undo."
@@ -866,7 +888,19 @@ function validCheck(c) {
     if (!isString(c.dismissedAt, 10) || !/^\d{4}-\d{2}-\d{2}$/.test(c.dismissedAt)) return null
     dismissedAt = c.dismissedAt
   }
+  // One line per detection (the virus scan), each with its own False positive button.
+  var items = []
+  if (c.items !== undefined) {
+    if (!Array.isArray(c.items) || c.items.length > 500) return null
+    for (var k = 0; k < c.items.length; k++) {
+      var it = c.items[k]
+      if (!it || typeof it !== "object" || typeof it.ignored !== "boolean" || !isString(it.text, 400)
+          || typeof it.id !== "string" || (it.id !== "" && !/^[0-9a-f]{16}$/.test(it.id))) return null
+      items.push({ id: it.id, text: plain(it.text, 400), ignored: it.ignored })
+    }
+  }
   return {
+    items: items,
     id: c.id, category: c.category, status: c.status, weight: c.weight,
     title: plain(c.title, 80), summary: plain(c.summary, MAX_STR), why: plain(c.why, MAX_STR * 2),
     detail: plain(c.detail, MAX_DETAIL), howto: plain(c.howto || "", MAX_STR * 2), fix: f, undo: undo,
@@ -1378,7 +1412,7 @@ if (typeof module !== "undefined") {
     howTo: howTo, docsUrl: docsUrl, docsCommand: docsCommand, DOCS: DOCS, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
     shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
     relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine, countdown: countdown, scheduleLines: scheduleLines,
-    parseProgress: parseProgress, parseRunning: parseRunning, actionStage: actionStage, actionProgress: actionProgress,
+    parseProgress: parseProgress, parseRunning: parseRunning, detectionItem: detectionItem, actionStage: actionStage, actionProgress: actionProgress,
     actionOutputText: actionOutputText, progressText: progressText, lastRunRows: lastRunRows, missingLabel: missingLabel,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,
     SYSCTL_LINES: SYSCTL_LINES

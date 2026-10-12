@@ -111,7 +111,12 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.18 (this release): one schedule
+## 0.19 (this release): false positives
+
+- [x] **False positive** next to each virus detection: asks first, then
+      stops counting that exact file (by SHA-256) until it changes.
+
+## 0.18: one schedule
 
 - [x] "Scans scheduled twice" (Detect): finds other apps that repeat
       Vigil's weekly work (a ClamUI scheduled scan of folders inside your
