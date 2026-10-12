@@ -504,6 +504,58 @@ function validCheck(c) {
   }
 }
 
+var SOURCE_IDS = ["signatures", "virus-scan", "arch-audit", "osv", "aur", "bumblebee"]
+var SOURCE_STATES = ["ok", "stale", "never", "failed"]
+var DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+
+function parseSources(list) {
+  if (list === undefined) return []
+  if (!Array.isArray(list) || list.length > SOURCE_IDS.length) return null
+  var out = []
+  for (var i = 0; i < list.length; i++) {
+    var e = list[i]
+    if (!e || typeof e !== "object" || !inList(e.id, SOURCE_IDS) || !inList(e.state, SOURCE_STATES)) return null
+    if (!isString(e.label, 40) || !isString(e.date, 10) || !isString(e.tried, 10)) return null
+    if ((e.date !== "" && !DATE_RE.test(e.date)) || (e.tried !== "" && !DATE_RE.test(e.tried))) return null
+    out.push({ id: e.id, label: plain(e.label, 40), date: e.date, state: e.state, tried: e.tried })
+  }
+  return out
+}
+
+function parseLastRun(r) {
+  if (r === undefined) return { at: "", ok: false }
+  if (!r || typeof r !== "object" || !isString(r.at, 16) || typeof r.ok !== "boolean") return null
+  if (r.at !== "" && !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(r.at)) return null
+  return { at: r.at, ok: r.ok }
+}
+
+// "today", "yesterday", or "Oct 3", relative to `now` (a Date).
+function relativeDay(date, now) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(date))
+  if (!m) return ""
+  var day = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  var today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  var diff = Math.round((today - day) / 86400000)
+  if (diff === 0) return "today"
+  if (diff === 1) return "yesterday"
+  return shortDate(String(date).substring(0, 10))
+}
+
+function sourceLine(src, now) {
+  if (src.state === "never") return "not updated yet"
+  if (src.state === "failed")
+    return "last update failed" + (src.date !== "" ? "; last good " + relativeDay(src.date, now) : "")
+  var when = relativeDay(src.date, now)
+  return src.state === "stale" ? "out of date (" + when + ")" : "updated " + when
+}
+
+function lastRunLine(run, now) {
+  if (!run || run.at === "") return "No full update yet. It runs within a day, or press the button."
+  var time = run.at.substring(11, 16)
+  return "Last full update " + relativeDay(run.at, now) + " at " + time
+    + (run.ok ? ". Everything updated." : ". Some sources did not update; Vigil retries tomorrow.")
+}
+
 function parseHistory(h) {
   if (h === undefined) return []
   if (!Array.isArray(h) || h.length > 60) return null
@@ -570,7 +622,12 @@ function parseReport(text) {
     if (!isString(d.feedsUpdated, 10) || !/^\d{4}-\d{2}-\d{2}$/.test(d.feedsUpdated)) return null
     feedsUpdated = d.feedsUpdated
   }
+  var sources = parseSources(d.sources)
+  var lastRun = parseLastRun(d.lastRun)
+  if (!sources || !lastRun) return null
   return {
+    sources: sources,
+    lastRun: lastRun,
     feedsDue: d.feedsDue === true,
     feedsUpdated: feedsUpdated,
     history: history,
@@ -692,6 +749,7 @@ if (typeof module !== "undefined") {
     tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
     categoryLabel: categoryLabel, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
     shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
+    relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,
     SYSCTL_LINES: SYSCTL_LINES
   }

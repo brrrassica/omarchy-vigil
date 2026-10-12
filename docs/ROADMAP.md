@@ -107,7 +107,14 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.6 (this release): one schedule, one button
+## 0.7 (this release): source dates on the Overview
+
+- [x] The Overview lists when the last full update ran and whether every
+      source updated, and each set-up source with its last successful update;
+      failed or week-old sources are shown in red with the date they last
+      worked.
+
+## 0.6: one schedule, one button
 
 - [x] Weekly virus scan of `~/Downloads` with ClamAV, as the user, in the
       same weekly cycle as the sources; infected files hand off to ClamUI.

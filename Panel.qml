@@ -602,13 +602,42 @@ Panel {
                 textFormat: Text.PlainText
                 anchors.verticalCenter: updateAllButton.verticalCenter
                 width: parent.width - updateAllButton.width - parent.spacing
-                text: root.report && root.report.feedsUpdated !== ""
-                  ? "Sources updated " + Model.shortDate(root.report.feedsUpdated) + ". Next update is automatic."
-                  : "Updates virus and threat sources and re-checks every pillar."
-                color: root.dim
+                text: root.report ? Model.lastRunLine(root.report.lastRun, new Date()) : ""
+                color: root.report && root.report.lastRun.at !== "" && !root.report.lastRun.ok ? root.urgent : root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WordWrap
+              }
+            }
+            // When each maintained source last updated successfully.
+            Repeater {
+              model: root.report ? root.report.sources : []
+              delegate: Item {
+                required property var modelData
+                width: column.width
+                implicitHeight: srcValue.implicitHeight
+                Text {
+                  textFormat: Text.PlainText
+                  anchors.left: parent.left
+                  width: parent.width * 0.5
+                  text: modelData.label
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
+                }
+                Text {
+                  id: srcValue
+                  textFormat: Text.PlainText
+                  anchors.right: parent.right
+                  width: parent.width * 0.5
+                  horizontalAlignment: Text.AlignRight
+                  text: Model.sourceLine(modelData, new Date())
+                  color: modelData.state === "failed" || modelData.state === "stale" ? root.urgent : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+                }
               }
             }
             ScoreHistory {

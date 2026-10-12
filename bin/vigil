@@ -43,7 +43,7 @@ import sys
 import time
 from base64 import b64decode
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1378,6 +1378,76 @@ def feed_due(name):
     return tried is None or tried >= FEED_RETRY_DAYS
 
 
+RUN_NAME = "last-run.json"
+
+
+def save_last_run(ok, forced):
+    try:
+        dirfd = _state_dir()
+    except (OSError, Refused):
+        return
+    try:
+        _lock(dirfd)
+        body = {"schema": SCHEMA, "at": time.strftime("%Y-%m-%d %H:%M"), "ok": bool(ok), "forced": bool(forced)}
+        write_atomic(dirfd, RUN_NAME, json.dumps(body, separators=(",", ":")).encode())
+    except OSError:
+        pass
+    finally:
+        os.close(dirfd)
+
+
+def last_run():
+    data = _state_json(RUN_NAME)
+    if not isinstance(data, dict) or not isinstance(data.get("at"), str) \
+            or not re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", data["at"]):
+        return {"at": "", "ok": False}
+    return {"at": data["at"], "ok": data.get("ok") is True}
+
+
+def _mtime_date(paths):
+    newest = 0
+    for p in paths:
+        try:
+            newest = max(newest, os.stat(p).st_mtime)
+        except OSError:
+            pass
+    return time.strftime("%Y-%m-%d", time.localtime(newest)) if newest else ""
+
+
+def source_status():
+    """One entry per source that is set up: when it last updated successfully,
+    and whether the latest attempt failed. Shown on the Overview."""
+    out = []
+
+    def add(sid, label, date, state, tried=""):
+        out.append({"id": sid, "label": label, "date": date, "state": state, "tried": tried})
+
+    if is_trusted_executable(sys_path("/usr/bin/clamscan")):
+        d = _mtime_date([sys_path("/var/lib/clamav/" + n) for n in ("daily.cld", "daily.cvd")])
+        age = _days_since(d)
+        add("signatures", "Virus signatures", d, "never" if not d else ("ok" if age is not None and age <= FEED_DAYS else "stale"))
+    for name, label in (("virus-scan", "Virus scan of Downloads"), ("arch-audit", "Known vulnerabilities"),
+                        ("osv", "Malicious packages"), ("aur", "AUR status")):
+        if not feed_available(name):
+            continue
+        meta = _state_json(FEED_FILES[name]) or {}
+        at = meta.get("at") if isinstance(meta.get("at"), str) and _DATE.match(meta.get("at")) else ""
+        tried = meta.get("attempted") if isinstance(meta.get("attempted"), str) and _DATE.match(meta.get("attempted")) else ""
+        if not at:
+            state = "failed" if tried else "never"
+        elif tried and tried > at:
+            state = "failed"
+        else:
+            age = _days_since(at)
+            state = "ok" if age is not None and age <= FEED_DAYS + FEED_RETRY_DAYS else "stale"
+        add(name, label, at, state, tried if state == "failed" else "")
+    if exists(home_path(".config", "omarchy", "plugins", BUMBLEBEE_ID)):
+        d = _mtime_date([home_path(".local", "state", "omarchy", "bumblebee", "last-scan.json")])
+        age = _days_since(d)
+        add("bumblebee", "Bumblebee", d, "never" if not d else ("ok" if age is not None and age <= FEED_DAYS else "stale"))
+    return out
+
+
 def feeds_updated():
     """The oldest completed date among the available feeds, or ''."""
     dates = []
@@ -1699,6 +1769,8 @@ def refresh_due_feeds(force=False):
             done.append(name)
         except (Refused, OSError):
             failed.append(name)
+    if done or failed:
+        save_last_run(not failed, force)
     if not done and not failed:
         if force:
             return {"ok": True, "action": "", "message": "Nothing to update yet. Install the tools offered in the "
@@ -2718,6 +2790,8 @@ def audit(peek=False):
         "new": [], "stateSaved": False, "history": state_history(state),
         "feedsDue": any(feed_due(n) for n in FEED_FILES),
         "feedsUpdated": feeds_updated(),
+        "sources": source_status(),
+        "lastRun": last_run(),
     }
     if not peek:
         report["new"], report["stateSaved"] = update_state(report)

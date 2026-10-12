@@ -26,7 +26,7 @@ root runs in a terminal you can watch.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.6.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.7.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -72,6 +72,13 @@ fix first.
 | Bumblebee's catalog and scan | by the Bumblebee plugin |
 | Rootkit Hunter, Lynis | only when you run them; they need your password |
 | Cleaning (Care) | only when you ask; Vigil only measures sizes by itself |
+
+The Overview shows when the last full update ran and whether every source
+updated, then one line per source you have set up (virus signatures, the
+virus scan, known vulnerabilities, malicious packages, AUR status,
+Bumblebee) with the date it last updated successfully. A source whose latest
+update failed or is more than a week old is shown in red, with the date it
+last worked.
 
 **Update and check everything** on the Overview (or `U`) runs all the
 weekly work at once: refreshes every source and runs the virus scan, then
@@ -262,6 +269,7 @@ service (ClamAV's servers), rkhunter's data update, and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/osv.json` | the helper, mode 0600 | weekly and on Check now: known-malicious packages found, if any, and which folders were checked |
 | `~/.local/state/omarchy-vigil/aur.json` | the helper, mode 0600 | weekly and on Check now: names of AUR packages that left the AUR or have no maintainer |
 | `~/.local/state/omarchy-vigil/virus-scan.json` | the helper, mode 0600 | weekly and on Scan now: names of infected files found in Downloads, if any |
+| `~/.local/state/omarchy-vigil/last-run.json` | the helper, mode 0600 | after each weekly or button update: its date, time and whether every source updated |
 | `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` | the helper | only when you set the opt-out variables |
 | `/etc/sysctl.d/90-omarchy-vigil.conf` | terminal action | only when you apply the kernel settings |
 | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf` | terminal action | only when you turn LLMNR off |

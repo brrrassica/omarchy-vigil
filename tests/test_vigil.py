@@ -1231,3 +1231,52 @@ def test_cli_refresh_feeds_arguments():
     for args in (["refresh-feeds", "--all"], ["refresh-feeds", "--force", "x"]):
         p = subprocess.run(["/usr/bin/python3", "-I", "-S", vigil] + args, capture_output=True, timeout=30)
         assert p.returncode == 2, args
+
+
+# --------------------------------------------------------------------------
+# Source dates and the last full update, shown on the Overview
+
+def test_source_status_lists_only_what_is_set_up(v):
+    assert v.source_status() == []
+    v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan", v.ROOT + "/usr/bin/arch-audit"}
+    os.makedirs(os.path.join(v.HOME, "Downloads"))
+    got = {s["id"]: s for s in v.source_status()}
+    assert set(got) == {"signatures", "virus-scan", "arch-audit"}
+    assert got["signatures"]["state"] == "never" and got["arch-audit"]["state"] == "never"
+    sysfile(v, "/var/lib/clamav/daily.cld", "")
+    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
+    v.run_fix("arch-audit-refresh")
+    got = {s["id"]: s for s in v.source_status()}
+    assert got["signatures"]["state"] == "ok" and got["arch-audit"]["state"] == "ok"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", got["arch-audit"]["date"])
+
+
+def test_source_status_failed_and_stale(v):
+    v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
+    p = Path(v.HOME, ".local/state/omarchy-vigil/arch-audit.json")
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"at": "2026-01-01", "attempted": "2026-01-05", "packages": []}))
+    s = v.source_status()[0]
+    assert s["state"] == "failed" and s["date"] == "2026-01-01" and s["tried"] == "2026-01-05"
+    p.write_text(json.dumps({"at": "2020-01-01", "attempted": "2020-01-01", "packages": []}))
+    assert v.source_status()[0]["state"] == "stale"
+    sysfile(v, "/var/lib/clamav/daily.cld", "")
+    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
+    f = v.ROOT + "/var/lib/clamav/daily.cld"
+    os.utime(f, (os.path.getmtime(f) - 20 * 86400,) * 2)
+    assert {s["id"]: s for s in v.source_status()}["signatures"]["state"] == "stale"
+
+
+def test_last_run_recorded(v):
+    assert v.last_run() == {"at": "", "ok": False}
+    v.refresh_due_feeds(force=True)                       # nothing set up: nothing ran, nothing recorded
+    assert v.last_run()["at"] == ""
+    v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
+    v.refresh_due_feeds(force=True)                       # fails (fake run returns nothing)
+    r = v.last_run()
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", r["at"]) and r["ok"] is False
+    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
+    v.refresh_due_feeds(force=True)
+    assert v.last_run()["ok"] is True
+    report = v.audit(peek=True)
+    assert report["lastRun"]["ok"] is True and [s["id"] for s in report["sources"]] == ["arch-audit"]

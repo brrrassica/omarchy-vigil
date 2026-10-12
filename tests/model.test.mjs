@@ -299,3 +299,25 @@ test("feedsUpdated is a date or empty", () => {
   assert.equal(parse(report({ feedsUpdated: "<b>soon</b>" })), null)
   assert.ok(M.confirmation("helper", "virus-scan-now"))
 })
+
+test("sources and last run are validated and worded plainly", () => {
+  const good = { id: "arch-audit", label: "Known vulnerabilities", date: "2026-10-12", state: "ok", tried: "" }
+  const r = parse(report({ sources: [good], lastRun: { at: "2026-10-12 09:41", ok: true } }))
+  assert.equal(r.sources[0].label, "Known vulnerabilities")
+  assert.equal(r.lastRun.at, "2026-10-12 09:41")
+  assert.deepEqual(parse(report()).sources, [])
+  assert.equal(parse(report()).lastRun.at, "")
+  assert.equal(parse(report({ sources: [Object.assign({}, good, { id: "evil" })] })), null)
+  assert.equal(parse(report({ sources: [Object.assign({}, good, { state: "great" })] })), null)
+  assert.equal(parse(report({ sources: [Object.assign({}, good, { date: "<img>" })] })), null)
+  assert.equal(parse(report({ lastRun: { at: "now", ok: true } })), null)
+  assert.equal(parse(report({ lastRun: { at: "2026-10-12 09:41", ok: "yes" } })), null)
+
+  const now = new Date(2026, 9, 12, 15, 0)
+  assert.equal(M.sourceLine({ state: "ok", date: "2026-10-12" }, now), "updated today")
+  assert.equal(M.sourceLine({ state: "ok", date: "2026-10-11" }, now), "updated yesterday")
+  assert.equal(M.sourceLine({ state: "failed", date: "2026-10-03", tried: "2026-10-12" }, now), "last update failed; last good Oct 3")
+  assert.equal(M.sourceLine({ state: "never", date: "" }, now), "not updated yet")
+  assert.match(M.lastRunLine({ at: "2026-10-12 09:41", ok: true }, now), /^Last full update today at 09:41\. Everything updated\.$/)
+  assert.match(M.lastRunLine({ at: "2026-10-05 09:41", ok: false }, now), /did not update/)
+})
