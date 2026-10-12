@@ -27,7 +27,7 @@ the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.16.1.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.16.2.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -97,8 +97,11 @@ The Overview has two buttons:
   ClamAV's own service keeps current several times a day.
 
 Under the buttons, two lines count down to the next automatic update and the
-next automatic full scan (everything but the password check). Each button
-resets its own countdown. Turning off `autoUpdate` leaves both to the
+next automatic full scan (everything but the password check), with the time
+in your computer's timezone when it is today or tomorrow: each runs a week
+after the last one, to the minute, or at Vigil's next background check if it
+is already due. Each button resets its own countdown. Results of the buttons
+stay on a card in the panel until you close it. Turning off `autoUpdate` leaves both to the
 buttons.
 
 Below the pillars, **Last run** lists when each scan last ran (the settings

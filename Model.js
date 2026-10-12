@@ -834,24 +834,43 @@ function lastRunRows(report, now) {
   return rows
 }
 
-// "in 6 days", "tomorrow" or "today" until an ISO date; "" when there is none.
-function countdown(dateStr, now) {
-  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr))
-  if (!m) return ""
-  var due = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
-  var today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  var days = Math.round((due - today) / 86400000)
-  return days <= 0 ? "today" : (days === 1 ? "tomorrow" : "in " + days + " days")
+function pad2(n) { return (n < 10 ? "0" : "") + n }
+
+// A local Date from "YYYY-MM-DD HH:MM" (or "YYYY-MM-DDTHH:MM..."), or null.
+function localDate(str) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/.exec(String(str))
+  if (!m) return null
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4] || 0), Number(m[5] || 0))
 }
 
-// The two lines under the buttons: when each automatic run comes next.
-function scheduleLines(report, autoUpdate, now) {
+// When something next runs, in words: "today at 14:30", "tomorrow at 09:52",
+// "in 6 days". Something already due runs at Vigil's next background check
+// (nextCheck); "" when there is nothing to run. Times are this computer's
+// local time.
+function countdown(when, now, nextCheck) {
+  var due = when === "now" ? null : localDate(when)
+  if (when !== "now" && !due) return ""
+  if (!due || due <= now) due = nextCheck && nextCheck > now ? nextCheck : now
+  var today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  var day = new Date(due.getFullYear(), due.getMonth(), due.getDate())
+  var days = Math.round((day - today) / 86400000)
+  var at = " at " + pad2(due.getHours()) + ":" + pad2(due.getMinutes())
+  if (days <= 0) return "today" + at
+  if (days === 1) return "tomorrow" + at
+  return "in " + days + " days"
+}
+
+// The lines under the buttons: when each automatic run comes next.
+// refreshMinutes is how often Vigil checks in the background.
+function scheduleLines(report, autoUpdate, now, refreshMinutes) {
   if (!report) return []
   if (!autoUpdate) return ["Automatic updates and scans are off (Vigil settings)."]
+  var checked = localDate(report.generatedAt)
+  var nextCheck = checked ? new Date(checked.getTime() + (refreshMinutes || 30) * 60000) : null
   var out = []
-  var u = countdown(report.nextUpdate, now)
+  var u = countdown(report.nextUpdate, now, nextCheck)
   if (u !== "") out.push("Next automatic update: " + u)
-  var f = countdown(report.nextFullScan, now)
+  var f = countdown(report.nextFullScan, now, nextCheck)
   if (f !== "") out.push("Next automatic full scan: " + f + " (everything except the password check)")
   if (report.lastRun && report.lastRun.at !== "" && !report.lastRun.ok)
     out.push("The last update could not reach every source; Vigil tries again tomorrow.")
@@ -985,9 +1004,10 @@ function parseReport(text) {
   var sources = parseSources(d.sources)
   var lastRun = parseLastRun(d.lastRun)
   if (!sources || !lastRun) return null
+  // "" (nothing set up), "now" (due already), or a local "YYYY-MM-DD HH:MM".
   var optionalDate = function(v) {
-    if (v === undefined || v === "") return ""
-    return isString(v, 10) && DATE_RE.test(v) ? v : null
+    if (v === undefined || v === "" || v === "now") return v === undefined ? "" : v
+    return isString(v, 16) && /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/.test(v) ? v : null
   }
   var nextUpdate = optionalDate(d.nextUpdate)
   var nextFullScan = optionalDate(d.nextFullScan)

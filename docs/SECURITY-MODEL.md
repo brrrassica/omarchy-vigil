@@ -84,8 +84,15 @@ no polkit policy, no service, no timer and no daemon.
   with its `sudo` prefixes removed; nothing from the report or a file
   reaches it. Steps that would wait for input are not allowed (a test
   checks), and `ufw` runs with `--force` so it never prompts.
-- Update sources updates ClamAV's signatures with `pkexec /usr/bin/freshclam`,
-  a constant argv, only when you press it; the weekly run never asks.
+- Update sources updates ClamAV's signatures only when you press it (the
+  weekly run never asks), with one constant root script through pkexec: if
+  ClamAV's update service runs, it is woken with `systemctl kill
+  --signal=SIGUSR1` (it then checks at once; a second freshclam would fail
+  on the service's log lock), and the script waits up to two minutes for the
+  service's journal to report the result; otherwise it runs freshclam.
+- Programs Vigil runs must be trusted files, never links. `/usr/bin/python3`
+  is a link on Arch, so for Bumblebee's scanner Vigil resolves it and runs
+  the target only if it is a trusted `python3.X` file in `/usr/bin`.
 - Terminal actions are constant strings in `Model.js`. The report only names
   an action id; an id that is not in the table does nothing. Omarchy tools
   are addressed by absolute path, from one of the two trusted directories.

@@ -447,20 +447,26 @@ test("every terminal says what it does, plainly, then the technical part", () =>
   }
 })
 
-test("schedule lines: countdowns to the next update and the next full scan", () => {
+test("schedule lines: countdowns with the time, in local time", () => {
   const now = new Date(2026, 9, 12, 10, 0)
-  const r = { lastRun: { at: "2026-10-12 09:52", ok: true }, nextUpdate: "2026-10-19", nextFullScan: "2026-10-13" }
-  assert.deepEqual(M.scheduleLines(r, true, now), [
+  const r = { generatedAt: "2026-10-12T09:58:00+0200", lastRun: { at: "2026-10-12 09:52", ok: true },
+              nextUpdate: "2026-10-19 09:52", nextFullScan: "2026-10-12 21:15" }
+  assert.deepEqual(M.scheduleLines(r, true, now, 30), [
     "Next automatic update: in 7 days",
-    "Next automatic full scan: tomorrow (everything except the password check)"])
-  assert.deepEqual(M.scheduleLines(r, false, now), ["Automatic updates and scans are off (Vigil settings)."])
-  assert.match(M.scheduleLines(Object.assign({}, r, { lastRun: { at: "2026-10-12 09:52", ok: false } }), true, now)[2],
+    "Next automatic full scan: today at 21:15 (everything except the password check)"])
+  // Already due: it runs at the next background check, 30 minutes after the last one.
+  assert.equal(M.scheduleLines(Object.assign({}, r, { nextUpdate: "now" }), true, now, 30)[0],
+    "Next automatic update: today at 10:28")
+  assert.equal(M.countdown("2026-10-13 08:05", now, null), "tomorrow at 08:05")
+  assert.equal(M.countdown("2026-10-12", now, null), "today at 10:00")       // older helper: date only
+  assert.equal(M.countdown("", now, null), "")
+  assert.deepEqual(M.scheduleLines(r, false, now, 30), ["Automatic updates and scans are off (Vigil settings)."])
+  assert.match(M.scheduleLines(Object.assign({}, r, { lastRun: { at: "2026-10-12 09:52", ok: false } }), true, now, 30)[2],
     /could not reach every source/)
-  assert.equal(M.countdown("2026-10-12", now), "today")
-  assert.equal(parse(report({ nextFullScan: "2026-10-19" })).nextFullScan, "2026-10-19")
+  assert.equal(parse(report({ nextFullScan: "2026-10-19 08:00" })).nextFullScan, "2026-10-19 08:00")
+  assert.equal(parse(report({ nextUpdate: "now" })).nextUpdate, "now")
   assert.equal(parse(report({ nextFullScan: "<b>" })), null)
 })
-
 test("progress lines are validated and worded", () => {
   const p = M.parseProgress(JSON.stringify({ progress: { step: 3, of: 4, doing: "Scanning your home folder for viruses", done: 500, total: 1000 } }))
   assert.equal(p.fraction, (2 + 0.5) / 4)

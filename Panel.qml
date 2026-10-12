@@ -62,6 +62,7 @@ Panel {
   property var scanProgress: null          // the latest progress line, while a run is going
   property bool feedForced: false
   property bool feedFull: false
+  property string feedMode: ""
   // One bar per monitor means one copy of this widget per monitor. Only the
   // first screen's copy schedules audits, records findings and notifies.
   readonly property bool isPrimary: root.QsWindow.window !== null
@@ -146,6 +147,7 @@ Panel {
     feedOverflow = false
     feedForced = mode === "sources" || mode === "full" || mode === "scan"
     feedFull = mode === "full"
+    feedMode = mode
     feedProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, "refresh-feeds"]
       .concat(mode === "sources" ? ["--sources"] : (mode === "full" ? ["--full"] : (mode === "scan" ? ["--scan"] : [])))
     feedProc.running = true
@@ -495,10 +497,16 @@ Panel {
       root.feedBuffer = ""
       root.feedResult = ""
       root.scanProgress = null
-      // Only the button reports back; the weekly background run stays quiet.
+      // Only the buttons report back, on the result card, which stays until
+      // you close it; the weekly background run stays quiet.
       if (root.feedForced) {
-        if (!parsed) root.setStatus("The update did not finish.", true)
-        else root.setStatus(parsed.message, !parsed.ok)
+        root.setStatus("", false)
+        root.actionResult = {
+          title: root.feedMode === "full" ? "Full scan" : (root.feedMode === "scan" ? "Virus scan" : "Update sources"),
+          verdict: parsed ? parsed.message : "It did not finish.",
+          ok: parsed !== null && parsed.ok,
+          output: ""
+        }
       }
       if (root.feedFull)
         Quickshell.execDetached(["/usr/bin/notify-send", "--app-name=Vigil", "--", "Vigil",
@@ -871,7 +879,7 @@ Panel {
               }
             }
             Repeater {
-              model: Model.scheduleLines(root.report, root.autoUpdate, new Date())
+              model: Model.scheduleLines(root.report, root.autoUpdate, new Date(), root.refreshMinutes)
               delegate: Text {
                 required property var modelData
                 textFormat: Text.PlainText

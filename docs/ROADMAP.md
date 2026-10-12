@@ -125,6 +125,12 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 - [x] Fixed: the Full scan password check never ran on Arch (`awk` is a
       link, which Vigil never runs as root); it now runs through bash.
 - [x] The countdowns stay visible while a scan runs.
+- [x] 0.16.2: countdowns show the time (local timezone) and are exact to the
+      minute; button results stay on a card until closed. Fixed: Update
+      sources could not update signatures while ClamAV's service ran (it now
+      wakes the service), and Full scan skipped Bumblebee on Arch, where
+      python3 is a link (now resolved to the trusted file; a Bumblebee that
+      cannot run is reported, not skipped).
 - [x] 0.16.1: the Last run list counts work done outside Vigil: ClamAV's own
       signature service and ClamUI's updates and scans (from ClamUI's log
       index), marked "by ClamUI" where it was ClamUI.

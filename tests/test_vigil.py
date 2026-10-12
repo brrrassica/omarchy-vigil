@@ -1408,19 +1408,36 @@ def test_report_says_when_something_is_due(v):
 
 
 def test_countdowns_to_the_next_update_and_full_scan(v):
-    from datetime import date, timedelta
-    week = (date.today() + timedelta(days=v.FEED_DAYS)).isoformat()
+    from datetime import datetime, timedelta
     assert v.next_update() == ""                                          # no sources set up
-    assert v.next_full_scan() == date.today().isoformat()                 # never ran: due now
+    assert v.next_full_scan() == "now"                                    # never ran: due now
     v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
     v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
+    before = datetime.now().replace(second=0, microsecond=0)
     v.refresh_due_feeds(sources_only=True)
-    assert v.next_update() == week and v.next_full_scan() == date.today().isoformat()
+    week = datetime.strptime(v.next_update(), "%Y-%m-%d %H:%M")
+    assert timedelta(days=7) <= week - before <= timedelta(days=7, minutes=1)   # a week, to the minute
+    assert v.next_full_scan() == "now"
     v.refresh_due_feeds(full=True)
-    assert v.next_full_scan() == week
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", v.next_full_scan())
     report = v.audit(peek=True)
-    assert report["nextUpdate"] == week and report["nextFullScan"] == week
+    assert report["nextUpdate"] == v.next_update() and report["nextFullScan"] == v.next_full_scan()
 
+
+def test_due_to_the_minute(v):
+    from datetime import datetime, timedelta
+    v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
+    d = Path(v.HOME, ".local/state/omarchy-vigil")
+    d.mkdir(parents=True, mode=0o700, exist_ok=True)
+    nearly = datetime.now() - timedelta(days=7) + timedelta(minutes=5)   # due in five minutes
+    put(d / "arch-audit.json", json.dumps({"at": nearly.strftime("%Y-%m-%d"), "time": nearly.strftime("%H:%M"),
+                                           "attempted": nearly.strftime("%Y-%m-%d")}), 0o600)
+    assert v.feed_due("arch-audit") is False
+    assert v.next_update() == (nearly + timedelta(days=7)).strftime("%Y-%m-%d %H:%M")
+    late = datetime.now() - timedelta(days=7, minutes=5)                  # five minutes overdue
+    put(d / "arch-audit.json", json.dumps({"at": late.strftime("%Y-%m-%d"), "time": late.strftime("%H:%M"),
+                                           "attempted": late.strftime("%Y-%m-%d")}), 0o600)
+    assert v.feed_due("arch-audit") is True and v.next_update() == "now"
 
 def test_full_scan_with_nothing_installed_still_checks(v):
     res = v.refresh_due_feeds(full=True)
@@ -1679,7 +1696,7 @@ def test_remove_secret_lines(v):
 def test_signatures_update_with_update_sources_only(v):
     v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash", v.ROOT + "/usr/bin/freshclam",
                   v.ROOT + "/usr/bin/clamscan"}
-    v.COMMANDS[tuple(v.FRESHCLAM_ARGV)] = (1, "daily.cld database is up-to-date\n")   # 1 = already current
+    v.COMMANDS[tuple(v.FRESHCLAM_ARGV)] = (0, "")
     v.COMMANDS[tuple(v.NO_PASSWORD_ARGV)] = (0, "")
     v.COMMANDS[scan_argv(v)] = (0, "")
     calls = []
@@ -1714,3 +1731,35 @@ def test_clamui_activity_counts_in_the_last_run_list(v):
     sysfile(v, "/var/lib/clamav/freshclam.dat", "x")                     # ClamAV's own check, just now
     src = {s["id"]: s for s in v.source_status()}
     assert src["signatures"]["by"] == "" and src["signatures"]["state"] == "ok"
+
+
+def test_signature_update_wakes_clamavs_service_and_explains_failures(v):
+    script = v.SIGNATURES_SCRIPT
+    assert "systemctl kill --signal=SIGUSR1 --kill-whom=main clamav-freshclam.service" in script
+    assert "journalctl -u clamav-freshclam.service" in script and "/usr/bin/freshclam" in script
+    v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash", v.ROOT + "/usr/bin/freshclam"}
+    v.COMMANDS[tuple(v.FRESHCLAM_ARGV)] = (3, "")
+    msg = v.refresh_due_feeds(sources_only=True)["message"]
+    assert "did not finish checking within two minutes" in msg
+    v.COMMANDS[tuple(v.FRESHCLAM_ARGV)] = (0, "")
+    v.refresh_due_feeds(sources_only=True)
+    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
+    sig = {x["id"]: x for x in v.source_status()}["signatures"]
+    assert sig["state"] == "ok" and re.fullmatch(r"\d{2}:\d{2}", sig["time"])      # Vigil's own record
+
+
+def test_bumblebee_failure_is_reported_not_skipped(v):
+    Path(v.HOME, ".config/omarchy/plugins", v.BUMBLEBEE_ID).mkdir(parents=True)    # installed, no scanner
+    msg = v.refresh_due_feeds(full=True)["message"]
+    assert "Bumblebee could not rescan: its scanner is missing" in msg
+    script = bumblebee_install(v)
+    v.COMMANDS[("/usr/bin/python3", script, "--force")] = (0, '{"installed": false}\n')
+    assert "the bumblebee command it needs is not installed" in v.refresh_due_feeds(full=True)["message"]
+
+
+def test_python_link_is_resolved_to_a_trusted_file(v):
+    real = put(Path(v.sys_path("/usr/bin/python3.13")), "#!", 0o755)
+    os.symlink("python3.13", v.sys_path("/usr/bin/python3"))
+    assert v.trusted_python() == ""                                       # the real file is not trusted yet
+    v.TRUSTED.add(str(real))
+    assert v.trusted_python() == "/usr/bin/python3.13"

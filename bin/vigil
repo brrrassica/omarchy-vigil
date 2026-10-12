@@ -42,9 +42,9 @@ import subprocess
 import sys
 import time
 from base64 import b64decode
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
-VERSION = "0.16.1"
+VERSION = "0.16.2"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1409,7 +1409,24 @@ PKEXEC = "/usr/bin/pkexec"
 # /usr/bin/bash, not awk: on Arch awk is a link, which Vigil never runs as root.
 ROOT_STEP = "/usr/bin/awk -F: '$2 == \"\" { print $1 }' /etc/shadow"
 NO_PASSWORD_ARGV = [PKEXEC, "/usr/bin/bash", "-c", ROOT_STEP]
-FRESHCLAM_ARGV = [PKEXEC, "/usr/bin/freshclam"]
+# ClamAV's own update service holds freshclam's log locked, so a second
+# freshclam would fail. When the service runs, wake it instead (SIGUSR1 makes
+# it check now) and wait for it to log the result; otherwise run freshclam.
+SIGNATURES_SCRIPT = (
+    "if /usr/bin/systemctl is-active --quiet clamav-freshclam.service; then "
+    "start=$(/usr/bin/date +%s); "
+    "/usr/bin/systemctl kill --signal=SIGUSR1 --kill-whom=main clamav-freshclam.service || exit 4; "
+    "for i in $(/usr/bin/seq 120); do "
+    "if /usr/bin/journalctl -u clamav-freshclam.service --since \"@$start\" -o cat --no-pager 2>/dev/null "
+    "| /usr/bin/grep -qE 'daily\\.c[lv]d (database is up-to-date|updated)'; then exit 0; fi; "
+    "[ \"$(/usr/bin/stat -c %Y /var/lib/clamav/freshclam.dat 2>/dev/null || echo 0)\" -gt \"$start\" ] && exit 0; "
+    "/usr/bin/sleep 1; done; exit 3; "
+    "else /usr/bin/freshclam >/dev/null 2>&1; rc=$?; [ \"$rc\" -le 1 ] || exit 5; fi")
+FRESHCLAM_ARGV = [PKEXEC, "/usr/bin/bash", "-c", SIGNATURES_SCRIPT]
+SIGNATURE_ERRORS = {126: "no password was given", 127: "no password was given",
+                    3: "ClamAV did not finish checking within two minutes",
+                    4: "ClamAV's update service could not be woken",
+                    5: "ClamAV could not reach its servers"}
 
 
 def can_update_signatures():
@@ -1417,13 +1434,13 @@ def can_update_signatures():
 
 
 def refresh_signatures():
-    """Update ClamAV's virus signatures now (Update sources). freshclam needs root,
-    so Omarchy's password dialog asks; it exits 1 when they were already current."""
-    rc, _ = run(FRESHCLAM_ARGV, timeout=900, limit=1024 * 1024)
-    if rc in (126, 127):
-        raise Refused("no password was given")
-    if rc not in (0, 1):
-        raise Refused("freshclam could not update the signatures")
+    """Update ClamAV's virus signatures now (Update sources). Needs root, so
+    Omarchy's password dialog asks. Records when, so the Overview shows it even
+    when nothing new came out."""
+    rc, _ = run(FRESHCLAM_ARGV, timeout=300, limit=64 * 1024)
+    if rc != 0:
+        raise Refused(SIGNATURE_ERRORS.get(rc, "ClamAV could not update the signatures"))
+    save_feed("signatures", {})
     return "Virus signatures updated."
 
 
@@ -1604,7 +1621,7 @@ for _spec in SCANNERS:
 # cached in the state folder; checks read only the cache.
 
 FEED_FILES = {"arch-audit": "arch-audit.json", "osv": "osv.json", "aur": "aur.json", "virus-scan": "virus-scan.json",
-              "full-scan": "full-scan.json"}
+              "full-scan": "full-scan.json", "signatures": "signatures.json"}
 # Two weekly timers: the sources (Update sources), and the automatic part of
 # a Full scan (the virus scan of the home folder and a Bumblebee rescan).
 SOURCE_FEEDS = ("arch-audit", "osv", "aur")
@@ -1646,45 +1663,53 @@ def feed_available(name):
     return False
 
 
+def _due_at(meta):
+    """When a feed next falls due, in local time: a week after it last completed
+    (to the minute), or a day after a failed attempt; None if it is due now."""
+    done, tm, tried = meta.get("at"), meta.get("time"), meta.get("attempted")
+    now = datetime.now()
+    try:
+        if isinstance(done, str) and _DATE.match(done):
+            hm = tm if isinstance(tm, str) and re.fullmatch(r"\d{2}:\d{2}", tm) else "00:00"
+            due = datetime.strptime(done + " " + hm, "%Y-%m-%d %H:%M") + timedelta(days=FEED_DAYS)
+            if due > now:
+                return due
+        if isinstance(tried, str) and _DATE.match(tried) and tried != done:
+            retry = datetime.strptime(tried, "%Y-%m-%d") + timedelta(days=FEED_RETRY_DAYS)
+            if retry > now:
+                return retry
+    except ValueError:
+        pass
+    return None
+
+
 def feed_due(name):
     if not feed_available(name):
         return False
-    meta = _state_json(FEED_FILES[name]) or {}
-    done = _days_since(meta.get("at"))
-    tried = _days_since(meta.get("attempted"))
-    if done is not None and done < FEED_DAYS:
-        return False
-    return tried is None or tried >= FEED_RETRY_DAYS
+    return _due_at(_state_json(FEED_FILES[name]) or {}) is None
 
 
 def next_update():
-    """ISO date of the next weekly update: the earliest day any available source falls due."""
+    """When the next weekly update falls due: the earliest of the available sources."""
     return _next_due(SOURCE_FEEDS)
 
 
 def next_full_scan():
-    """ISO date of the next automatic Full scan (its background part)."""
+    """When the next automatic Full scan (its background part) falls due."""
     return _next_due(("full-scan",))
 
 
 def _next_due(names):
-    today = date.today()
+    """Local "YYYY-MM-DD HH:MM" when the first of these falls due ("now" if one already is), or ""."""
     nxt = None
     for name in names:
         if not feed_available(name):
             continue
-        meta = _state_json(FEED_FILES[name]) or {}
-        when = today
-        done, tried = meta.get("at"), meta.get("attempted")
-        try:
-            if isinstance(done, str) and _DATE.match(done) and _days_since(done) < FEED_DAYS:
-                when = date.fromisoformat(done) + timedelta(days=FEED_DAYS)
-            elif isinstance(tried, str) and _DATE.match(tried) and _days_since(tried) < FEED_RETRY_DAYS:
-                when = date.fromisoformat(tried) + timedelta(days=FEED_RETRY_DAYS)
-        except (TypeError, ValueError):
-            when = today
-        nxt = when if nxt is None else min(nxt, when)
-    return nxt.isoformat() if nxt else ""
+        due = _due_at(_state_json(FEED_FILES[name]) or {})
+        if due is None:
+            return "now"
+        nxt = due if nxt is None else min(nxt, due)
+    return nxt.strftime("%Y-%m-%d %H:%M") if nxt else ""
 
 
 RUN_NAME = "last-run.json"
@@ -1810,6 +1835,10 @@ def source_status():
         d, t = _mtime_stamp([sys_path("/var/lib/clamav/" + n) for n in
                              ("daily.cld", "daily.cvd", "main.cld", "main.cvd", "bytecode.cld", "bytecode.cvd",
                               "freshclam.dat")])
+        meta = _state_json(FEED_FILES["signatures"]) or {}
+        mine = (meta.get("at", ""), meta.get("time", "")) if isinstance(meta.get("at"), str) and \
+            _DATE.match(meta.get("at", "")) and isinstance(meta.get("time"), str) else ("", "")
+        d, t = _newer(mine, (d, t))
         ext = clamui_last("update")
         by = "ClamUI" if ext[0] and _newer(ext, (d, t)) == ext and ext != (d, t) else ""
         d, t = _newer(ext, (d, t))
@@ -2238,21 +2267,43 @@ def _user_file_ok(path, base):
     return True
 
 
+def trusted_python():
+    """The real python3 interpreter, if trusted. On Arch /usr/bin/python3 is a
+    link to python3.X; Vigil resolves it and runs the file it points to only if
+    that is a trusted file in /usr/bin."""
+    link = sys_path("/usr/bin/python3")
+    real = os.path.realpath(link)
+    name = os.path.basename(real)
+    if os.path.dirname(real) != os.path.dirname(link) or not re.fullmatch(r"python3(\.\d{1,2})?", name):
+        return ""
+    return "/usr/bin/" + name if is_trusted_executable(sys_path("/usr/bin/" + name)) else ""
+
+
+def bumblebee_installed():
+    return exists(home_path(".config", "omarchy", "plugins", BUMBLEBEE_ID))
+
+
 def bumblebee_scanner():
     """Bumblebee's own scanner, if it is installed and safe to run as you; else ''."""
     base = home_path(".config", "omarchy", "plugins", BUMBLEBEE_ID)
     script = os.path.join(base, "bin", "scan_bumblebee.py")
-    return script if _user_file_ok(script, base) and is_trusted_executable(sys_path("/usr/bin/python3")) else ""
+    return script if _user_file_ok(script, base) and trusted_python() else ""
 
 
 def refresh_bumblebee():
-    """Ask Bumblebee to rescan: the exact command its own service runs, as you."""
+    """Ask Bumblebee to rescan: the same command its own service runs, as you."""
     script = bumblebee_scanner()
     if not script:
-        raise Refused("Bumblebee's scanner was not found")
-    rc, _ = run(["/usr/bin/python3", script, "--force"], timeout=300, limit=CMD_MAX)
+        raise Refused("its scanner is missing, or its files can be changed by other accounts")
+    rc, out = run([trusted_python(), script, "--force"], timeout=300, limit=CMD_MAX)
     if rc != 0:
-        raise Refused("Bumblebee's scan did not finish")
+        raise Refused("its scan did not finish")
+    try:
+        payload = json.loads(out.strip().splitlines()[-1]) if out.strip() else {}
+    except ValueError:
+        payload = {}
+    if isinstance(payload, dict) and payload.get("installed") is False:
+        raise Refused("the bumblebee command it needs is not installed")
     return "Bumblebee scanned."
 
 
@@ -2280,9 +2331,9 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
         + (["signatures"] if sources_only and can_update_signatures() else []) + list(sources)
     if (run_full or scan_only) and feed_available("virus-scan"):
         steps.append("virus-scan")
-    if run_full and bumblebee_scanner():
-        steps.append("bumblebee")
-    done, failed = [], []
+    if run_full and bumblebee_installed():
+        steps.append("bumblebee")                     # a failure says why, rather than being skipped
+    done, failed, why = [], [], {}
     for i, name in enumerate(steps, 1):
         progress(i, len(steps), STEP_TEXT[name])
         try:
@@ -2297,7 +2348,10 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
             else:
                 FEED_REFRESH[name]()
             done.append(name)
-        except (Refused, OSError):
+        except Refused as e:
+            failed.append(name)
+            why[name] = str(e)
+        except OSError:
             failed.append(name)
     if sources:
         save_last_run(not [n for n in failed if n in SOURCE_FEEDS], force or full or sources_only)
@@ -2320,13 +2374,15 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
     if "password-check" in done:
         parts.append("checked for accounts without a password")
     msg = (_and(parts)[0].upper() + _and(parts)[1:] + ".") if parts else ""
-    retried = [n for n in failed if n not in ("password-check", "signatures")]
+    retried = [n for n in failed if n not in ("password-check", "signatures", "bumblebee")]
     if retried:
         msg += " Could not finish %s; Vigil tries again tomorrow." % _and([FEED_LABELS[n] for n in retried])
     if "password-check" in failed:
         msg += " The password check was skipped: no password was given."
+    if "bumblebee" in failed:
+        msg += " Bumblebee could not rescan: %s." % why.get("bumblebee", "it did not finish")
     if "signatures" in failed:
-        msg += " The virus signatures were not updated (no password, or ClamAV could not reach its servers)."
+        msg += " The virus signatures were not updated: %s." % why.get("signatures", "ClamAV could not update them")
     msg += no_pkexec
     found = feed_findings()
     msg += (" On this machine: %s. See the tabs for details." % "; ".join(found)) if found \
