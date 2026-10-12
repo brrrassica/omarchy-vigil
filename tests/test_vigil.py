@@ -1290,9 +1290,19 @@ def test_aur_refresh_failure_is_retried(v):
 # --------------------------------------------------------------------------
 # Weekly virus scan, Update sources and Full scan
 
-def scan_argv(v):
-    return ("/usr/bin/clamscan", "--recursive", "--infected", "--no-summary", "--stdout", "--",
-            os.path.join(v.HOME, "Downloads"))
+def scan_argv(v, whole_home=False):
+    return tuple(v._clamscan_argv(v.HOME if whole_home else os.path.join(v.HOME, "Downloads"), whole_home))
+
+
+def test_clamscan_never_follows_links_or_leaves_the_disk(v):
+    argv = scan_argv(v)
+    assert argv[:5] == ("/usr/bin/clamscan", "--recursive", "--infected", "--no-summary", "--stdout")
+    assert {"--cross-fs=no", "--follow-dir-symlinks=0", "--follow-file-symlinks=0"} <= set(argv)
+    assert argv[-2:] == ("--", os.path.join(v.HOME, "Downloads")) and not any("exclude" in a for a in argv)
+    home = scan_argv(v, True)
+    assert home[-2:] == ("--", v.HOME)
+    assert "--exclude-dir=^%s/\\.cache($|/)" % re.escape(v.HOME) in home
+    assert "--exclude-dir=/node_modules($|/)" in home
 
 
 def test_clamscan_parse():
@@ -1438,7 +1448,7 @@ def test_source_labels_name_the_source_not_a_finding(v):
     v.TRUSTED |= {v.ROOT + "/usr/bin/arch-audit", v.ROOT + "/usr/bin/clamscan"}
     os.makedirs(os.path.join(v.HOME, "Downloads"))
     labels = [s["label"] for s in v.source_status()]
-    assert labels == ["ClamAV virus signatures", "Downloads virus scan", "Arch vulnerability database",
+    assert labels == ["ClamAV virus signatures", "Virus scan", "Arch vulnerability database",
                       "Full scan (password check)"]
 
 
@@ -1563,3 +1573,52 @@ def test_firewire_only_matters_with_a_port(v):
     sysfile(v, "/etc/modprobe.d/90-omarchy-vigil-firewire.conf",
             v.ETC_MARK + "\ninstall firewire-core /bin/false\n")
     assert v.check_firewire()["status"] == "pass" and v.undo_available("undo-firewire")
+
+
+# --------------------------------------------------------------------------
+# Full scan: the whole home folder, Bumblebee, and the next automatic update
+
+def test_full_scan_covers_the_home_folder(v):
+    v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan"}
+    os.makedirs(os.path.join(v.HOME, "Downloads"))
+    v.COMMANDS[scan_argv(v, True)] = (1, os.path.join(v.HOME, "Documents/x.exe") + ": Win.Test.EICAR_HDB-1 FOUND\n")
+    res = v.refresh_due_feeds(force=True, full=True)
+    assert res["message"].startswith("Scanned your home folder. On this machine: 1 infected file in your home folder.")
+    c = v.check_virus_scan()
+    assert c["status"] == "fail" and c["summary"].startswith("1 infected file in your home folder")
+
+
+def bumblebee_install(v, mode=0o755):
+    base = Path(v.HOME, ".config/omarchy/plugins", v.BUMBLEBEE_ID)
+    script = put(base / "bin" / "scan_bumblebee.py", "print('{}')\n", mode)
+    v.TRUSTED.add(v.ROOT + "/usr/bin/python3")
+    return str(script)
+
+
+def test_full_scan_asks_bumblebee_to_rescan(v):
+    script = bumblebee_install(v)
+    v.COMMANDS[("/usr/bin/python3", script, "--force")] = (0, "{}")
+    res = v.refresh_due_feeds(force=True, full=True)
+    assert res["message"].startswith("Had Bumblebee rescan your packages.")
+    assert "Bumblebee" not in v.refresh_due_feeds(force=True, sources_only=True)["message"]
+
+
+def test_bumblebee_scanner_must_be_safe_to_run(v, tmp_path):
+    script = bumblebee_install(v, 0o777)                     # writable by anyone: refused
+    assert v.bumblebee_scanner() == ""
+    os.chmod(script, 0o755)
+    assert v.bumblebee_scanner() == script
+    os.unlink(script)
+    os.symlink(put(tmp_path / "elsewhere.py", "x"), script)  # a link: refused
+    assert v.bumblebee_scanner() == ""
+
+
+def test_next_update_counts_down_from_the_last_refresh(v):
+    from datetime import date, timedelta
+    assert v.next_update() == ""                             # nothing set up
+    v.TRUSTED |= {v.ROOT + "/usr/bin/arch-audit"}
+    assert v.next_update() == date.today().isoformat()       # never refreshed: due now
+    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
+    v.refresh_due_feeds(force=True, sources_only=True)
+    assert v.next_update() == (date.today() + timedelta(days=v.FEED_DAYS)).isoformat()
+    assert v.audit(peek=True)["nextUpdate"] == v.next_update()

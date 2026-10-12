@@ -176,6 +176,14 @@ say where they connect before they run.
 - The plugin capability scan reads other plugins' files as text, at most 300
   files per plugin, 512 KiB per file, 8 MiB and three seconds in total,
   without following symlinks. It never loads, imports or runs them.
+- The one exception to "never runs it": a Full scan you start asks
+  Bumblebee to rescan by running Bumblebee's own scanner exactly as
+  Bumblebee's service does, `/usr/bin/python3 <bumblebee>/bin/scan_bumblebee.py
+  --force`, as you, with Vigil's cleaned environment and a five-minute limit.
+  It is code that already runs as you every few hours, so nothing gains
+  privileges. Vigil runs it only if the plugin folder, its `bin` folder and
+  the script are not links, belong to you (or root) and cannot be changed by
+  anyone else.
 - File-change alerts store SHA-256 fingerprints, never contents; symlinks
   are recorded by their target path and never followed.
 - Secrets found in shell history are reported by file, line and kind. The

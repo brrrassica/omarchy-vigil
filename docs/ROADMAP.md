@@ -107,7 +107,22 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.13 (this release): Lynis retired
+## 0.14 (this release): a simpler Overview, a real Full scan
+
+- [x] Overview: the score, **Full scan** and **Update sources**, one line
+      with the last update and a countdown to the next automatic one, then
+      the pillars with how many findings each has to fix, to improve and for
+      information. The source list, the 30-day chart and "Fix these first"
+      are gone.
+- [x] **Full scan** (`R` or `S`) runs everything: sources, a virus scan of
+      the whole home folder, a Bumblebee rescan, the password check, every
+      setting; a notification says when it is done.
+- [x] Rows with nothing to do are dimmed in the pillar tabs.
+- [x] Every colour comes from the Omarchy theme (urgent, accent, muted,
+      text), the bar shield included; the scroll bar is themed and has its
+      own gutter, so it no longer covers text.
+
+## 0.13: Lynis retired
 
 - [x] Vigil does the checks Lynis was kept for: other root accounts and
       shared IDs (from `/etc/passwd`), accounts without a password (Full

@@ -431,3 +431,23 @@ test("full scan card says what runs and what needs a password", () => {
   assert.ok(noTerm.lines.some(l => l.includes("the rest still runs")))
   assert.equal(M.confirmation("full-scan", "all", null), null)
 })
+
+test("pillar rows count what each pillar shows", () => {
+  assert.equal(M.pillarCounts(0, 0, 0), "✓ all good")
+  assert.equal(M.pillarCounts(2, 1, 3), "2 to fix · 1 to improve · 3 notes")
+  assert.equal(M.pillarCounts(0, 0, 1), "1 note")
+})
+
+test("update line: last update and a countdown to the next automatic one", () => {
+  const now = new Date(2026, 9, 12, 10, 0)
+  const r = (at, ok, next) => ({ lastRun: { at, ok }, nextUpdate: next })
+  assert.equal(M.updateLine(r("2026-10-12 09:52", true, "2026-10-19"), true, now),
+    "Updated today at 09:52 · next automatic update in 7 days.")
+  assert.equal(M.updateLine(r("2026-10-11 09:52", true, "2026-10-13"), true, now),
+    "Updated yesterday at 09:52 · next automatic update tomorrow.")
+  assert.match(M.updateLine(r("2026-10-12 09:52", false, "2026-10-13"), true, now), /but some sources failed/)
+  assert.equal(M.updateLine(r("", false, ""), true, now), "Not updated yet.")
+  assert.match(M.updateLine(r("2026-10-12 09:52", true, "2026-10-19"), false, now), /Automatic updates are off\.$/)
+  assert.equal(parse(report({ nextUpdate: "2026-10-19" })).nextUpdate, "2026-10-19")
+  assert.equal(parse(report({ nextUpdate: "soon" })), null)
+})

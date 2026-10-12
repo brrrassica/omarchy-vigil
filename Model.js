@@ -346,15 +346,18 @@ var TERMINAL_ACTIONS = {
     run: "/usr/bin/clamscan --recursive --infected -- \"$HOME/Downloads\""
   },
   "password-check": {
-    title: "Full scan: check for accounts without a password",
-    what: ["Only root can read where passwords are kept (/etc/shadow), so this part needs sudo.",
-           "It lists the names of accounts whose password is empty, nothing else, into",
-           "~/.local/state/omarchy-vigil/no-password.txt for Vigil to read."],
+    title: "Full scan",
+    what: ["Vigil is running every check and scan it has. Most of it runs in the background:",
+           "updating its lists, the virus scan of your home folder, Bumblebee, and every setting.",
+           "",
+           "This terminal does the one step that needs your password: finding accounts that have no",
+           "password. Only root can read where passwords are kept (/etc/shadow); Vigil keeps only",
+           "the names of such accounts (usually none), in ~/.local/state/omarchy-vigil/no-password.txt."],
     run: "umask 077; d=\"$HOME/.local/state/omarchy-vigil\"; /usr/bin/mkdir -p \"$d\"; "
       + "echo 'Checking for accounts without a password.'; "
       + "sudo /usr/bin/awk -F: '$2 == \"\" { print $1 }' /etc/shadow > \"$d/no-password.txt.new\"; "
       + "/usr/bin/mv -f \"$d/no-password.txt.new\" \"$d/no-password.txt\"; "
-      + "echo 'Done. The rest of the Full scan finishes in the background; open Vigil to see the results.'"
+      + "echo 'Done. You can close this window; Vigil notifies you when the rest of the Full scan finishes.'"
   },
   "old-services-off": {
     title: "Switch off old network services",
@@ -727,16 +730,38 @@ function lastRunLine(run, now) {
     + (run.ok ? ". Every source refreshed." : ". Some sources did not refresh; Vigil tries again tomorrow.")
 }
 
+// One line under the scan buttons: when sources last updated, and a countdown
+// to the next automatic update (which a manual update or Full scan resets).
+function updateLine(report, autoUpdate, now) {
+  if (!report) return ""
+  var run = report.lastRun
+  var last = run && run.at !== ""
+    ? "Updated " + relativeDay(run.at, now) + " at " + run.at.substring(11, 16)
+    : "Not updated yet"
+  if (run && run.at !== "" && !run.ok) last += ", but some sources failed"
+  if (!autoUpdate) return last + ". Automatic updates are off."
+  if (report.nextUpdate === "") return last + "."
+  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(report.nextUpdate)
+  var due = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  var today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  var days = Math.round((due - today) / 86400000)
+  var when = days <= 0 ? "today" : (days === 1 ? "tomorrow" : "in " + days + " days")
+  return last + " \u00b7 next automatic update " + when + "."
+}
+
 // The Full scan card: what runs in the background and what needs the terminal.
 function fullScanConfirmation(report) {
   if (!report) return null
-  var lines = ["Updates every source, as Update sources does.",
-               "Scans your Downloads folder for viruses, if ClamAV is installed (Detect tab).",
-               "Checks for accounts without a password, the one check that needs your password. A terminal "
-               + "opens for it and sudo asks once; it only lists account names.",
-               "Then every tab is checked again."]
+  var lines = ["Runs every check and scan Vigil has:",
+               "\u2022 updates the lists of known vulnerabilities, malicious packages and AUR status;",
+               "\u2022 scans your whole home folder for viruses with ClamAV, if installed (skipping caches "
+               + "and game libraries); this can take a while and runs in the background;",
+               "\u2022 has Bumblebee rescan your packages, if installed;",
+               "\u2022 checks for accounts without a password, the one step that needs your password: a "
+               + "terminal opens and sudo asks once;",
+               "\u2022 then checks every setting in every tab again. You get a notification when it is done."]
   if (launcherPath(report.tools) === "" || terminalScript("password-check", report.tools) === "")
-    lines.splice(2, 1, "The password check needs the Omarchy terminal tools, which were not found; the rest still runs.")
+    lines.splice(4, 1, "\u2022 the password check needs the Omarchy terminal tools, which were not found; the rest still runs;")
   return { title: "Full scan", lines: lines }
 }
 
@@ -809,9 +834,15 @@ function parseReport(text) {
   var sources = parseSources(d.sources)
   var lastRun = parseLastRun(d.lastRun)
   if (!sources || !lastRun) return null
+  var nextUpdate = ""
+  if (d.nextUpdate !== undefined && d.nextUpdate !== "") {
+    if (!isString(d.nextUpdate, 10) || !DATE_RE.test(d.nextUpdate)) return null
+    nextUpdate = d.nextUpdate
+  }
   return {
     sources: sources,
     lastRun: lastRun,
+    nextUpdate: nextUpdate,
     feedsDue: d.feedsDue === true,
     feedsUpdated: feedsUpdated,
     history: history,
@@ -908,6 +939,15 @@ function levelText(report) {
   return "Looking good"
 }
 
+// What a pillar row on the Overview says: how many findings of each kind it shows.
+function pillarCounts(fails, warns, notes) {
+  var parts = []
+  if (fails) parts.push(fails + " to fix")
+  if (warns) parts.push(warns + " to improve")
+  if (notes) parts.push(notes + (notes === 1 ? " note" : " notes"))
+  return parts.length ? parts.join(" \u00b7 ") : "\u2713 all good"
+}
+
 function categoryLabel(category) {
   return { overview: "Overview", harden: "Harden", detect: "Detect", supply: "Supply",
            privacy: "Privacy", care: "Care" }[category] || ""
@@ -949,10 +989,10 @@ if (typeof module !== "undefined") {
     terminalAction: terminalAction, launcherPath: launcherPath, canRun: canRun, checksFor: checksFor,
     topFindings: topFindings, countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
     tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
-    categoryLabel: categoryLabel, tabIntro: tabIntro, cleanAllPlan: cleanAllPlan,
+    categoryLabel: categoryLabel, pillarCounts: pillarCounts, tabIntro: tabIntro, cleanAllPlan: cleanAllPlan,
     howTo: howTo, docsUrl: docsUrl, docsCommand: docsCommand, DOCS: DOCS, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
     shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
-    relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine,
+    relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine, updateLine: updateLine,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,
     SYSCTL_LINES: SYSCTL_LINES
   }

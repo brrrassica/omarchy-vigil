@@ -26,7 +26,7 @@ root runs in a terminal you can watch.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.13.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.14.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -46,22 +46,24 @@ you ask.
 | | |
 |---|---|
 | Left-click the shield | Open or close the panel |
-| Middle-click the shield | Check again now |
+| Middle-click the shield | Re-read your settings now (quick, no scans) |
 | `←` `→` or `1`–`6` | Switch tabs |
 | `↑` `↓`, `Enter` | Move through findings, open one |
 | `F` | Fix the selected finding (asks first) |
 | `D` | Mark the selected finding as reviewed, or show it again |
-| `S` | Full scan (asks first) |
+| `R` or `S` | Full scan (asks first) |
 | `U` | Update sources |
 | `C` | On the Care tab: Clean all |
-| `R` | Check again |
 | `Esc` | Cancel a confirmation, or close |
 
 The shield is dim until the first check finishes, about eight seconds after
-login. It turns red when something needs fixing and a softer red when only
-improvements are left. The **Overview** tab shows a score out of 100, a bar
-for each of the last 30 days, how each pillar is doing, and the findings to
-fix first.
+login. It takes your theme's urgent colour when something needs fixing and
+its accent colour when only improvements are left; every colour in Vigil
+comes from your Omarchy theme. The **Overview** tab shows your score out of
+100, the **Full scan** and **Update sources** buttons, and each pillar with
+how many findings it has to fix, to improve, and for information. In the
+pillar tabs, rows with nothing to do (passing, not applicable, or marked as
+reviewed) are dimmed.
 
 ### When Vigil runs what
 
@@ -69,28 +71,32 @@ fix first.
 |---|---|
 | Every check in every pillar (reading local settings) | every 30 minutes, and whenever you open the panel; offline, under a second |
 | Known vulnerabilities, malicious packages, AUR status | once a week |
-| Virus scan of `~/Downloads` (ClamAV, as you) | once a week |
+| Virus scan (ClamAV, as you) | `~/Downloads` once a week; your whole home folder in a **Full scan** |
 | ClamAV virus signatures | continuously, by ClamAV's own update service |
-| Bumblebee's catalog and scan | by the Bumblebee plugin |
+| Bumblebee's catalog and scan | by the Bumblebee plugin, and a rescan in every **Full scan** |
 | Accounts without a password | only in a **Full scan**, the one check that needs your password |
 | Cleaning (Care) | only when you ask; Vigil only measures sizes by itself |
 
 The Overview has two buttons:
 
-- **Full scan** (or `S`) checks everything: it updates every source, scans
-  `~/Downloads` for viruses, and checks for accounts without a password, the
-  one check that needs your password, in a terminal where sudo asks once.
-  Every tab then shows the results, and you fix what you choose from there.
+- **Full scan** (`R` or `S`) runs every check and scan Vigil has: it updates
+  every source, scans your whole home folder for viruses (skipping caches,
+  game libraries, `node_modules` and `.git` folders, at low priority), has
+  Bumblebee rescan your packages if it is installed, checks for accounts
+  without a password (the one step that needs your password, in a terminal
+  where sudo asks once), and re-checks every setting. A notification says
+  when it is done; every tab then shows the results, and you fix what you
+  choose from there.
 - **Update sources** (or `U`) only refreshes the lists Vigil checks against
   (known vulnerabilities, malicious packages, AUR status), with no password
   and no scan. ClamAV's signatures update by themselves, so they need no
   button.
 
-Below them, one line per source you have set up (virus signatures, the virus
-scan, known vulnerabilities, malicious packages, AUR status, the last Full
-scan, Bumblebee) shows the date it last updated or ran. A source whose
-latest update failed or is out of date is shown in red. Turning off
-`autoUpdate` leaves the weekly updates and scan to these buttons.
+Below them one line says when the sources last updated and counts down to
+the next automatic update, for example *Updated today at 09:52 · next
+automatic update in 7 days*. Pressing either button resets the countdown.
+It turns red if a source failed to update. Turning off `autoUpdate` leaves
+the weekly updates and scan to these buttons.
 
 ### Every finding
 
@@ -182,7 +188,7 @@ lower it. A warning you mark as reviewed stops counting.
 | Startup files | Reads shell startup files, autostart entries, user services and timers, uwsm and environment.d files, Hyprland config and your crontab, and flags lines that download and run code, decode hidden code, or open reverse shells. These are leads to read, not proof. |
 | System-wide preload | Fails if `/etc/ld.so.preload` loads anything; rootkits use it to hide. |
 | Changes to important files | Records a fingerprint of accounts, PAM, SSH settings, `~/.ssh/authorized_keys`, system and user services, autostart entries and your startup files, and lists anything changed, added or removed since. Changes that match exactly what a package update shipped (from pacman's own records) are not reported, nor are system users that packages add. Changes to who can log in or what runs at start are warnings; changes to your own shell files are information. **Accept these changes** records the current state as the new normal. |
-| Weekly virus scan | ClamAV scans `~/Downloads` once a week, as you, with signatures ClamAV keeps current. Infected files are listed with **Open ClamUI** to quarantine them. Only ClamAV's published signatures count; its guess-based "potentially unwanted" rules stay off. |
+| Virus scan | ClamAV scans `~/Downloads` once a week, and your whole home folder in a Full scan, as you, with signatures ClamAV keeps current. Infected files are listed with **Open ClamUI** to quarantine them. Only ClamAV's published signatures count; its guess-based "potentially unwanted" rules stay off. |
 | ClamUI | Vigil hands virus scanning to [ClamUI](https://github.com/linx-systems/clamui): file and folder scans, scheduled scans, USB drive scans and quarantine. When it is installed, **Open ClamUI** starts it; otherwise Vigil offers to install it from Flathub. |
 | ClamAV virus engine | Whether ClamAV is installed and its signatures keep themselves up to date. Vigil turns on ClamAV's own update service (`clamav-freshclam`) when it installs ClamAV or ClamUI, and offers to if it is off. Quick scan of `~/Downloads` in a terminal. |
 

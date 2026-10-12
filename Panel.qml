@@ -41,6 +41,7 @@ Panel {
   property string feedBuffer: ""
   property bool feedOverflow: false
   property bool feedForced: false
+  property bool feedFull: false
   // One bar per monitor means one copy of this widget per monitor. Only the
   // first screen's copy schedules audits, records findings and notifies.
   readonly property bool isPrimary: root.QsWindow.window !== null
@@ -48,8 +49,10 @@ Panel {
 
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
-  readonly property color dim: Qt.darker(foreground, 1.55)
-  readonly property color warnColor: Qt.tint(foreground, Qt.rgba(urgent.r, urgent.g, urgent.b, 0.55))
+  // Every colour comes from the Omarchy theme: text, urgent (to fix), accent
+  // (to improve) and muted (secondary text, nothing to do).
+  readonly property color dim: Commons.Color.muted
+  readonly property color warnColor: Commons.Color.accent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   property var report: null
@@ -71,9 +74,7 @@ Panel {
   readonly property var pending: pendingAction === "" ? null : Model.confirmation(pendingKind, pendingAction, report)
   readonly property var cleanPlan: Model.cleanAllPlan(report)
 
-  readonly property var visibleChecks: tab === "overview"
-    ? Model.topFindings(report, 6)
-    : Model.checksFor(report, tab)
+  readonly property var visibleChecks: tab === "overview" ? [] : Model.checksFor(report, tab)
   readonly property bool busy: auditProc.running || fixProc.running
 
   function localPath(url) {
@@ -122,12 +123,15 @@ Panel {
     feedBuffer = ""
     feedOverflow = false
     feedForced = mode === "sources" || mode === "full"
+    feedFull = mode === "full"
     feedProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, "refresh-feeds"]
-      .concat(mode === "sources" ? ["--sources"] : (mode === "full" ? ["--force"] : []))
+      .concat(mode === "sources" ? ["--sources"] : (mode === "full" ? ["--full"] : []))
     feedProc.running = true
+    // A Full scan covers the whole home folder, which can take a long time.
+    feedDeadline.interval = feedFull ? 4 * 3600000 : 1200000
     feedDeadline.restart()
     if (mode === "sources") setStatus("Updating sources\u2026", false)
-    else if (mode === "full") setStatus("Full scan running. Updating sources and scanning Downloads; this can take a few minutes.", false)
+    else if (mode === "full") setStatus("Full scan running in the background. You get a notification when it is done.", false)
   }
 
   // Full scan: the background part (sources and the virus scan) plus the
@@ -389,7 +393,11 @@ Panel {
         if (!parsed) root.setStatus("The update did not finish.", true)
         else root.setStatus(parsed.message, !parsed.ok)
       }
+      if (root.feedFull)
+        Quickshell.execDetached(["/usr/bin/notify-send", "--app-name=Vigil", "--", "Vigil",
+          parsed ? "Full scan finished. Open the shield in the bar for the results." : "The Full scan did not finish."])
       root.feedForced = false
+      root.feedFull = false
       root.runAudit()
     }
   }
@@ -476,10 +484,9 @@ Panel {
       }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "r" || t === "R") root.runAudit()
+        if (t === "r" || t === "R" || t === "s" || t === "S") root.requestFullScan()
         else if (t === "f" || t === "F") root.requestFix(root.selectedCheck())
         else if (t === "u" || t === "U") root.refreshFeeds("sources")
-        else if (t === "s" || t === "S") root.requestFullScan()
         else if ((t === "c" || t === "C") && root.tab === "care") root.requestCleanAll()
         else if (t === "d" || t === "D") {
           var sel = root.selectedCheck()
@@ -497,11 +504,24 @@ Panel {
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        ScrollBar.vertical: ScrollBar {
+          id: vbar
+          policy: ScrollBar.AsNeeded
+          width: Style.space(6)
+          background: Item {}
+          contentItem: Rectangle {
+            implicitWidth: Style.space(4)
+            radius: width / 2
+            color: root.foreground
+            opacity: vbar.pressed ? 0.55 : (vbar.hovered ? 0.4 : 0.25)
+          }
+        }
 
         Column {
           id: column
-          width: panelFlick.width
+          // A fixed gutter for the scroll bar, so it never sits on top of text
+          // (and the layout does not reflow when the bar appears).
+          width: panelFlick.width - Style.space(12)
           spacing: Style.space(12)
 
           PanelHero {
@@ -603,7 +623,7 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
-          // Overview: score, updates, history, pillars, then what to fix first.
+          // Overview: the score, the two buttons, then each pillar with its counts.
           Column {
             visible: root.tab === "overview"
             width: parent.width
@@ -614,7 +634,7 @@ Panel {
               Text {
                 id: scoreText
                 textFormat: Text.PlainText
-                text: root.report ? String(root.report.score) : "–"
+                text: root.report ? String(root.report.score) : "\u2013"
                 color: root.report && root.report.level === "fail" ? root.urgent : root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.displayLarge
@@ -639,25 +659,14 @@ Panel {
               font.bold: true
               wrapMode: Text.WordWrap
             }
-            Text {
-              textFormat: Text.PlainText
-              width: parent.width
-              text: root.report
-                ? "Checked " + Model.relativeDay(root.report.generatedAt, new Date()) + " at "
-                  + root.report.generatedAt.substring(11, 16) + ". Everything is read on this computer."
-                : "Vigil reads your settings locally. Nothing leaves this computer."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
 
-            SectionHeading { text: "SCANS AND UPDATES" }
             Flow {
               width: parent.width
+              topPadding: Style.space(6)
               spacing: Style.space(8)
               Button {
-                text: "Full scan"
+                text: feedProc.running && root.feedFull ? "Scanning\u2026" : "Full scan"
+                tooltipText: "Run every check and scan Vigil has, including a virus scan of your home folder"
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 bordered: true
@@ -665,7 +674,8 @@ Panel {
                 onClicked: root.requestFullScan()
               }
               Button {
-                text: feedProc.running ? "Updating\u2026" : "Update sources"
+                text: feedProc.running && !root.feedFull ? "Updating\u2026" : "Update sources"
+                tooltipText: "Download the latest lists Vigil checks against. No password, no scan"
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 enabled: !feedProc.running
@@ -675,65 +685,11 @@ Panel {
             Text {
               textFormat: Text.PlainText
               width: parent.width
-              text: "Full scan checks everything, including the checks that need your password. Update "
-                + "sources only refreshes the lists Vigil checks against; that, and the Downloads virus "
-                + "scan, also run by themselves once a week."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-            Text {
-              textFormat: Text.PlainText
-              width: parent.width
-              text: root.report ? Model.lastRunLine(root.report.lastRun, new Date()) : ""
+              text: Model.updateLine(root.report, root.autoUpdate, new Date())
               color: root.report && root.report.lastRun.at !== "" && !root.report.lastRun.ok ? root.urgent : root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
-            }
-            // When each maintained source last updated successfully.
-            Repeater {
-              model: root.report ? root.report.sources : []
-              delegate: Item {
-                required property var modelData
-                readonly property bool problem: modelData.state === "failed" || modelData.state === "stale"
-                width: column.width
-                implicitHeight: srcValue.implicitHeight
-                Text {
-                  textFormat: Text.PlainText
-                  anchors.left: parent.left
-                  width: parent.width * 0.55
-                  text: modelData.label
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  elide: Text.ElideRight
-                }
-                Text {
-                  id: srcValue
-                  textFormat: Text.PlainText
-                  anchors.right: parent.right
-                  width: parent.width * 0.45
-                  horizontalAlignment: Text.AlignRight
-                  text: Model.sourceLine(modelData, new Date())
-                  color: parent.problem ? root.urgent : root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.bold: parent.problem
-                  wrapMode: Text.WordWrap
-                }
-              }
-            }
-
-            SectionHeading {
-              visible: root.report !== null && root.report.history.length > 0
-              text: "LAST 30 DAYS"
-            }
-            ScoreHistory {
-              visible: root.report !== null && root.report.history.length > 0
-              width: parent.width
-              history: root.report ? root.report.history : []
             }
 
             SectionHeading { visible: root.report !== null; text: "PILLARS" }
@@ -744,19 +700,6 @@ Panel {
                 width: column.width
                 category: String(modelData)
               }
-            }
-
-            SectionHeading { visible: root.report !== null; text: "FIX THESE FIRST" }
-            Text {
-              textFormat: Text.PlainText
-              visible: root.report !== null && root.visibleChecks.length === 0
-              width: parent.width
-              text: "Nothing urgent. The other tabs list optional improvements."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              font.italic: true
-              wrapMode: Text.WordWrap
             }
           }
 
@@ -831,82 +774,6 @@ Panel {
 
   // ---- components
 
-  // Daily score for the last 30 days: one bar per day, newest on the right,
-  // in the text colour (one series, so no legend; the caption names it).
-  // Hovering a bar reads out its day and score; the line under the bars says
-  // the same in words for anyone who does not hover.
-  component ScoreHistory: Column {
-    id: hist
-    property var history: []
-    readonly property int slots: 30
-    readonly property real barGap: Style.spaceReal(2)
-    readonly property real chartHeight: Style.space(36)
-    property int hovered: -1
-    spacing: Style.space(4)
-
-    Text {
-      textFormat: Text.PlainText
-      width: parent.width
-      text: hist.hovered >= 0 && hist.hovered < hist.history.length
-        ? Model.shortDate(hist.history[hist.hovered].date) + ": " + hist.history[hist.hovered].score
-        : "Daily score. Hover a bar for its day."
-      color: root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
-    }
-
-    Item {
-      width: parent.width
-      height: hist.chartHeight
-
-      Row {
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        spacing: hist.barGap
-        Repeater {
-          model: hist.history
-          delegate: Item {
-            required property var modelData
-            required property int index
-            width: Math.max(2, (hist.width - hist.barGap * (hist.slots - 1)) / hist.slots)
-            height: hist.chartHeight
-            Rectangle {
-              anchors.bottom: parent.bottom
-              width: parent.width
-              height: Math.max(2, hist.chartHeight * modelData.score / 100)
-              radius: Math.min(2, width / 2)
-              color: root.foreground
-              opacity: hist.hovered === index ? 1 : (index === hist.history.length - 1 ? 0.85 : 0.35)
-            }
-            MouseArea {
-              anchors.fill: parent
-              hoverEnabled: true
-              onEntered: hist.hovered = index
-              onExited: if (hist.hovered === index) hist.hovered = -1
-            }
-          }
-        }
-      }
-      Rectangle {
-        anchors.bottom: parent.bottom
-        width: parent.width
-        height: 1
-        color: root.foreground
-        opacity: 0.15
-      }
-    }
-
-    Text {
-      textFormat: Text.PlainText
-      width: parent.width
-      text: Model.historySummary(hist.history)
-      color: root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
-      wrapMode: Text.WordWrap
-    }
-  }
-
   // Omarchy's own small bold section label, with a little air above it.
   component SectionHeading: Item {
     property alias text: heading.text
@@ -926,6 +793,7 @@ Panel {
     property string category: ""
     readonly property int fails: Model.countBy(root.report, category, "fail")
     readonly property int warns: Model.countBy(root.report, category, "warn")
+    readonly property int notes: Model.countBy(root.report, category, "info")
     foreground: root.foreground
     implicitHeight: catText.implicitHeight + Style.spacing.rowPaddingX
 
@@ -952,9 +820,7 @@ Panel {
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       anchors.rightMargin: Style.space(10)
-      text: catRow.fails + catRow.warns === 0 ? "\u2713 all good"
-        : (catRow.fails ? catRow.fails + " to fix" : "") + (catRow.fails && catRow.warns ? ", " : "")
-          + (catRow.warns ? catRow.warns + " to improve" : "")
+      text: Model.pillarCounts(catRow.fails, catRow.warns, catRow.notes)
       color: catRow.fails ? root.urgent : (catRow.warns ? root.warnColor : root.dim)
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall
@@ -978,7 +844,8 @@ Panel {
     hasCursor: selected
     foreground: root.foreground
     implicitHeight: rowColumn.implicitHeight + Style.spacing.rowPaddingX
-    opacity: check !== null && check.dismissed ? 0.6 : 1
+    // Dimmed means nothing to do: passing, not applicable, or marked as reviewed.
+    opacity: check !== null && (check.dismissed || check.status === "pass" || check.status === "na") ? 0.55 : 1
 
     MouseArea {
       anchors.fill: parent
