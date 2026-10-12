@@ -110,13 +110,13 @@ def test_no_shared_tmp_or_shell_in_python():
 
 
 def test_helper_network_is_bounded_and_fixed():
-    """The helper's only direct network use is two curl calls to fixed
-    addresses (the AUR, and Perplexity's Bumblebee catalogs), each with curl
+    """The helper's only direct network use is three curl calls to fixed
+    addresses (the AUR, Perplexity's Bumblebee catalogs and its release list), each with curl
     -q first, HTTPS only (also on redirects), a time and size limit, and no
     blind redirect following."""
     src = (REPO / "bin" / "vigil").read_text()
     calls = re.findall(r'run\(\[\s*"(/usr/bin/(?:curl|wget)[^"]*)"(.*?)\]', src, re.S)
-    assert len(calls) == 2 and all(c[0] == "/usr/bin/curl" for c in calls)
+    assert len(calls) == 3 and all(c[0] == "/usr/bin/curl" for c in calls)
     targets = []
     for _, args in calls:
         assert args.lstrip(", ").startswith('"-q"')
@@ -124,7 +124,9 @@ def test_helper_network_is_bounded_and_fixed():
             assert flag in args, flag
         assert '"-L"' not in args and "--location" not in args
         targets.append(re.search(r'"--", (\w+)', args).group(1))
-    assert sorted(targets) == ["BUMBLEBEE_CATALOG_URL", "url"]
+    assert sorted(targets) == ["BUMBLEBEE_CATALOG_URL", "BUMBLEBEE_RELEASES_URL", "url"]
+    assert re.search(r'^BUMBLEBEE_RELEASES_URL = "https://api\.github\.com/repos/perplexityai/bumblebee/releases\?per_page=30"$',
+                     src, re.M)
     assert src.count("https://aur.archlinux.org/rpc/v5/info?") == 1
     assert re.search(r'^BUMBLEBEE_CATALOG_URL = "https://codeload\.github\.com/perplexityai/bumblebee/tar\.gz/refs/heads/main"$',
                      src, re.M)

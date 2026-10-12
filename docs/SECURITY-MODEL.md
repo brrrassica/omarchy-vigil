@@ -131,18 +131,26 @@ accepted) cannot be signalled; the panel then says so.
 - **Install** (shown in red as "MISSING … INSTALL" when a helper is
   missing) is one constant root script: `pacman -S --needed --noconfirm`
   for ClamAV, arch-audit, osv-scanner, fwupd and Flatpak, then Bumblebee,
-  then ClamUI from Flathub as you. Bumblebee is a pinned version from
-  `https://github.com/perplexityai/bumblebee/releases/download/v<version>`:
-  the archive is downloaded over HTTPS only (`--proto =https --proto-redir
-  =https`, time- and size-limited) into a fresh `mktemp -d`, and its SHA-256
-  must equal the one written in `Model.js` for that architecture
-  (`BUMBLEBEE_SHA256`, taken from the release's `checksums.txt` and checked
-  against the archives when the version was pinned). A release changed
-  after that is refused, since nothing fetched with the archive is trusted.
-  Only the `bumblebee` member is extracted (`--no-same-owner
+  then ClamUI from Flathub as you. Bumblebee is installed and updated by
+  one constant root script (`BUMBLEBEE_SCRIPT` in `bin/vigil`, identical
+  to `BUMBLEBEE_INSTALL` in `Model.js`; a test checks), used by Install,
+  Update Bumblebee and Update sources. It takes no data from the report:
+  it reads Perplexity's release list from the GitHub API itself and picks,
+  with `jq`, the newest release that is not a draft or pre-release and has
+  been public for 7 days (a hijacked release is usually pulled within
+  days). The archive and that release's `checksums.txt` are downloaded over
+  HTTPS only, time- and size-limited, into a fresh `mktemp -d`; the
+  archive's SHA-256 must equal Perplexity's published one. This protects
+  against a corrupted or altered download, not against a compromised
+  Perplexity release (their releases are not signed); trusting Perplexity's
+  own release is the same trust as installing Bumblebee by hand. Only the
+  `bumblebee` member is extracted (`--no-same-owner
   --no-same-permissions`), and only a regular file, not a link, is
-  installed as `/usr/local/bin/bumblebee`, owned by root, mode 0755.
-  Updating it means a new Vigil release with a new pinned version and hash.
+  installed as `/usr/local/bin/bumblebee`, owned by root, mode 0755. The
+  installed program is never run as root: a byte comparison decides
+  whether anything changed. Whether an update is ready is checked as you
+  (the release list, and `bumblebee version`), and only then does Update
+  sources add the Bumblebee step to its one password prompt.
 - Terminal actions are constant strings in `Model.js`. The report only names
   an action id; an id that is not in the table does nothing. Omarchy tools
   are addressed by absolute path, from one of the two trusted directories.

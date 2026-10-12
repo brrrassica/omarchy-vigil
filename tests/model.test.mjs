@@ -555,54 +555,71 @@ test("missing helpers: a red Install button that names them, and one plan for al
   assert.equal(M.missingLabel(parse(report({ missing: ["bumblebee"] }))), "MISSING Bumblebee. INSTALL")
 })
 
-test("Bumblebee comes only from Perplexity's pinned release, checked against a hash written in Vigil", () => {
-  const body = M.actionPlan("install-helpers", TOOLS, "/home/marc")[0].argv[5]
+test("Bumblebee comes from Perplexity's releases on GitHub, checked against Perplexity's checksum", () => {
+  const body = M.BUMBLEBEE_INSTALL
+  assert.match(body, /'https:\/\/api\.github\.com\/repos\/perplexityai\/bumblebee\/releases\?per_page=30'/)
   assert.match(body, /https:\/\/github\.com\/perplexityai\/bumblebee\/releases\/download\/v\$\{v\}/)
-  assert.match(body, /v=\d+\.\d+\.\d+\n/)
-  assert.ok(!body.includes("checksums.txt"), "the hash is pinned here, not fetched with the archive")
-  for (const arch of ["amd64", "arm64"]) {
-    assert.match(M.BUMBLEBEE_SHA256[arch], /^[0-9a-f]{64}$/)
-    assert.ok(body.includes("a=" + arch + "; want=" + M.BUMBLEBEE_SHA256[arch]))
-  }
   for (const c of body.split("\n").filter(l => l.includes("/usr/bin/curl")))
     assert.match(c, /--proto =https --proto-redir =https --max-time \d+ --max-filesize \d+/)
-  const check = body.indexOf("sha256sum"), extract = body.indexOf("tar --no-same-owner --no-same-permissions -xzf"),
-        plain = body.indexOf('[ -L "$t/bumblebee" ]'), install = body.indexOf("/usr/bin/install")
-  assert.ok(check > 0 && check < extract && extract < plain && plain < install)
-  assert.match(body, /if \[ "\$want" != "\$have" \]; then .*exit 1; fi/)
-  assert.match(body, /install -D -o root -g root -m 0755 "\$t\/bumblebee" \/usr\/local\/bin\/bumblebee/)
+  assert.ok(!/\/usr\/local\/bin\/bumblebee (version|scan)/.test(body), "the installed program is never run as root")
+  const install = M.actionPlan("install-helpers", TOOLS, "/home/marc")[0].argv[5]
+  assert.ok(install.includes(body), "Install uses the same script")
+  assert.equal(M.runMode("update-bumblebee"), "root")
 })
 
-test("the Bumblebee install refuses a tampered archive and a link in place of the program", () => {
+test("the Bumblebee script takes a week-old release, and refuses a bad checksum, a link, and a too-new release", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "vigil-bb-"))
+  const bin = path.join(dir, "bin"); mkdirSync(bin)
+  const arch = execFileSync("/usr/bin/uname", ["-m"], { encoding: "utf8" }).trim() === "aarch64" ? "arm64" : "amd64"
   const make = (name, link) => {
     const src = path.join(dir, name); mkdirSync(src)
     if (link) symlinkSync("/etc/hostname", path.join(src, "bumblebee"))
-    else writeFileSync(path.join(src, "bumblebee"), "#!/bin/sh\necho bee\n", { mode: 0o755 })
+    else writeFileSync(path.join(src, "bumblebee"), "#!/bin/sh\necho " + name + "\n", { mode: 0o755 })
     const tgz = path.join(dir, name + ".tar.gz")
     execFileSync("/usr/bin/tar", ["-czf", tgz, "-C", src, "bumblebee"])
     return [tgz, execFileSync("/usr/bin/sha256sum", [tgz], { encoding: "utf8" }).split(" ")[0]]
   }
-  const run = (tgz, hash) => {
-    const out = path.join(dir, "out", "bumblebee")
-    // The real script, with the download replaced by a copy and the target moved into the test folder.
-    const body = M.BUMBLEBEE_INSTALL
-      .replace(/\/usr\/bin\/curl [^\n]*\n/, `/usr/bin/cp "${tgz}" "$t/$f"\n`)
-      .replace(/want=[0-9a-f]{64}/g, "want=" + hash)
-      .replaceAll("/usr/local/bin/bumblebee", out)
-      .replace("-o root -g root ", "")
-    rmSync(path.join(dir, "out"), { recursive: true, force: true })
+  const iso = (daysAgo) => new Date(Date.now() - daysAgo * 86400000).toISOString().replace(/\.\d+Z$/, "Z")
+  // A stand-in for curl: the release list, the archive and checksums.txt come from the test folder.
+  const curl = path.join(bin, "curl")
+  writeFileSync(curl, `#!/bin/bash
+out=; for ((i=1; i<=$#; i++)); do [ "\${!i}" = -o ] && { j=$((i+1)); out=\${!j}; }; done
+url=\${!#}
+case "$url" in
+  *api.github.com*) cp "${dir}/releases.json" "$out" ;;
+  */checksums.txt) cp "${dir}/sums" "$out" ;;
+  *) cp "${dir}/archive.tgz" "$out" ;;
+esac
+`, { mode: 0o755 })
+  const target = path.join(dir, "out", "bumblebee")
+  const run = (archive, sum, releases) => {
+    writeFileSync(path.join(dir, "releases.json"), JSON.stringify(releases))
+    writeFileSync(path.join(dir, "sums"), sum + "  bumblebee_0.1.3_linux_" + arch + ".tar.gz\n")
+    execFileSync("/usr/bin/cp", [archive, path.join(dir, "archive.tgz")])
+    const body = M.BUMBLEBEE_INSTALL.replaceAll("/usr/bin/curl", curl)
+      .replaceAll("/usr/local/bin/bumblebee", target).replace("-o root -g root ", "")
     const r = spawnSync("/usr/bin/bash", ["-c", "set -e\n" + body], { encoding: "utf8" })
-    return { status: r.status, text: r.stdout, installed: existsSync(out) }
+    return { status: r.status, text: r.stdout + r.stderr }
   }
-  const [good, goodHash] = make("good", false)
-  let r = run(good, goodHash)
-  assert.equal(r.status, 0, r.text); assert.ok(r.installed)
-  r = run(good, "0".repeat(64))
-  assert.notEqual(r.status, 0); assert.ok(!r.installed); assert.match(r.text, /did not match its checksum/)
-  const [linked, linkHash] = make("linked", true)
-  r = run(linked, linkHash)
-  assert.notEqual(r.status, 0); assert.ok(!r.installed); assert.match(r.text, /not a plain program file/)
+  const week = [{ tag_name: "v0.1.3", published_at: iso(8), draft: false, prerelease: false },
+                { tag_name: "v0.1.4", published_at: iso(1), draft: false, prerelease: false }]
+  const [good, goodSum] = make("good", false)
+  let r = run(good, goodSum, week)
+  assert.equal(r.status, 0, r.text); assert.match(r.text, /Bumblebee 0\.1\.3 is installed/)
+  assert.equal(readFileSync(target, "utf8"), "#!/bin/sh\necho good\n")           // 0.1.4 is not a week old yet
+  r = run(good, goodSum, week)
+  assert.equal(r.status, 0, r.text); assert.match(r.text, /already installed/)
+  const [other] = make("other", false)
+  r = run(other, goodSum, week)                                                   // archive differs from the checksum
+  assert.notEqual(r.status, 0); assert.match(r.text, /did not match the checksum/)
+  assert.equal(readFileSync(target, "utf8"), "#!/bin/sh\necho good\n")
+  const [linked, linkSum] = make("linked", true)
+  r = run(linked, linkSum, week)
+  assert.notEqual(r.status, 0); assert.match(r.text, /not a plain program file/)
+  r = run(good, goodSum, [week[1]])
+  assert.notEqual(r.status, 0); assert.match(r.text, /has been out for 7 days yet/)
+  r = run(good, goodSum, { message: "API rate limit exceeded" })
+  assert.notEqual(r.status, 0)
   rmSync(dir, { recursive: true, force: true })
 })
 

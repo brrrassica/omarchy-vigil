@@ -111,7 +111,14 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.21 (this release): resource and security pass
+## 0.22 (this release): Bumblebee stays current
+
+- [x] Bumblebee follows Perplexity's releases: the newest one that has been
+      out for a week, checked against Perplexity's published SHA-256. The
+      row offers Update Bumblebee, and Update sources installs it behind
+      the same password prompt as the virus signatures.
+
+## 0.21: resource and security pass
 
 - [x] Nothing loops or repeats hours of work: every background error counts
       as tried, the automatic run starts at most every six hours, a virus

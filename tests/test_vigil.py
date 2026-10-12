@@ -1651,21 +1651,22 @@ def test_remove_secret_lines(v):
 def test_signatures_update_with_update_sources_only(v):
     v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash", v.ROOT + "/usr/bin/freshclam",
                   v.ROOT + "/usr/bin/clamscan"}
-    v.COMMANDS[tuple(v.FRESHCLAM_ARGV)] = (0, "")
+    SIG = tuple(v.root_updates_argv(True, False))
+    v.COMMANDS[SIG] = (0, "VIGIL-SIG 0\n")
     v.COMMANDS[tuple(v.NO_PASSWORD_ARGV)] = (0, "")
     v.COMMANDS[scan_argv(v)] = (0, "")
     calls = []
     real = v.run
     v.run = lambda argv, **kw: (calls.append(tuple(argv)), real(argv, **kw))[1]
     res = v.refresh_due_feeds(sources_only=True)
-    assert calls[0] == tuple(v.FRESHCLAM_ARGV) and res["message"].startswith("Refreshed the ClamAV virus signatures")
+    assert calls[0] == SIG and res["message"].startswith("Refreshed the ClamAV virus signatures")
     calls.clear()
     v.refresh_due_feeds(full=True)                                         # Full scan: not the signatures
-    assert tuple(v.FRESHCLAM_ARGV) not in calls
+    assert SIG not in calls
     calls.clear()
     v.refresh_due_feeds()                                                  # weekly: never asks
-    assert tuple(v.FRESHCLAM_ARGV) not in calls and tuple(v.NO_PASSWORD_ARGV) not in calls
-    v.COMMANDS[tuple(v.FRESHCLAM_ARGV)] = (126, "")                        # dialog dismissed
+    assert SIG not in calls and tuple(v.NO_PASSWORD_ARGV) not in calls
+    v.COMMANDS[SIG] = (126, "")                                            # dialog dismissed
     res = v.refresh_due_feeds(sources_only=True)
     assert "virus signatures were not updated" in res["message"] and "tries again" not in res["message"]
 
@@ -1693,10 +1694,11 @@ def test_signature_update_wakes_clamavs_service_and_explains_failures(v):
     assert "systemctl kill --signal=SIGUSR1 --kill-whom=main clamav-freshclam.service" in script
     assert "journalctl -u clamav-freshclam.service" in script and "/usr/bin/freshclam" in script
     v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash", v.ROOT + "/usr/bin/freshclam"}
-    v.COMMANDS[tuple(v.FRESHCLAM_ARGV)] = (3, "")
+    SIG = tuple(v.root_updates_argv(True, False))
+    v.COMMANDS[SIG] = (0, "VIGIL-SIG 3\n")
     msg = v.refresh_due_feeds(sources_only=True)["message"]
     assert "did not finish checking within two minutes" in msg
-    v.COMMANDS[tuple(v.FRESHCLAM_ARGV)] = (0, "")
+    v.COMMANDS[SIG] = (0, "VIGIL-SIG 0\n")
     v.refresh_due_feeds(sources_only=True)
     v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
     sig = {x["id"]: x for x in v.source_status()}["signatures"]
@@ -2434,3 +2436,83 @@ def test_checkupdates_keeps_its_databases_in_the_private_state_folder(v):
     v.refresh_pending_updates()
     assert {"CHECKUPDATES_DB": v.HOME + "/.local/state/omarchy-vigil/checkup-db"} in v.ENVS
     assert oct(Path(v.HOME, ".local/state/omarchy-vigil").stat().st_mode & 0o777) == "0o700"
+
+
+
+# --------------------------------------------------------------------------
+# Keeping Bumblebee up to date
+
+def release(tag, days_ago, **kw):
+    when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - days_ago * 86400))
+    return dict({"tag_name": tag, "published_at": when, "draft": False, "prerelease": False}, **kw)
+
+
+def test_only_a_release_out_for_a_week_counts(v):
+    rel = json.dumps([release("v0.2.0", 2), release("v0.1.10", 9), release("v0.1.9", 30),
+                      release("v0.3.0", 40, prerelease=True), release("v0.4.0", 40, draft=True),
+                      release("v9.9.9-rc1", 40), {"tag_name": 5}, "junk"])
+    assert v.bumblebee_releases_ready(rel) == "0.1.10"                     # 0.2.0 is too new; 10 > 9 numerically
+    assert v.bumblebee_releases_ready("[]") == ""
+    assert v.bumblebee_releases_ready('{"message": "rate limited"}') is None
+
+
+def bee_installed(v, version="0.1.2"):
+    v.TRUSTED |= {v.ROOT + "/usr/local/bin/bumblebee", v.ROOT + "/usr/bin/curl"}
+    v.COMMANDS[("/usr/local/bin/bumblebee", "version")] = (0, "bumblebee v%s\ncommit: x\n" % version)
+    v.save_feed("bumblebee", {"findings": [], "status": "complete"})
+
+
+def releases_answer(v, body):
+    v.COMMANDS[("/usr/bin/curl", "-q", "-sS", "--fail", "--proto", "=https", "--proto-redir", "=https",
+                "--max-time", "30", "--max-filesize", "4194304", "--", v.BUMBLEBEE_RELEASES_URL)] = (0, body)
+
+
+def test_the_bumblebee_row_offers_a_ready_update(v):
+    bee_installed(v)
+    releases_answer(v, json.dumps([release("v0.1.2", 100)]))
+    v.refresh_bumblebee_release()
+    assert v.check_bumblebee()["status"] == "pass"
+    releases_answer(v, json.dumps([release("v0.1.3", 8), release("v0.1.2", 100)]))
+    v.refresh_bumblebee_release()
+    c = v.check_bumblebee()
+    assert c["status"] == "info" and c["fix"]["action"] == "update-bumblebee"
+    assert c["summary"] == "Bumblebee 0.1.3 is ready to install (you have 0.1.2)."
+    bee_installed(v, "0.1.3")
+    assert v.check_bumblebee()["status"] == "pass"
+
+
+def test_update_sources_updates_bumblebee_behind_the_same_password(v):
+    bee_installed(v)
+    v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash", v.ROOT + "/usr/bin/freshclam",
+                  v.ROOT + "/usr/bin/clamscan"}
+    releases_answer(v, json.dumps([release("v0.1.3", 8)]))
+    both = tuple(v.root_updates_argv(True, True))
+    v.COMMANDS[both] = (0, "VIGIL-SIG 0\nVIGIL-BEE 0\n")
+    calls = []
+    real = v.run
+    v.run = lambda argv, **kw: (calls.append(tuple(argv)), real(argv, **kw))[1]
+    res = v.refresh_due_feeds(sources_only=True)
+    pk = [c for c in calls if c[0] == "/usr/bin/pkexec"]
+    assert pk == [both]                                                     # one password prompt for both
+    assert "Bumblebee was updated." in res["message"]
+    assert both[3].index("VIGIL-SIG") < both[3].index("VIGIL-BEE")
+    assert v.BUMBLEBEE_SCRIPT in both[3]                                     # the fixed script, no report data
+    v.COMMANDS[both] = (0, "VIGIL-SIG 0\nVIGIL-BEE 1\n")
+    res = v.refresh_due_feeds(sources_only=True)
+    assert "Bumblebee could not be updated now" in res["message"]
+    assert "virus signatures were not updated" not in res["message"]
+    # No ClamAV signatures to update, but a Bumblebee update: still one prompt, Bumblebee only.
+    v.TRUSTED.discard(v.ROOT + "/usr/bin/freshclam")
+    bee = tuple(v.root_updates_argv(False, True))
+    v.COMMANDS[bee] = (0, "VIGIL-BEE 0\n")
+    calls.clear()
+    v.refresh_due_feeds(sources_only=True)
+    assert [c for c in calls if c[0] == "/usr/bin/pkexec"] == [bee]
+
+
+def test_the_install_script_is_the_same_in_the_panel_and_the_helper(v):
+    import subprocess as sp
+    js = sp.run(["node", "-e", "process.stdout.write(require(process.argv[1]).BUMBLEBEE_INSTALL)",
+                 str(REPO / "Model.js")], capture_output=True, text=True, check=True).stdout
+    assert js == v.BUMBLEBEE_SCRIPT
+    assert "/usr/local/bin/bumblebee version" not in js and "bumblebee version" not in js   # never run as root
