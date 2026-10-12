@@ -179,7 +179,7 @@ Panel {
       .concat(mode === "sources" ? ["--sources"] : (mode === "full" ? ["--full"] : (mode === "scan" ? ["--scan"] : [])))
     feedProc.running = true
     // Anything but Update sources may scan the whole home folder, which can take a long time.
-    feedDeadline.interval = mode === "sources" ? 1800000 : 4 * 3600000
+    feedDeadline.interval = mode === "sources" ? 3600000 : 4 * 3600000
     feedDeadline.restart()
     if (mode === "sources") setStatus("Updating sources\u2026 Omarchy may ask for your password first.", false)
     else if (mode === "full") setStatus("Full scan started. You can close this panel; you get a notification when it is done.", false)

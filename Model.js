@@ -224,7 +224,7 @@ function undoDropIn(name, path, afterText, after) {
 var TERMINAL_ONLY = ["update", "update-firmware", "fido2", "undo-fido2", "fingerprint", "undo-fingerprint", "sudo-passwordless-off",
                      "docker-group-off", "clean-orphans", "ssh-passphrase"]
 var USER_MODE = ["allow-idle", "restart", "run-arch-audit", "show-ld-preload", "show-plugins", "screen-lock-default",
-                 "hand-over-schedules", "undo-schedules"]
+                 "hand-over-schedules", "undo-schedules", "update-flatpaks"]
 var PKEXEC = "/usr/bin/pkexec"
 var BASH = "/usr/bin/bash"
 
@@ -434,6 +434,13 @@ var TERMINAL_ACTIONS = {
            "Omarchy also deletes your saved fingerprints from this computer and removes the reader driver.",
            "Technical: runs omarchy-remove-security-fingerprint"],
     tool: "omarchy-remove-security-fingerprint", args: ""
+  },
+  "update-flatpaks": {
+    title: "Update your Flatpak apps",
+    what: ["Installs the waiting updates for your Flatpak apps, ClamUI among them, from Flathub.",
+           "Apps installed for every account on this computer may ask for your password.",
+           "Technical: flatpak update --noninteractive"],
+    run: "/usr/bin/flatpak update --noninteractive && echo 'Your Flatpak apps are up to date.'"
   },
   "update-bumblebee": {
     title: "Update Bumblebee",
@@ -747,6 +754,7 @@ var TERMINAL_ACTIONS = {
 var DOCS = {
   "arch-ssh-keys": "https://wiki.archlinux.org/title/SSH_keys",
   "arch-fwupd": "https://wiki.archlinux.org/title/Fwupd",
+  "arch-flatpak": "https://wiki.archlinux.org/title/Flatpak",
   "arch-gnupg": "https://wiki.archlinux.org/title/GnuPG",
   "arch-dm-crypt": "https://wiki.archlinux.org/title/Dm-crypt",
   "arch-faillock": "https://wiki.archlinux.org/title/Security#Lock_out_user_after_three_failed_login_attempts",
@@ -932,7 +940,7 @@ function validCheck(c) {
 }
 
 var SOURCE_IDS = ["signatures", "virus-scan", "arch-audit", "osv", "aur", "password-check", "bumblebee", "firmware",
-                  "pending-updates", "bumblebee-release",
+                  "pending-updates", "bumblebee-release", "flatpak",
                   "bumblebee-list"]
 var SOURCE_STATES = ["ok", "stale", "never", "failed"]
 var DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -1160,6 +1168,7 @@ function updateConfirmation(report) {
   if (has("signatures")) lines.push((n++) + ". ClamAV virus signatures. Omarchy asks for your password for this one step,"
     + " because ClamAV keeps them in a system folder.")
   if (has("pending-updates")) lines.push((n++) + ". The list of waiting system and Omarchy updates (nothing is installed).")
+  if (has("flatpak")) lines.push((n++) + ". Your Flatpak apps, ClamUI among them: installs their updates (no password).")
   if (has("arch-audit")) lines.push((n++) + ". The Arch security team list of known holes in packages.")
   if (has("osv")) lines.push((n++) + ". The OSV.dev list of malicious npm and Bun packages.")
   if (has("aur")) lines.push((n++) + ". The status of your AUR packages.")

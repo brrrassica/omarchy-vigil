@@ -2516,3 +2516,46 @@ def test_the_install_script_is_the_same_in_the_panel_and_the_helper(v):
                  str(REPO / "Model.js")], capture_output=True, text=True, check=True).stdout
     assert js == v.BUMBLEBEE_SCRIPT
     assert "/usr/local/bin/bumblebee version" not in js and "bumblebee version" not in js   # never run as root
+
+
+# --------------------------------------------------------------------------
+# Flatpak apps
+
+def flatpak_apps(v, user=True, system=False):
+    v.TRUSTED.add(v.ROOT + "/usr/bin/flatpak")
+    if user:
+        Path(v.HOME, ".local/share/flatpak/app/io.github.linx_systems.ClamUI").mkdir(parents=True)
+    if system:
+        Path(v.ROOT, "var/lib/flatpak/app/org.mozilla.firefox").mkdir(parents=True)
+
+
+def test_flatpak_updates_are_checked_and_shown(v):
+    assert v.check_flatpak()["status"] == "na"                              # no Flatpak apps
+    flatpak_apps(v, system=True)
+    v.COMMANDS[("/usr/bin/flatpak", "remote-ls", "--user", "--updates", "--columns=application")] = (
+        0, "io.github.linx_systems.ClamUI\n<b>not an id</b>\n")
+    v.COMMANDS[("/usr/bin/flatpak", "remote-ls", "--system", "--updates", "--columns=application")] = (0, "")
+    v.refresh_flatpak()
+    c = v.check_flatpak()
+    assert c["status"] == "warn" and c["fix"]["action"] == "update-flatpaks"
+    assert c["detail"] == "io.github.linx_systems.ClamUI (just you)"
+    v.COMMANDS[("/usr/bin/flatpak", "remote-ls", "--user", "--updates", "--columns=application")] = (0, "")
+    v.refresh_flatpak()
+    assert v.check_flatpak()["status"] == "pass"
+    v.COMMANDS[("/usr/bin/flatpak", "remote-ls", "--user", "--updates", "--columns=application")] = (1, "")
+    with pytest.raises(v.Refused):
+        v.refresh_flatpak()
+
+
+def test_update_sources_updates_your_own_flatpak_apps(v, capsys):
+    flatpak_apps(v)
+    v.COMMANDS[("/usr/bin/flatpak", "update", "--user", "--noninteractive")] = (0, "")
+    v.COMMANDS[("/usr/bin/flatpak", "remote-ls", "--user", "--updates", "--columns=application")] = (0, "")
+    calls = []
+    real = v.run
+    v.run = lambda argv, **kw: (calls.append(tuple(argv)), real(argv, **kw))[1]
+    v.refresh_due_feeds(sources_only=True)
+    assert ("/usr/bin/flatpak", "update", "--user", "--noninteractive") in calls
+    calls.clear()
+    v.refresh_due_feeds(force=True)                                         # the weekly kind of run: check only
+    assert ("/usr/bin/flatpak", "update", "--user", "--noninteractive") not in calls

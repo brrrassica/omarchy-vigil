@@ -1702,11 +1702,11 @@ for _spec in SCANNERS:
 FEED_FILES = {"arch-audit": "arch-audit.json", "osv": "osv.json", "aur": "aur.json", "virus-scan": "virus-scan.json",
               "full-scan": "full-scan.json", "signatures": "signatures.json",
               "bumblebee-list": "bumblebee-list.json", "bumblebee": "bumblebee.json",
-              "pending-updates": "pending-updates.json", "firmware": "firmware.json",
+              "pending-updates": "pending-updates.json", "firmware": "firmware.json", "flatpak": "flatpak.json",
               "bumblebee-release": "bumblebee-release.json"}
 # Two weekly timers: the sources (Update sources), and the automatic part of
 # a Full scan (the virus scan of the home folder and a Bumblebee rescan).
-SOURCE_FEEDS = ("bumblebee-release", "pending-updates", "arch-audit", "osv", "aur", "bumblebee-list")
+SOURCE_FEEDS = ("bumblebee-release", "pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee-list")
 FEED_DAYS = 7
 FEED_RETRY_DAYS = 1
 
@@ -1748,6 +1748,8 @@ def feed_available(name):
         return is_trusted_executable(sys_path(CHECKUPDATES)) and is_trusted_executable(sys_path("/usr/bin/pacman"))
     if name == "firmware":
         return is_trusted_executable(sys_path(FWUPDMGR))
+    if name == "flatpak":
+        return is_trusted_executable(sys_path(FLATPAK)) and flatpak_installations() != []
     return False
 
 
@@ -1936,6 +1938,7 @@ def source_status():
         d, t = _newer(ext, (d, t))
         add("signatures", "ClamAV virus signatures", d, t, fresh(d, FEED_DAYS), by=by)
     for name, label in (("pending-updates", "Check for system and Omarchy updates"),
+                        ("flatpak", "Check for Flatpak app updates"),
                         ("arch-audit", "Arch vulnerability database"), ("osv", "OSV malicious-package database"),
                         ("aur", "AUR package status"), ("bumblebee-list", "Bumblebee compromised-package list"),
                         ("bumblebee-release", "Check for a new Bumblebee")):
@@ -2604,6 +2607,83 @@ def refresh_firmware():
     return "Firmware checked."
 
 
+# --- Flatpak apps --------------------------------------------------------------
+# Omarchy's updater does not update Flatpak apps, and Vigil installs ClamUI
+# (which carries its own ClamAV) as one. Your own (--user) apps update without
+# a password, in Update sources; apps installed for every account (--system)
+# need Omarchy's password dialog, so only their button does that.
+
+FLATPAK = "/usr/bin/flatpak"
+_APP_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+){2,}$")
+
+
+def flatpak_installations():
+    """Which Flatpak installations have apps: "user", "system" (both may)."""
+    out = []
+    if list_dir(home_path(".local", "share", "flatpak", "app"), 1):
+        out.append("user")
+    if list_dir(sys_path("/var/lib/flatpak/app"), 1):
+        out.append("system")
+    return out
+
+
+def flatpak_pending(where):
+    """App ids with an update waiting in one installation, or None if flatpak could not tell."""
+    rc, out = run([FLATPAK, "remote-ls", "--" + where, "--updates", "--columns=application"],
+                  timeout=120, limit=512 * 1024)
+    if rc != 0:
+        return None
+    return sorted({l.strip() for l in out.splitlines() if _APP_ID.match(l.strip())})[:200]
+
+
+def refresh_flatpak():
+    found = {}
+    for where in flatpak_installations():
+        ids = flatpak_pending(where)
+        if ids is None:
+            save_feed("flatpak", {}, ok=False)
+            raise Refused("Flatpak could not reach its remotes (offline?)")
+        found[where] = ids
+    save_feed("flatpak", {"user": found.get("user", []), "system": found.get("system", [])})
+    n = sum(len(v) for v in found.values())
+    return "%d Flatpak app%s with updates." % (n, "" if n == 1 else "s")
+
+
+def update_user_flatpaks():
+    """Update sources: your own Flatpak apps, without a password, then check again."""
+    rc, _ = run([FLATPAK, "update", "--user", "--noninteractive"], timeout=1800, limit=2 * 1024 * 1024)
+    if rc != 0:
+        raise Refused("Flatpak could not update your apps")
+    refresh_flatpak()
+
+
+@check
+def check_flatpak():
+    cid, cat, title = "flatpak-apps", "harden", "App updates (Flatpak)"
+    why = ("Omarchy's own updater does not update apps installed with Flatpak, ClamUI among them. An app that "
+           "is never updated keeps its security holes, so Vigil checks them with each update and Update "
+           "sources installs the updates for your own apps.")
+    if not feed_available("flatpak"):
+        return result(cid, cat, title, "na", "No Flatpak apps are installed.", why, weight=0)
+    cache = feed_cache("flatpak")
+    if cache is None:
+        return result(cid, cat, title, "info", "Checked with the next update.", why, weight=0,
+                      howto="Press Update sources on the Overview.")
+    ids = {w: [x for x in cache.get(w, []) if isinstance(x, str) and _APP_ID.match(x)][:200]
+           if isinstance(cache.get(w), list) else [] for w in ("user", "system")}
+    total = len(ids["user"]) + len(ids["system"])
+    when = feed_when(cache)
+    if not total:
+        return result(cid, cat, title, "pass", "Your Flatpak apps are up to date (%s)." % when, why, weight=1)
+    lines = ["%s (%s)" % (clean(x, 120), "just you" if w == "user" else "every account")
+             for w in ("user", "system") for x in ids[w]]
+    return result(cid, cat, title, "warn", "%d Flatpak app%s %s updates waiting (%s)." % (
+        total, "" if total == 1 else "s", "has" if total == 1 else "have", when), why, clean_block(lines),
+        fix=fix("terminal", "update-flatpaks", "Update apps"), weight=1,
+        howto="Press Update apps, or Update sources on the Overview (it updates your own apps; apps "
+              "installed for every account ask for your password, so only Update apps does those).")
+
+
 @check
 def check_firmware():
     cid, cat, title = "firmware", "harden", "Firmware updates"
@@ -2640,6 +2720,7 @@ def check_firmware():
 FEED_REFRESH = {"arch-audit": refresh_arch_audit, "osv": refresh_osv, "aur": refresh_aur}
 FEED_REFRESH["pending-updates"] = refresh_pending_updates
 FEED_LABELS = {"pending-updates": "the list of waiting updates", "firmware": "the firmware check",
+               "flatpak": "the Flatpak app check", "flatpak-update": "your Flatpak apps",
                "bumblebee-release": "the Bumblebee release check",
                "arch-audit": "the Arch vulnerability database", "osv": "the OSV malicious-package database",
                "aur": "your AUR package status", "virus-scan": "the virus scan", "bumblebee": "the Bumblebee scan",
@@ -2778,6 +2859,7 @@ def refresh_bumblebee_release():
 
 
 FEED_REFRESH["bumblebee-release"] = refresh_bumblebee_release
+FEED_REFRESH["flatpak"] = refresh_flatpak
 
 
 def bumblebee_update_ready():
@@ -2929,7 +3011,7 @@ def refresh_bumblebee():
     return "Bumblebee scanned."
 
 
-STEP_WEIGHT = {"virus-scan": 30, "osv": 2, "bumblebee": 2, "firmware": 2, "signatures": 2}
+STEP_WEIGHT = {"virus-scan": 30, "osv": 2, "bumblebee": 2, "firmware": 2, "signatures": 2, "flatpak": 4}
 
 STEP_TEXT = {"arch-audit": "Updating the Arch vulnerability database",
              "osv": "Updating the OSV malicious-package database",
@@ -2939,6 +3021,8 @@ STEP_TEXT = {"arch-audit": "Updating the Arch vulnerability database",
              "bumblebee-list": "Updating Bumblebee's list of compromised packages",
              "pending-updates": "Checking for system and Omarchy updates",
              "bumblebee-release": "Checking for a new Bumblebee",
+             "flatpak": "Checking your Flatpak apps for updates",
+             "flatpak-update": "Updating your Flatpak apps",
              "bumblebee-update": "Updating Bumblebee (Omarchy asks for your password)",
              "signatures-and-bumblebee": "Updating ClamAV virus signatures and Bumblebee (Omarchy asks for your password)",
              "firmware": "Checking for firmware updates",
@@ -3002,6 +3086,8 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
                 refresh_firmware()
             elif name == "password-check":
                 refresh_no_password()
+            elif name == "flatpak" and sources_only and "user" in flatpak_installations():
+                update_user_flatpaks()
             elif name in ("signatures", "bumblebee-update", "signatures-and-bumblebee"):
                 notes.extend(refresh_root_updates(name != "bumblebee-update", name != "signatures"))
             else:
@@ -4354,6 +4440,8 @@ CHECK_HELP = {
     "aur-packages": ("Keep only the ones you recognise and still use; remove the rest with "
                      "omarchy pkg drop <name>.",
                      ("docs", "arch-aur", "Learn more")),
+    "flatpak-apps": ("Update sources checks your Flatpak apps and updates your own. The Arch Wiki explains Flatpak.",
+                     ("docs", "arch-flatpak", "Learn more")),
     "firmware": ("The Full scan checks for firmware updates. The Arch Wiki explains fwupd and LVFS.",
                  ("docs", "arch-fwupd", "Learn more")),
     "virus-scan": ("Install ClamUI, which sets up ClamAV; Vigil then scans Downloads every week.",
