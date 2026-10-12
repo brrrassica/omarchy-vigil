@@ -10,7 +10,7 @@
 // Must match manifest.json and VERSION in bin/vigil (a test checks). The
 // helper runs from disk every time, but this file stays loaded until the
 // shell restarts, so after an update the two can differ for a while.
-var VERSION = "0.24.0"
+var VERSION = "0.24.1"
 var MAX_REPORT_CHARS = 512 * 1024
 var MAX_CHECKS = 160
 var MAX_STR = 400
@@ -1089,10 +1089,10 @@ function scheduleLines(report, autoUpdate, now, refreshMinutes) {
   var out = []
   var d = countdown(report.nextDaily, now, nextCheck)
   if (d !== "") out.push("Next daily check: " + d + " (new downloads, waiting updates, Bumblebee)")
-  var u = countdown(report.nextUpdate, now, nextCheck)
-  if (u !== "") out.push("Next weekly update: " + u + " (the lists Vigil checks against)")
   var f = countdown(report.nextFullScan, now, nextCheck)
-  if (f !== "") out.push("Next weekly full scan: " + f + " (whole home folder and firmware)")
+  if (f !== "") out.push("Next weekly check: " + f + " (whole home folder and firmware)")
+  var u = countdown(report.nextUpdate, now, nextCheck)
+  if (u !== "") out.push("Next update check: " + u + " (the lists Vigil checks against)")
   if (report.lastRun && report.lastRun.at !== "" && !report.lastRun.ok)
     out.push("The last update could not reach every source; Vigil tries again tomorrow.")
   return out

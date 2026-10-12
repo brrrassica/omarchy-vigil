@@ -457,8 +457,8 @@ test("schedule lines: countdowns with the time, in local time", () => {
               nextUpdate: "2026-10-19 09:52", nextFullScan: "2026-10-12 21:15", nextDaily: "2026-10-13 07:40" }
   assert.deepEqual(M.scheduleLines(r, true, now, 30), [
     "Next daily check: tomorrow at 07:40 (new downloads, waiting updates, Bumblebee)",
-    "Next weekly update: in 7 days (the lists Vigil checks against)",
-    "Next weekly full scan: today at 21:15 (whole home folder and firmware)"])
+    "Next weekly check: today at 21:15 (whole home folder and firmware)",
+    "Next update check: in 7 days (the lists Vigil checks against)"])
   // Already due: it runs at the next background check, 30 minutes after the last one.
   assert.equal(M.scheduleLines(Object.assign({}, r, { nextDaily: "now" }), true, now, 30)[0],
     "Next daily check: today at 10:28 (new downloads, waiting updates, Bumblebee)")
