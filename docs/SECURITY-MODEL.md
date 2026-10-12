@@ -79,6 +79,16 @@ no polkit policy, no service, no timer and no daemon.
   are addressed by absolute path, from one of the two trusted directories.
   Each script prints what it will do and waits for Enter before running.
   `tests/model.test.mjs` runs `bash -n` on every script.
+- **Learn more** opens a page with `xdg-open` (root-owned, in `/usr/bin`) as
+  a two-element argv, no shell. The URL is either a constant from the `DOCS`
+  table in `Model.js` or Lynis's page built from a test ID that must match
+  `lynis-[a-z]{3,6}-[0-9]{4}`; anything else is dropped when the report is
+  validated. Lynis row names and text come from files root owns
+  (`/usr/share/lynis/db/tests.db`, and Lynis's report copied by the terminal
+  action) and are cleaned and shown as plain text only.
+- The screen-lock fix runs Omarchy's own `omarchy-shell-config` helper
+  (resolved from a trusted directory, no root) with a constant `jq` program,
+  the way Omarchy's own commands edit `shell.json`.
 - The one script that edits a shared file (Avahi) refuses unless the line
   appears exactly once under `[publish]`, keeps the first original, takes a
   rollback copy from `mktemp` in the same root-owned directory, and restores
@@ -89,11 +99,14 @@ no polkit policy, no service, no timer and no daemon.
   helper offers undo only for files whose first line it has itself read as
   the marker through an `O_NOFOLLOW` descriptor. `tests/model.test.mjs`
   runs every undo script against temporary files.
-- Marking a warning as reviewed stores a fingerprint (check id plus a hash
-  of its status, summary and detail) in the state file. A changed finding
-  has a new fingerprint, so a dismissal cannot hide a new problem. The
-  helper refuses failures and a fixed list of evidence checks, and the panel
-  rejects a report that claims a dismissed failure. State updates hold an
+- Marking a finding as reviewed stores a fingerprint (check id plus a hash
+  of its status) in the state file, so the review lasts while the finding
+  stays the same kind; a worse status is a new fingerprint. For evidence
+  checks (open ports, startup files, file changes, secrets, infected files,
+  malicious, compromised or vulnerable packages, preload, AUR status, plugin
+  capabilities) the hash also covers what was found, so a review cannot hide
+  something new. Passing findings cannot be reviewed, and the panel rejects
+  a report that claims one is. State updates hold an
   exclusive `flock` on the state directory's own descriptor, so a background
   check and a dismissal cannot overwrite each other.
 - App actions map an id and an install kind reported by the helper

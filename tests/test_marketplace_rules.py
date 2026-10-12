@@ -47,7 +47,8 @@ def test_no_unbounded_collectors_or_shell_strings_in_qml():
         assert "bar.run(" not in src and "Util.execDetached" not in src, f
         for m in re.finditer(r"execDetached\(", src):
             rest = src[m.end():m.end() + 6]
-            # Either a literal argv array, or `argv` built by Model.appCommand from a fixed table.
+            # Either a literal argv array, or `argv` built by Model.appCommand / Model.docsCommand,
+            # each from a fixed table.
             assert rest.startswith("[") or (rest.startswith("argv)") and "var argv = Model.appCommand(" in src), \
                 "%s: execDetached must take an argv array" % f.name
 

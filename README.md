@@ -26,7 +26,7 @@ root runs in a terminal you can watch.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.10.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.11.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -88,21 +88,33 @@ part of it because they already update by themselves (and doing it by hand
 needs root); Rootkit Hunter and Lynis stay in the terminal for the same
 reason. Turning off `autoUpdate` leaves the weekly work to this button.
 
-### Reviewed warnings
+### Every finding
 
-Some warnings are deliberate on your machine: a port you opened on purpose,
-a startup line you wrote yourself. Open the finding and choose **Mark as
-reviewed**. It stays in its tab, dimmed, and no longer lowers the score or
-triggers notifications. If the finding changes (another port opens, another
-line appears), it comes back as new. **Show again** undoes it.
+Open any finding and it says, in this order: **Why it matters** (a sentence
+or two), **How to fix**, and **Details**. Below that are its buttons:
 
-Only warnings can be marked as reviewed. Failures can't, and neither can
-three checks that are direct evidence or a live risk: system-wide preload,
-Bumblebee's known-compromised result, and passwordless sudo.
+- **Fix** (named for what it does) when Vigil can do it, or **Learn more** /
+  **Show …** when it can't: a guide in your browser (the Arch Wiki, a
+  plugin's page, Lynis's own page for its test) or a read-only command in a
+  terminal.
+- **Undo Vigil's change** once Vigil has changed something for it.
+- **Mark as reviewed** on anything that is not passing, when you don't want
+  that fix: a port you opened on purpose, an unencrypted desktop that never
+  leaves home, a Lynis suggestion meant for servers. It stays in its tab,
+  dimmed, no longer lowers the score or notifies, and stays reviewed through
+  every later check and Lynis run. **Show again** undoes it.
+
+For findings that report evidence rather than a setting (open ports, startup
+files, file changes, exposed secrets, infected files, known-malicious or
+known-compromised packages, vulnerable packages, system-wide preload,
+abandoned AUR packages, plugin capabilities), a review covers what was found
+at the time. If something new turns up, the finding comes back.
 
 ### Undo
 
-Every change Vigil makes in `/etc` can be undone from the finding it fixed:
+Every change Vigil makes in `/etc` can be undone from the finding it fixed
+(cleanups and added passphrases are the exceptions; there is nothing to put
+back):
 open it and choose **Undo Vigil's change**. The undo runs in a terminal like
 the fix did, and it deletes the file only if its first line is still Vigil's
 marker; a file someone has edited since is left alone. For Avahi, undo puts
@@ -142,21 +154,23 @@ lower it. A warning you mark as reviewed stops counting.
 | Network stack | ICMP redirects, source routing, reverse-path filtering, SYN cookies or broadcast pings are set loosely | Same file as above |
 | LLMNR | systemd-resolved answers LLMNR, which attackers on shared Wi-Fi abuse | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf` (terminal, sudo) |
 | SSH server | sshd runs and allows passwords or root login | `/etc/ssh/sshd_config.d/00-omarchy-vigil.conf`, only if you have an authorized key, validated with `sshd -t` (terminal, sudo) |
-| SSH keys | `~/.ssh` or a private key is readable by others, or a key has no passphrase | Makes them private (no root); a passphrase you add yourself with `ssh-keygen -p` |
+| SSH keys | `~/.ssh` or a private key is readable by others, or a key has no passphrase | Makes them private (no root); **Add a passphrase** runs `ssh-keygen -p` for each key without one (terminal, no root) |
 | GnuPG folder | `~/.gnupg` is readable by others | Makes it private (no root) |
-| Automatic screen lock | Stay Awake is on, the lock is off, or it takes over 15 minutes | Turns Stay Awake off; the timeout is `idle.lock` in `shell.json` |
-| Disk encryption | The system disk is not on LUKS | Cannot be added after install; information only |
-| Secure Boot | Off (information only) | |
-| Wrong-password lockout | `pam_faillock` is missing or never locks | |
+| Automatic screen lock | Stay Awake is on, the lock is off, or it takes over 15 minutes | Turns Stay Awake off; sets `idle.lock` to 300 seconds, Omarchy's default, with Omarchy's own `omarchy-shell-config` helper (terminal, no root) |
+| Disk encryption | The system disk is not on LUKS | Cannot be added after install; Arch Wiki guide |
+| Secure Boot | Off (information only) | Arch Wiki guide |
+| Wrong-password lockout | `pam_faillock` is missing or never locks | Arch Wiki guide |
+| Rarely used network protocols | dccp, sctp, rds or tipc can load (information; Lynis NETW-3200) | `/etc/modprobe.d/90-omarchy-vigil-protocols.conf` (terminal, sudo) |
+| FireWire | The machine has a FireWire port and its driver can load (information; Lynis STRG-1846) | `/etc/modprobe.d/90-omarchy-vigil-firewire.conf` (terminal, sudo) |
 | Passwordless sudo | Omarchy's passwordless sudo is on | `omarchy-sudo-passwordless --disable` (terminal) |
 | Docker group | You are in the docker group, which equals root | `omarchy-remove-security-sudoless-docker` (terminal) |
 | USB authorization | New USB devices are trusted automatically (information) | `omarchy-setup-security-usb-authorization` (terminal) |
 | Thunderbolt authorization | Thunderbolt accessories are trusted automatically (information) | `omarchy-setup-security-thunderbolt-authorization` (terminal) |
 | Security key or fingerprint | sudo takes only a password (information) | `omarchy-setup-security-fido2` (terminal) |
 | System updates | No full update in 14 days (warning) or 30 days (failure) | `omarchy-update` (terminal) |
-| Open network ports | Programs listen on the network with no firewall in front | |
+| Open network ports | Programs listen on the network with no firewall in front | **Show listeners** runs `sudo ss -tulpn` (read-only) |
 | Exposed secrets | API keys and tokens in the formats their providers publish (AWS, GitHub, GitLab, Slack, Stripe, Anthropic, OpenAI, Google, private keys) in your shell histories, or credential files such as `~/.aws/credentials`, `~/.netrc` and `~/.git-credentials` readable by other accounts. Shows the file and line, never the secret. | Makes credential files private (no root); revoke leaked keys with their provider |
-| Lynis | Installs Lynis and runs `lynis audit system --quick --quiet`; the panel then lists its hardening index, warnings and suggestions, leaving out what Vigil already checks | |
+| Lynis | Installs Lynis and runs `lynis audit system --quick --quiet`; its findings join the pillars (see [Lynis](#lynis)) | |
 
 ### Detect
 
@@ -194,15 +208,19 @@ lower it. A warning you mark as reviewed stops counting.
 
 ### Care
 
-Thumbnail cache and trash (cleared without root), application caches (size
-only), package cache (`paccache -rk2`), orphaned packages
-(`omarchy-update-orphan-pkgs`, which asks before removing anything) and the
-system journal (`journalctl --vacuum-time=2weeks`).
+Thumbnail cache and trash (cleared without root, the trash directly in its
+standard folders), application caches (files in `~/.cache` that no app has
+read or written for a week; caches in use are left alone), package cache
+(`paccache -rk2`, keeping Omarchy's two versions per package for rollback,
+and `paccache -ruk0` for packages you have removed; the row shows what a dry
+run says can be freed), orphaned packages (`omarchy-update-orphan-pkgs`,
+which asks before removing anything) and the system journal
+(`journalctl --vacuum-time=2weeks`).
 
 **Clean all** (or `C` on the Care tab) does every cleanup on offer in one go,
-after one confirmation that lists each item and its size: thumbnails and the
-trash right away, then the package cache and the journal in one terminal, so
-sudo asks once. Orphaned packages are left out on purpose: removing packages
+after one confirmation that lists each item and its size: thumbnails, the
+trash and unused caches right away, then the package cache and the journal
+in one terminal, so sudo asks once. Orphaned packages are left out on purpose: removing packages
 can take away something you use, so that stays a separate, reviewed step.
 
 ### Lynis
@@ -210,13 +228,15 @@ can take away something you use, so that stays a separate, reviewed step.
 Lynis prints a long report. Vigil's Lynis action runs it quietly, then copies
 just the score, warning and suggestion lines (and its kernel-setting details)
 from `/var/log/lynis-report.dat`, which only root can read, to Vigil's state
-folder. The Lynis row under Harden lists them, with Lynis's own fix where its
-report gives one and where to read more (`sudo lynis show details <ID>`,
-`cisofy.com/lynis/controls/<ID>`). Findings that a Vigil check already covers
+folder. Each finding then becomes its own row in the pillar its Lynis test
+group belongs to, named from the installed Lynis's own test list, with
+Lynis's fix where its report gives one, **Learn more** (Lynis's page for that
+test) and **Mark as reviewed**. Findings that a Vigil check already covers
 (firewall, SSH, kernel and network settings Vigil manages, disk encryption,
-malware scanners, arch-audit, file integrity, USB authorization) are left out
-and named instead, so nothing shows twice. Lynis is written for servers too,
-so its findings are information and never change the score.
+malware scanners, arch-audit, file integrity, USB authorization, rarely used
+protocols, FireWire) are left out and named on the Lynis row, so nothing
+shows twice and the Vigil row's own fix and undo apply. Lynis is written for
+servers too, so its findings are information and never change the score.
 
 ## How actions run
 
@@ -234,8 +254,12 @@ The panel always says which kind an action is:
    Thunderbolt authorization, FIDO2, passwordless sudo, the docker group,
    updates, orphans, package installs), Vigil runs that command rather than
    doing it itself.
-4. **Open an app**: **Open ClamUI** starts ClamUI directly, with a fixed
-   command and no shell. It changes nothing, so it does not ask first.
+4. **Open an app or a guide**: **Open ClamUI** starts ClamUI directly, and
+   **Learn more** opens a page with `xdg-open`, each with a fixed command and
+   no shell. Pages come only from a fixed list in `Model.js` (Arch Wiki,
+   Bumblebee, Black Ops) or are Lynis's page for a test ID matching
+   `[A-Z]{3,6}-[0-9]{4}`; nothing else in the report becomes a URL. They
+   change nothing, so they do not ask first.
 5. **Mark as reviewed** and **Show again** only change Vigil's own state
    file, so they do not ask first either.
 

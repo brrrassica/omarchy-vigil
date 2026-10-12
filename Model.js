@@ -8,13 +8,13 @@
 // not match the shape is rejected whole rather than trimmed into shape.
 
 var MAX_REPORT_CHARS = 512 * 1024
-var MAX_CHECKS = 80
+var MAX_CHECKS = 160
 var MAX_STR = 400
 var MAX_DETAIL = 4000
 
 var CATEGORIES = ["harden", "detect", "supply", "privacy", "care"]
 var STATUSES = ["fail", "warn", "unknown", "info", "pass", "na"]
-var FIX_KINDS = ["terminal", "helper", "app", "none"]
+var FIX_KINDS = ["terminal", "helper", "app", "docs", "none"]
 var TRUSTED_TOOL_DIRS = ["/usr/bin", "/usr/share/omarchy/bin"]
 var LAUNCHER = "omarchy-launch-floating-terminal-with-presentation"
 
@@ -102,6 +102,20 @@ function isHelperAction(id) {
 function helperInfo(id) {
   if (typeof id !== "string" || !Object.prototype.hasOwnProperty.call(HELPER_INFO, id)) return null
   return HELPER_INFO[id]
+}
+
+// "How to fix" on an open finding: the helper's own words when it gave any,
+// otherwise what the fix button does.
+function howTo(check) {
+  if (!check || check.status === "pass" || check.status === "na") return ""
+  if (check.howto) return check.howto
+  if (!check.fix || check.fix.kind === "none") return ""
+  if (check.fix.kind === "app") return "Press " + check.fix.label + "."
+  var a = check.fix.kind === "helper" ? helperInfo(check.fix.action)
+    : (check.fix.kind === "terminal" ? terminalAction(check.fix.action) : null)
+  if (!a) return ""
+  return "Press " + check.fix.label + ": " + a.what.join(" ")
+    + (check.fix.kind === "terminal" ? " It opens a terminal and asks before changing anything." : "")
 }
 
 // Title and lines for the confirmation card of any runnable action.
@@ -381,6 +395,69 @@ var TERMINAL_ACTIONS = {
     what: ["Runs the Omarchy command omarchy-update-orphan-pkgs", "It lists them and asks before removing anything."],
     tool: "omarchy-update-orphan-pkgs", args: ""
   },
+  "show-listeners": {
+    title: "Show which programs are listening",
+    what: ["Runs: sudo ss -tulpn, which lists open ports and the program behind each. Changes nothing."],
+    run: "sudo /usr/bin/ss -tulpn"
+  },
+  "show-ld-preload": {
+    title: "Show /etc/ld.so.preload",
+    what: ["Prints the file and who owns it. Changes nothing."],
+    run: "/usr/bin/ls -l /etc/ld.so.preload; echo; /usr/bin/cat /etc/ld.so.preload"
+  },
+  "show-plugins": {
+    title: "List installed Omarchy plugins",
+    what: ["Runs: omarchy plugin list. Changes nothing.",
+           "Remove one with: omarchy plugin remove <id>"],
+    tool: "omarchy-plugin-list", args: ""
+  },
+  "edit-shell-history": {
+    title: "Edit your shell history",
+    what: ["Opens each shell history file you have in your editor, one after the other.",
+           "Delete the lines with the leaked keys (Details lists the line numbers), save and quit.",
+           "Revoke the keys with their services too: anything in history may already have been read."],
+    run: "for f in \"$HOME/.bash_history\" \"$HOME/.zsh_history\" \"$HOME/.local/share/fish/fish_history\"; do "
+      + "if [ -f \"$f\" ]; then \"${EDITOR:-nvim}\" \"$f\"; fi; done"
+  },
+  "ssh-passphrase": {
+    title: "Add a passphrase to your SSH keys",
+    what: ["For each private key in ~/.ssh without a passphrase, runs ssh-keygen -p, which asks for the new one.",
+           "The key itself stays the same, so servers that trust it keep working. No sudo needed."],
+    run: "found=0; for k in \"$HOME\"/.ssh/*; do "
+      + "[ -f \"$k\" ] && [ ! -L \"$k\" ] || continue; "
+      + "/usr/bin/grep -q 'PRIVATE KEY' \"$k\" 2>/dev/null || continue; "
+      + "if /usr/bin/ssh-keygen -y -P '' -f \"$k\" >/dev/null 2>&1; then found=1; "
+      + "echo \"Passphrase for $k\"; /usr/bin/ssh-keygen -p -f \"$k\"; fi; done; "
+      + "[ \"$found\" = 1 ] || echo 'Every key already has a passphrase.'"
+  },
+  "screen-lock-default": {
+    title: "Lock the screen after 5 minutes idle",
+    what: ["Sets idle.lock to 300 seconds in ~/.config/omarchy/shell.json, the Omarchy default,",
+           "using the shell-config helper that Omarchy ships, which also reloads the shell. No sudo needed."],
+    source: "omarchy-shell-config",
+    run: "commit \"$NORMALIZE | .idle = ((.idle | if type == \\\"object\\\" then . else {} end) + {lock: 300})\" "
+      + "&& echo 'The screen now locks after 5 minutes idle.'"
+  },
+  "protocols-off": {
+    title: "Turn off rarely used network protocols",
+    what: ["Writes /etc/modprobe.d/90-omarchy-vigil-protocols.conf so dccp, sctp, rds and tipc never load.",
+           "One already loaded stays until the next restart. Undo: delete that file."],
+    run: "sudo /usr/bin/install -d -m 0755 /etc/modprobe.d && "
+      + dropIn("/etc/modprobe.d/90-omarchy-vigil-protocols.conf", [VIGIL_MARK,
+          "install dccp /bin/false", "install sctp /bin/false", "install rds /bin/false", "install tipc /bin/false"])
+  },
+  "firewire-off": {
+    title: "Turn off FireWire",
+    what: ["Writes /etc/modprobe.d/90-omarchy-vigil-firewire.conf so the FireWire drivers never load.",
+           "Takes full effect after the next restart. Undo: delete that file."],
+    run: "sudo /usr/bin/install -d -m 0755 /etc/modprobe.d && "
+      + dropIn("/etc/modprobe.d/90-omarchy-vigil-firewire.conf", [VIGIL_MARK,
+          "install firewire-core /bin/false", "install firewire-ohci /bin/false", "install ohci1394 /bin/false"])
+  },
+  "undo-protocols": undoDropIn("network protocols", "/etc/modprobe.d/90-omarchy-vigil-protocols.conf",
+    "They can load again straight away.", "echo 'Removed. These protocols can load again.'"),
+  "undo-firewire": undoDropIn("FireWire", "/etc/modprobe.d/90-omarchy-vigil-firewire.conf",
+    "The drivers can load again after the next restart.", "echo 'Removed. FireWire works again after a restart.'"),
   "clean-system": {
     title: "Free space in the package cache and trim system logs",
     what: ["Runs: sudo paccache -rk2, sudo paccache -ruk0, then sudo journalctl --vacuum-time=2weeks",
@@ -424,6 +501,35 @@ var TERMINAL_ACTIONS = {
 
 // App actions open another program you installed, with a fixed argv and no
 // shell. The helper reports how the app is installed; anything else is "".
+// "Learn more" pages, opened in the browser. Only these, and Lynis's own page
+// for a test ID (action "lynis-<id>"), can be opened; nothing else from the
+// report ever becomes a URL.
+var DOCS = {
+  "arch-ssh-keys": "https://wiki.archlinux.org/title/SSH_keys",
+  "arch-gnupg": "https://wiki.archlinux.org/title/GnuPG",
+  "arch-dm-crypt": "https://wiki.archlinux.org/title/Dm-crypt",
+  "arch-secure-boot": "https://wiki.archlinux.org/title/Unified_Extensible_Firmware_Interface/Secure_Boot",
+  "arch-faillock": "https://wiki.archlinux.org/title/Security#Lock_out_user_after_three_failed_login_attempts",
+  "arch-autostart": "https://wiki.archlinux.org/title/Autostarting",
+  "arch-aur": "https://wiki.archlinux.org/title/Arch_User_Repository",
+  "bumblebee": "https://github.com/duketopceo/omarchy-bumblebee",
+  "black-ops": "https://github.com/brightwalker25/omarchy-black-ops"
+}
+var LYNIS_DOC_RE = /^lynis-([a-z]{3,6}-[0-9]{4})$/
+
+function docsUrl(id) {
+  if (typeof id !== "string") return ""
+  if (Object.prototype.hasOwnProperty.call(DOCS, id)) return DOCS[id]
+  var m = LYNIS_DOC_RE.exec(id)
+  return m ? "https://cisofy.com/lynis/controls/" + m[1].toUpperCase() + "/" : ""
+}
+
+function docsCommand(id, tools) {
+  var url = docsUrl(id)
+  var dir = toolDir(tools, "xdg-open")
+  return url === "" || dir === "" ? [] : [dir + "/xdg-open", url]
+}
+
 var APP_ACTIONS = {
   "open-clamui": {
     app: "clamui",
@@ -463,6 +569,10 @@ function terminalScript(id, tools) {
     var dir = toolDir(tools, a.tool)
     if (dir === "") return ""
     body = dir + "/" + a.tool + a.args
+  } else if (a.source) {
+    var sdir = toolDir(tools, a.source)
+    if (sdir === "") return ""
+    body = "source " + sdir + "/" + a.source + " && " + a.run
   } else {
     body = a.run
   }
@@ -481,6 +591,7 @@ function launcherPath(tools) {
 function canRun(fixObj, tools, apps) {
   if (!fixObj) return false
   if (fixObj.kind === "app") return appCommand(fixObj.action, apps).length > 0
+  if (fixObj.kind === "docs") return docsCommand(fixObj.action, tools).length > 0
   if (fixObj.kind === "helper") return isHelperAction(fixObj.action)
   if (fixObj.kind === "terminal") return launcherPath(tools) !== "" && terminalScript(fixObj.action, tools) !== ""
   return false
@@ -534,6 +645,7 @@ function validFix(f) {
   if (f.kind === "helper" && !inList(f.action, HELPER_ACTIONS)) return { kind: "none", action: "", label: "" }
   if (f.kind === "terminal" && !terminalAction(f.action)) return { kind: "none", action: "", label: "" }
   if (f.kind === "app" && !Object.prototype.hasOwnProperty.call(APP_ACTIONS, f.action)) return { kind: "none", action: "", label: "" }
+  if (f.kind === "docs" && docsUrl(f.action) === "") return { kind: "none", action: "", label: "" }
   return { kind: f.kind, action: f.action, label: plain(f.label, 60) }
 }
 
@@ -543,6 +655,7 @@ function validCheck(c) {
   if (!inList(c.category, CATEGORIES) || !inList(c.status, STATUSES)) return null
   if (!isString(c.title, MAX_STR) || !isString(c.summary, MAX_STR)) return null
   if (!isString(c.why, MAX_STR * 2) || !isString(c.detail, MAX_DETAIL)) return null
+  if (c.howto !== undefined && !isString(c.howto, MAX_STR * 2)) return null
   if (typeof c.weight !== "number" || !isFinite(c.weight) || c.weight < 0 || c.weight > 3 || Math.floor(c.weight) !== c.weight) return null
   var f = validFix(c.fix)
   if (!f) return null
@@ -558,7 +671,7 @@ function validCheck(c) {
   var dismissed = c.dismissed === true
   if ((c.dismissible !== undefined && typeof c.dismissible !== "boolean")
       || (c.dismissed !== undefined && typeof c.dismissed !== "boolean")) return null
-  if (dismissed && (!dismissible || c.status !== "warn")) return null
+  if (dismissed && (!dismissible || c.status === "pass" || c.status === "na")) return null
   var dismissedAt = ""
   if (c.dismissedAt !== undefined && c.dismissedAt !== "") {
     if (!isString(c.dismissedAt, 10) || !/^\d{4}-\d{2}-\d{2}$/.test(c.dismissedAt)) return null
@@ -567,7 +680,7 @@ function validCheck(c) {
   return {
     id: c.id, category: c.category, status: c.status, weight: c.weight,
     title: plain(c.title, 80), summary: plain(c.summary, MAX_STR), why: plain(c.why, MAX_STR * 2),
-    detail: plain(c.detail, MAX_DETAIL), fix: f, undo: undo,
+    detail: plain(c.detail, MAX_DETAIL), howto: plain(c.howto || "", MAX_STR * 2), fix: f, undo: undo,
     dismissible: dismissible, dismissed: dismissed, dismissedAt: dismissedAt
   }
 }
@@ -660,7 +773,7 @@ function parseReport(text) {
   if (d.tools && typeof d.tools === "object") {
     for (var name in d.tools) {
       if (!Object.prototype.hasOwnProperty.call(d.tools, name)) continue
-      if (!/^omarchy-[a-z0-9-]{1,60}$/.test(name)) return null
+      if (!/^omarchy-[a-z0-9-]{1,60}$/.test(name) && name !== "xdg-open") return null
       var dir = d.tools[name]
       if (dir !== "" && !inList(dir, TRUSTED_TOOL_DIRS)) return null
       tools[name] = dir
@@ -835,7 +948,8 @@ if (typeof module !== "undefined") {
     terminalAction: terminalAction, launcherPath: launcherPath, canRun: canRun, checksFor: checksFor,
     topFindings: topFindings, countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
     tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
-    categoryLabel: categoryLabel, tabIntro: tabIntro, cleanAllPlan: cleanAllPlan, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
+    categoryLabel: categoryLabel, tabIntro: tabIntro, cleanAllPlan: cleanAllPlan,
+    howTo: howTo, docsUrl: docsUrl, docsCommand: docsCommand, DOCS: DOCS, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
     shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
     relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,

@@ -141,9 +141,11 @@ Panel {
   function requestFix(check) {
     if (!check || !report || busy) return
     if (!Model.canRun(check.fix, report.tools, report.apps)) return
-    if (check.fix.kind === "app") {
-      // Opening an app you installed changes nothing, so it needs no confirmation.
+    if (check.fix.kind === "app" || check.fix.kind === "docs") {
+      // Opening an app you installed or a guide in the browser changes
+      // nothing, so it needs no confirmation.
       var argv = Model.appCommand(check.fix.action, report.apps)
+      if (check.fix.kind === "docs") argv = Model.docsCommand(check.fix.action, report.tools)
       if (argv.length > 0) { Quickshell.execDetached(argv); root.close() }
       return
     }
@@ -930,7 +932,9 @@ Panel {
     property var check: null
     property bool selected: false
     property bool expanded: false
-    readonly property bool runnable: check !== null && root.report !== null && Model.canRun(check.fix, root.report.tools, root.report.apps)
+    readonly property bool unresolved: check !== null && check.status !== "pass" && check.status !== "na"
+    readonly property bool runnable: unresolved && root.report !== null && Model.canRun(check.fix, root.report.tools, root.report.apps)
+    readonly property string howTo: Model.howTo(check)
     readonly property bool undoable: check !== null && root.report !== null && check.undo.action !== ""
       && Model.canRun({ kind: "terminal", action: check.undo.action }, root.report.tools, root.report.apps)
     readonly property bool reviewable: check !== null && (check.dismissible || check.dismissed)
@@ -1030,6 +1034,29 @@ Panel {
       }
       Text {
         textFormat: Text.PlainText
+        visible: row.expanded && row.howTo !== ""
+        width: parent.width
+        topPadding: Style.space(6)
+        text: "HOW TO FIX"
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: true
+        font.letterSpacing: 1
+      }
+      Text {
+        textFormat: Text.PlainText
+        visible: row.expanded && row.howTo !== ""
+        width: parent.width
+        lineHeight: 1.15
+        text: row.howTo
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        wrapMode: Text.WordWrap
+      }
+      Text {
+        textFormat: Text.PlainText
         visible: row.expanded && row.check !== null && row.check.detail !== ""
         width: parent.width
         topPadding: Style.space(6)
@@ -1079,7 +1106,7 @@ Panel {
       }
       Text {
         textFormat: Text.PlainText
-        visible: row.expanded && !row.runnable && row.check !== null && row.check.fix.kind !== "none"
+        visible: row.expanded && row.unresolved && !row.runnable && row.check.fix.kind !== "none"
         width: parent.width
         text: "This needs a command that was not found on this system."
         color: root.dim

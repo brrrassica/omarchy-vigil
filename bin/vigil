@@ -43,7 +43,7 @@ import sys
 import time
 from base64 import b64decode
 
-VERSION = "0.10.0"
+VERSION = "0.11.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -428,10 +428,10 @@ def check(fn):
     return fn
 
 
-def result(id, category, title, status, summary, why="", detail="", fix=None, weight=1):
+def result(id, category, title, status, summary, why="", detail="", fix=None, weight=1, howto=""):
     return {
         "id": id, "category": category, "title": title, "status": status,
-        "summary": summary, "why": why, "detail": detail,
+        "summary": summary, "why": why, "detail": detail, "howto": howto,
         "fix": fix or {"kind": "none", "action": "", "label": ""},
         "weight": weight,
     }
@@ -556,6 +556,76 @@ def _resolved_config():
     paths.append(sys_path("/etc/systemd/resolved.conf"))
     paths += conf_d(sys_path("/etc/systemd/resolved.conf.d"))
     return merged_ini(paths).get("Resolve", {})
+
+
+def _modprobe_text():
+    """Text of /etc/modprobe.conf and /etc/modprobe.d/*, the files Lynis reads too."""
+    parts = []
+    try:
+        data = read_file(sys_path("/etc/modprobe.conf"), SMALL_FILE_MAX)
+        if data:
+            parts.append(data.decode("utf-8", "replace"))
+    except Refused:
+        pass
+    try:
+        names = sorted(os.listdir(sys_path("/etc/modprobe.d")))[:200]
+    except OSError:
+        names = []
+    for n in names:
+        try:
+            data = read_file(sys_path("/etc/modprobe.d/" + n), SMALL_FILE_MAX)
+        except Refused:
+            continue
+        if data:
+            parts.append(data.decode("utf-8", "replace"))
+    return "\n".join(parts)
+
+
+RARE_PROTOCOLS = ("dccp", "sctp", "rds", "tipc")
+
+
+@check
+def check_rare_protocols():
+    cid, cat, title = "rare-protocols", "harden", "Rarely used network protocols"
+    why = ("DCCP, SCTP, RDS and TIPC are network protocols almost no desktop uses, and bugs in "
+           "them have let ordinary programs take over the system. Turning them off stops the "
+           "kernel loading them (Lynis test NETW-3200).")
+    text = _modprobe_text()
+    on = [p for p in RARE_PROTOCOLS
+          if not re.search(r"(?m)^install[ \t]+%s[ \t]+/bin/(true|false)$" % p, text)]
+    if not on:
+        return result(cid, cat, title, "pass", "Turned off.", why, weight=0)
+    return result(cid, cat, title, "info", "%s can still load." % _and(on), why,
+                  fix=fix("terminal", "protocols-off", "Turn off"), weight=0)
+
+
+def _has_firewire_port():
+    try:
+        devs = os.listdir(sys_path("/sys/bus/pci/devices"))[:512]
+    except OSError:
+        return False
+    for d in devs:
+        try:
+            data = read_file(sys_path("/sys/bus/pci/devices/%s/class" % d), 64, follow=True)
+        except Refused:
+            continue
+        if data and data.strip().lower().startswith(b"0x0c00"):     # IEEE 1394 controller
+            return True
+    return False
+
+
+@check
+def check_firewire():
+    cid, cat, title = "firewire", "harden", "FireWire"
+    why = ("A FireWire port lets a plugged-in device read memory directly, which can be used to "
+           "steal data from a locked laptop. Few machines still have one (Lynis test STRG-1846).")
+    text = _modprobe_text()
+    if re.search(r"(?m)^[ \t]*(blacklist|install)[ \t]+(ohci1394|firewire[-_]ohci|firewire-core)\b", text):
+        return result(cid, cat, title, "pass", "Turned off.", why, weight=0)
+    if not _has_firewire_port():
+        return result(cid, cat, title, "pass", "This machine has no FireWire port.", why, weight=0)
+    return result(cid, cat, title, "info", "This machine has a FireWire port and its driver can load.", why,
+                  fix=fix("terminal", "firewire-off", "Turn off"), weight=0)
 
 
 @check
@@ -752,7 +822,7 @@ def check_ssh_keys():
         return result(cid, cat, title, "warn",
                       "%d private key%s ha%s no passphrase." % (len(plain), "" if len(plain) == 1 else "s",
                                                                 "s" if len(plain) == 1 else "ve"),
-                      why + " Add one with: ssh-keygen -p -f ~/.ssh/<key>", detail, weight=1)
+                      why + " Add one with: ssh-keygen -p -f ~/.ssh/<key>", detail, fix=fix("terminal", "ssh-passphrase", "Add a passphrase"), weight=1)
     if not keys:
         return result(cid, cat, title, "pass", "No private keys in ~/.ssh.", why, detail, weight=1)
     return result(cid, cat, title, "pass", "Your SSH keys are private and passphrase-protected.", why, detail, weight=1)
@@ -807,17 +877,17 @@ def check_screen_lock():
     if exists(home_path(".local", "state", "omarchy", "indicators", "stay-awake")):
         return result(cid, cat, title, "warn", "Stay Awake is on, so the screen will not lock by itself.", why,
                       fix=fix("terminal", "allow-idle", "Turn Stay Awake off"), weight=2)
-    how = ' Set "idle": {"lock": 300} in ~/.config/omarchy/shell.json for five minutes.'
+    lock_fix = fix("terminal", "screen-lock-default", "Lock after 5 minutes")
     lock, path = _shell_json_lock()
     if lock is None:
         return result(cid, cat, title, "unknown", "Could not read the idle settings.", why, weight=2)
     if lock <= 0:
-        return result(cid, cat, title, "warn", "The screen never locks by itself.", why + how,
-                      "idle.lock is off in shell.json", weight=2)
+        return result(cid, cat, title, "warn", "The screen never locks by itself.", why,
+                      "idle.lock is off in shell.json", lock_fix, weight=2)
     minutes = lock / 60.0
     if lock > 900:
         return result(cid, cat, title, "warn", "The screen locks only after %d minutes idle." % round(minutes),
-                      why + how, "idle.lock = %d seconds" % lock, weight=2)
+                      why, "idle.lock = %d seconds" % lock, lock_fix, weight=2)
     return result(cid, cat, title, "pass", "The screen locks after %s idle." % (
         "%d minutes" % round(minutes) if lock >= 120 else "%d seconds" % lock), why, weight=2)
 
@@ -1193,8 +1263,8 @@ def check_ld_preload():
 @check
 def check_foreign_packages():
     cid, cat, title = "aur-packages", "supply", "AUR and other foreign packages"
-    why = ("Packages from the AUR are written by volunteers and are not checked by Arch. Malicious AUR "
-           "packages have happened. Keep only the ones you recognise and still use.")
+    why = ("Packages from the AUR are written by volunteers and are not checked by Arch, and "
+           "malicious ones have happened.")
     tool = "/usr/bin/pacman"
     if not is_trusted_executable(sys_path(tool)):
         return result(cid, cat, title, "na", "pacman is not available.", why, weight=0)
@@ -1211,16 +1281,15 @@ def check_foreign_packages():
 SCANNERS = [
     # id, binary, category, title, why, run action, install action
     ("clamav", "clamscan", "detect", "ClamAV virus engine",
-     "ClamAV checks files against a database of known malware. Most of its signatures are for Windows "
-     "malware, so it matters most for downloads and files you pass on to other people. ClamUI (below) "
-     "is the easiest way to use it.", "scan-downloads", "install-clamav"),
+     ("ClamAV checks files against a database of known malware, mostly Windows malware, so it "
+      "matters most for downloads and files you pass on. ClamUI is the easiest way to use it."),
+     "scan-downloads", "install-clamav"),
     ("rkhunter", "rkhunter", "detect", "Rootkit Hunter",
      "rkhunter looks for known rootkits, changed system programs and suspicious files. Run it after "
      "installing it once with --propupd so it learns what normal looks like.", "run-rkhunter", "install-rkhunter"),
     ("lynis", "lynis", "harden", "Lynis audit",
-     "Lynis runs hundreds of hardening checks and gives a hardening index with concrete suggestions. "
-     "It is written for servers as well as desktops, so some suggestions will not apply to a laptop. "
-     "Vigil lists them for reference; they do not change your score.",
+     ("Lynis runs hundreds of hardening checks and gives a hardening index. It is written for "
+      "servers too, so Vigil lists its findings for reference and they never change your score."),
      "run-lynis", "install-lynis"),
     ("arch-audit", "arch-audit", "supply", "Known vulnerabilities (arch-audit)",
      "arch-audit checks your installed packages against the Arch security team's tracker and lists the "
@@ -1239,7 +1308,7 @@ def _scanner_check(sid, binary, cat, title, why, run_action, install_action):
     if sid == "arch-audit":
         return _arch_audit_check(cid, cat, title, why)
     if sid == "lynis":
-        return _lynis_check(cid, cat, title, why)
+        return _lynis_check(cid, cat, title, why)[0]
     if sid == "clamav":
         newest = 0
         for name in ("daily.cld", "daily.cvd"):
@@ -1286,6 +1355,7 @@ LYNIS_COVERED_BY = {
     "FINT-4350": "file-changes",
     "PKGS-7320": "scanner-arch-audit", "PKGS-7322": "scanner-arch-audit",
     "USB-2000": "usb-authorization", "USB-3000": "usb-authorization",
+    "NETW-3200": "rare-protocols", "STRG-1846": "firewire",
 }
 LYNIS_SYSCTL_TEST = "KRNL-6000"
 
@@ -1371,60 +1441,110 @@ def _lynis_fold(data, vigil):
     return shown, names
 
 
-def _lynis_detail(shown, covered):
-    lines = ["For any item: sudo lynis show details <ID> shows what Lynis saw, and "
-             "cisofy.com/lynis/controls/<ID> explains how to fix it."]
-    if covered:
-        lines.append("Left out because Vigil already checks them: %s." % ", ".join(covered))
-    for heading, items in (("Warnings", shown["warnings"]), ("Suggestions", shown["suggestions"])):
-        if not items:
-            continue
-        lines += ["", heading]
-        for it in items:
-            lines.append("\u2022 %s (%s)" % (it["text"], it["id"]))
-            if it["detail"]:
-                lines.append("   " + it["detail"])
+LYNIS_ROW_PREFIX = "lynis-"
+LYNIS_MAX_ROWS = 40
+LYNIS_CATALOG = "/usr/share/lynis/db/tests.db"
+# Lynis test groups (db/tests.db) that belong to a pillar other than Harden.
+LYNIS_PILLARS = {"malware": "detect", "file_integrity": "detect", "system_integrity": "detect",
+                 "ports_packages": "supply"}
+_LYNIS_VERB = re.compile(r"^(checking|check|determine|test|testing|search|searching|query|querying)"
+                         r"( for| if| whether| the)*\s+", re.I)
+
+
+def lynis_catalog():
+    """{test id: (group, short title)} from the installed Lynis's own test list."""
+    try:
+        data = read_file(sys_path(LYNIS_CATALOG), 512 * 1024)
+    except Refused:
+        return {}
+    out = {}
+    for line in (data or b"").decode("utf-8", "replace").splitlines()[:5000]:
+        f = line.split(":")
+        if len(f) >= 6 and _LYNIS_ID.match(f[0]) and re.match(r"^[a-z_]{1,40}$", f[3]):
+            name = _LYNIS_VERB.sub("", clean(f[5], 90)).strip()
+            out[f[0]] = (f[3], name[:1].upper() + name[1:])
+    return out
+
+
+def _lynis_rows(shown, catalog):
+    """One info row per Lynis test, in the pillar its test group belongs to."""
+    groups = []
+    for kind in ("warnings", "suggestions"):
+        for it in shown[kind]:
+            g = next((g for g in groups if g["id"] == it["id"]), None)
+            if g is None:
+                g = {"id": it["id"], "kind": kind[:-1], "items": []}
+                groups.append(g)
+            g["items"].append(it)
+    rows = []
+    for g in groups[:LYNIS_MAX_ROWS]:
+        tid, items = g["id"], g["items"]
+        group, name = catalog.get(tid, ("", ""))
+        if not group:
+            group = {"MALW": "malware", "FINT": "file_integrity", "PKGS": "ports_packages"}.get(tid.split("-")[0], "")
+        summary = "Lynis %s: %s" % (g["kind"], items[0]["text"])
+        if len(items) > 1:
+            summary += " (and %d more)" % (len(items) - 1)
+        lines = []
+        for it in items[:12]:
+            lines.append(("\u2022 " if len(items) > 1 else "") + it["text"]
+                         + (" \u2014 " + it["detail"] if it["detail"] else ""))
             if it["solution"]:
-                lines.append("   Fix: " + it["solution"])
-    # The report keeps LIST_MAX + 1 lines of detail; the last one says what was left out.
-    out, total = [], 0
-    for i, line in enumerate(lines):
-        if i >= LIST_MAX or total + len(line) + 1 > 3800:
-            out.append("\u2026 and %d more. Run Lynis in a terminal to see the full list."
-                       % len([x for x in lines[i:] if x.startswith("\u2022")]))
-            break
-        out.append(line)
-        total += len(line) + 1
-    return "\n".join(out)
+                lines.append("Fix: " + it["solution"])
+        documented = bool(re.match(r"^[A-Z]{3,6}-[0-9]{4}$", tid))
+        if documented:
+            lines.append("Lynis explains this test and how to fix it at cisofy.com/lynis/controls/%s/" % tid)
+        lines.append("What Lynis saw: sudo lynis show details %s" % tid)
+        rows.append(result(
+            LYNIS_ROW_PREFIX + tid.lower(), LYNIS_PILLARS.get(group, "harden"), name or "Lynis test %s" % tid,
+            "info", summary,
+            "From Lynis (test %s), which checks servers as well as desktops, so some of its advice will not "
+            "matter on a laptop. It never changes your score." % tid,
+            "\n".join(lines),
+            fix("docs", "lynis-" + tid.lower(), "Learn more") if documented else None, weight=0,
+            howto="Read what Lynis says about it (Learn more) and decide whether it applies to this machine. "
+                  "If it does not, mark it as reviewed and Vigil stops showing it."))
+    return rows
 
 
 def _lynis_check(cid, cat, title, why, vigil=None):
     data = parse_lynis(_state_text(LYNIS_NAME))
     if data is None:
         return result(cid, cat, title, "info", "Installed. Run it once and Vigil lists what it found here.", why,
-                      fix=fix("terminal", "run-lynis", "Run"), weight=0)
+                      fix=fix("terminal", "run-lynis", "Run"), weight=0), []
     shown, covered = _lynis_fold(data, vigil)
+    rows = _lynis_rows(shown, lynis_catalog())
     parts = []
     if data["index"] is not None:
         parts.append("Hardening index %d of 100." % data["index"])
-    parts.append("%s, %s." % (_plural(len(shown["warnings"]), "warning"),
-                              _plural(len(shown["suggestions"]), "suggestion")))
     days = _days_since(data["date"]) if data["date"] else None
     if days is not None:
         parts.append("Ran %s." % ("today" if days == 0 else "yesterday" if days == 1 else "%d days ago" % days))
-        if days > LYNIS_STALE_DAYS:
-            parts.append("Run it again for a current picture.")
-    return result(cid, cat, title, "info", " ".join(parts), why, _lynis_detail(shown, covered),
-                  fix("terminal", "run-lynis", "Run again"), weight=0)
+    n = len(rows)
+    parts.append("Nothing else to add to Vigil's own checks." if not n else
+                 "%s added to the pillars, marked Lynis." % _plural(n, "finding"))
+    if days is not None and days > LYNIS_STALE_DAYS:
+        parts.append("Run it again for a current picture.")
+    lines = []
+    if covered:
+        lines.append("Left out because Vigil already checks them: %s." % ", ".join(covered))
+    lines.append("Each finding Lynis adds says what Lynis saw (sudo lynis show details <ID>) and where Lynis "
+                 "explains the fix.")
+    return result(cid, cat, title, "info", " ".join(parts), why, "\n".join(lines),
+                  fix("terminal", "run-lynis", "Run again"), weight=0), rows
 
 
 def fold_lynis(checks):
-    """Redo the Lynis row once every other check has run, leaving out what Vigil covers."""
+    """Once every other check has run: redo the Lynis row and add one row per
+    Lynis finding that Vigil does not already cover."""
     vigil = {c["id"]: c["title"] for c in checks if c["status"] in ("pass", "warn", "fail", "info")}
     for i, c in enumerate(checks):
         if c["id"] == "scanner-lynis" and c["fix"]["action"] == "run-lynis":
             spec = [x for x in SCANNERS if x[0] == "lynis"][0]
-            checks[i] = tidy(_lynis_check("scanner-lynis", spec[2], spec[3], spec[4], vigil))
+            row, extra = _lynis_check("scanner-lynis", spec[2], spec[3], spec[4], vigil)
+            checks[i] = tidy(row)
+            checks.extend(tidy(r) for r in extra)
+            return
 
 
 SEVERITIES = ["Critical", "High", "Medium", "Low", "Unknown"]
@@ -1746,11 +1866,10 @@ def refresh_osv():
 @check
 def check_osv():
     cid, cat, title = "malicious-packages", "supply", "Known-malicious npm and Bun packages"
-    why = ("Attackers publish poisoned versions of npm packages that steal passwords and keys; in 2026 many "
-           "ran through Bun, and the Atomic Arch attack pulled one into AUR builds. Vigil asks OSV.dev, which "
-           "collects confirmed malware reports from the OpenSSF Malicious Packages project, about the packages "
-           "in your AUR build folders and global npm and Bun installs. It sends package names and versions, "
-           "never your files, once a week and when you press Check now.")
+    why = ("Attackers publish poisoned npm and Bun packages that steal passwords and keys; the "
+           "2026 Atomic Arch attack pulled one into AUR builds. Vigil asks OSV.dev about the "
+           "packages in your AUR build folders and global npm and Bun installs, sending names and "
+           "versions only.")
     if not is_trusted_executable(sys_path("/usr/bin/osv-scanner")):
         return result(cid, cat, title, "info", "Not set up. Install osv-scanner to check against OSV.dev.", why,
                       fix=fix("terminal", "install-osv-scanner", "Install osv-scanner"), weight=0)
@@ -1767,9 +1886,9 @@ def check_osv():
         lines = ["%s %s (%s, %s) in %s" % (clean(m.get("name"), 120), clean(m.get("version"), 60),
                  clean(m.get("ecosystem"), 30), clean(m.get("id"), 20), clean(m.get("where"), 160)) for m in mal]
         return result(cid, cat, title, "fail", "%d known-malicious package%s found (%s)." % (
-            len(mal), "" if len(mal) == 1 else "s", feed_when(cache)), why + (
-            " Remove the AUR package or project that pulled it in, then change the passwords and keys used on "
-            "this machine from another device."), clean_block(lines), fix=refresh, weight=3)
+            len(mal), "" if len(mal) == 1 else "s", feed_when(cache)), why, clean_block(lines), fix=refresh, weight=3,
+            howto="Remove the AUR package or project that pulled it in (Details says where), then change the "
+                  "passwords and keys used on this machine from another device.")
     return result(cid, cat, title, "pass", "No known-malicious packages (%s)." % feed_when(cache), why,
                   fix=refresh, weight=3)
 
@@ -1824,10 +1943,9 @@ def refresh_aur():
 @check
 def check_aur_status():
     cid, cat, title = "aur-status", "supply", "AUR package status"
-    why = ("Most 2026 AUR attacks took over packages whose maintainers had left them (orphans), and Arch "
-           "deleted the poisoned ones. Vigil asks the AUR about your AUR packages once a week. A package that "
-           "has left the AUR or has no maintainer is not necessarily harmful, but it no longer gets reviewed "
-           "fixes, so replace it if you can.")
+    why = ("Most 2026 AUR attacks took over packages whose maintainers had left them, and Arch "
+           "deleted the poisoned ones. A package that left the AUR or has no maintainer is not "
+           "necessarily harmful, but it no longer gets reviewed fixes.")
     if not feed_available("aur"):
         return result(cid, cat, title, "na", "pacman or curl is not available.", why, weight=0)
     cache = feed_cache("aur")
@@ -1852,7 +1970,9 @@ def check_aur_status():
     if orphans:
         bits.append("%d without a maintainer" % len(orphans))
     return result(cid, cat, title, "info", "; ".join(bits).capitalize() + " (%s)." % feed_when(cache), why,
-                  clean_block(lines), fix=refresh, weight=0)
+                  clean_block(lines), fix=refresh, weight=0,
+                  howto="Switch to the official package where Arch now ships it, or to a maintained "
+                        "replacement. If you need it as it is, mark it as reviewed.")
 
 
 # Weekly virus scan: ClamAV scans ~/Downloads as you (never as root), with
@@ -1901,9 +2021,8 @@ def refresh_virus_scan():
 @check
 def check_virus_scan():
     cid, cat, title = "virus-scan", "detect", "Weekly virus scan"
-    why = ("Once a week ClamAV scans your Downloads folder, where most harmful files arrive, using the "
-           "signatures ClamAV keeps up to date. It runs as you, in the background, and needs no password. "
-           "For other folders, scheduled scans and quarantine, use ClamUI.")
+    why = ("Once a week ClamAV scans your Downloads folder, where most harmful files arrive, as "
+           "you and in the background. For other folders and quarantine, use ClamUI.")
     if not is_trusted_executable(sys_path("/usr/bin/clamscan")):
         return result(cid, cat, title, "info", "Needs ClamAV. Install ClamUI (below) to set it up.", why, weight=0)
     if not _downloads_dir():
@@ -1918,7 +2037,9 @@ def check_virus_scan():
         handoff = fix("app", "open-clamui", "Open ClamUI to quarantine them") if clamui_install() else now
         return result(cid, cat, title, "fail", "%d infected file%s in Downloads (%s)." % (
             len(found), "" if len(found) == 1 else "s", feed_when(cache).replace("checked", "scanned")),
-            why + " Do not open these files. Quarantine or delete them.", clean_block(lines), handoff, weight=3)
+            why, clean_block(lines), handoff, weight=3,
+            howto="Do not open these files. Quarantine or delete them in ClamUI; if you downloaded them "
+                  "on purpose, get them again from the official site.")
     return result(cid, cat, title, "pass", "No infected files in Downloads (%s)." % (
         feed_when(cache).replace("checked", "scanned")), why, fix=now, weight=3)
 
@@ -2026,9 +2147,9 @@ BUMBLEBEE_ID = "io.github.duketopceo.bumblebee"
 @check
 def check_bumblebee():
     cid, cat, title = "bumblebee", "supply", "Known-compromised packages (Bumblebee)"
-    why = ("Attackers sometimes take over a popular npm, PyPI or other package and publish a poisoned "
-           "version. The Bumblebee plugin checks your packages, lockfiles, editor extensions and MCP configs "
-           "against a catalog of known compromises. Vigil shows its last result.")
+    why = ("Attackers sometimes take over a popular npm, PyPI or other package and publish a "
+           "poisoned version. The Bumblebee plugin checks your packages, lockfiles, editor "
+           "extensions and MCP configs against a catalog of known compromises.")
     if not exists(home_path(".config", "omarchy", "plugins", BUMBLEBEE_ID)):
         return result(cid, cat, title, "info",
                       "Not installed. Add the Bumblebee plugin to check for compromised packages.", why, weight=0)
@@ -2073,10 +2194,9 @@ def check_bumblebee():
 @check
 def check_plugins():
     cid, cat, title = "omarchy-plugins", "supply", "Other Omarchy plugins"
-    why = ("Omarchy plugins run inside the desktop shell with everything your account can reach, and they "
-           "are not sandboxed. Vigil reads each one's code, without running it, and lists what it can do. "
-           "Network access or shell commands are normal for many plugins; downloading and running code, "
-           "or shipping compiled binaries you cannot read, deserve a closer look.")
+    why = ("Omarchy plugins run inside the desktop shell with everything your account can reach, "
+           "and they are not sandboxed. Vigil reads each one's code without running it; "
+           "downloading and running code, or shipping compiled binaries, deserve a closer look.")
     base = home_path(".config", "omarchy", "plugins")
     names = [n for n in list_dir(base, 200) if not n.startswith(".") and n != PLUGIN_ID]
     budget = [8 * 1024 * 1024, time.monotonic() + 3.0]
@@ -2141,10 +2261,9 @@ CREDENTIAL_FILES = [(".aws", "credentials"), (".netrc",), (".git-credentials",),
 @check
 def check_secrets():
     cid, cat, title = "exposed-secrets", "harden", "Exposed secrets"
-    why = ("API keys and tokens typed on the command line end up in your shell history, where any program "
-           "you run can read them. Credential files should be readable only by you. If a key shows up here, "
-           "revoke it with the service that issued it, then delete the line. Vigil never shows the secret "
-           "itself, only where it is.")
+    why = ("API keys typed on the command line end up in your shell history, where any program you"
+           " run can read them, and credential files should be readable only by you. Vigil never "
+           "shows the secret itself, only where it is.")
     hits, loose = [], []
     for parts in HISTORY_FILES:
         path = home_path(*parts)
@@ -2393,16 +2512,16 @@ INTEGRITY_PEEK = {"value": False}
 @check
 def check_file_changes():
     cid, cat, title = "file-changes", "detect", "Changes to important files"
-    why = ("Vigil remembers what a set of important files looked like: accounts, login rules (PAM), SSH "
-           "settings and authorized keys, system services, and your startup files. Attackers change these "
-           "to keep access. Updates and your own edits change them too, so read the list and choose Accept "
-           "once you recognise every change.")
+    why = ("Vigil remembers what important files looked like: accounts, login rules, SSH settings,"
+           " services and startup files. Attackers change these to keep access, but so do updates "
+           "and your own edits.")
     snap = integrity_snapshot()
     base = _state_json(BASELINE_NAME)
     files = base.get("files") if isinstance(base, dict) else None
     if not isinstance(files, dict) or not files:
         if INTEGRITY_PEEK["value"]:
-            return result(cid, cat, title, "info", "No baseline yet.", why, weight=2)
+            return result(cid, cat, title, "na", "Vigil records how these files look on its next full check.",
+                          why, weight=2)
         try:
             save_baseline(snap)
         except (OSError, Refused):
@@ -2429,9 +2548,11 @@ def check_file_changes():
         n, "" if n == 1 else "s", since, (", %d of them affecting who can log in or what runs at start" % len(risky))
         if risky else "", note)
     accept = fix("helper", "integrity-accept", "Accept these changes")
+    howto = ("Read the list under Details. If you recognise every change (an update, or something you did), "
+             "press Accept. If not, ask for help before changing anything.")
     if risky:
-        return result(cid, cat, title, "warn", summary, why, clean_block(lines), accept, weight=2)
-    return result(cid, cat, title, "info", summary, why, clean_block(lines), accept, weight=0)
+        return result(cid, cat, title, "warn", summary, why, clean_block(lines), accept, weight=2, howto=howto)
+    return result(cid, cat, title, "info", summary, why, clean_block(lines), accept, weight=0, howto=howto)
 
 
 # Read-only scan of other plugins' code: what each can do. Nothing is loaded
@@ -2710,8 +2831,8 @@ def _cache_cutoff():
 @check
 def check_user_cache():
     cid, cat, title = "user-cache", "care", "Application caches"
-    why = ("Browsers and apps keep caches in ~/.cache. They rebuild themselves, so this is about disk space. "
-           "Vigil only clears files no app has used for a week, so nothing that is running is disturbed.")
+    why = ("Browsers and apps keep caches in ~/.cache and rebuild them when needed, so this is "
+           "about disk space.")
     try:
         dfd = _open_home_dir([".cache"])
     except (OSError, Refused):
@@ -2787,7 +2908,7 @@ def check_pacman_cache():
     shown = ("" if complete else "at least ") + human(size)
     free = _paccache_freeable()
     if free is None:
-        return result(cid, cat, title, "info", "%s. Could not work out how much can be freed." % shown, why,
+        return result(cid, cat, title, "unknown", "%s. Could not work out how much can be freed." % shown, why,
                       weight=0)
     if free < 1024 * 1024:
         return result(cid, cat, title, "pass", "%s, all of it kept for rollback." % shown, why, weight=0)
@@ -2843,13 +2964,16 @@ UNDO_FILES = {
     "undo-sshd": "/etc/ssh/sshd_config.d/00-omarchy-vigil.conf",
     "undo-connectivity": "/etc/NetworkManager/conf.d/90-omarchy-vigil-connectivity.conf",
     "undo-mac": "/etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf",
+    "undo-protocols": "/etc/modprobe.d/90-omarchy-vigil-protocols.conf",
+    "undo-firewire": "/etc/modprobe.d/90-omarchy-vigil-firewire.conf",
 }
 AVAHI_BACKUP = "/etc/avahi/avahi-daemon.conf.vigil-backup"
 
 CHECK_UNDO = {
     "kernel-hardening": "undo-sysctl", "network-hardening": "undo-sysctl", "llmnr": "undo-llmnr",
     "dns-fallback": "undo-dns-fallback", "ssh-server": "undo-sshd", "connectivity-check": "undo-connectivity",
-    "mac-address": "undo-mac", "avahi": "undo-avahi",
+    "mac-address": "undo-mac", "avahi": "undo-avahi", "rare-protocols": "undo-protocols",
+    "firewire": "undo-firewire",
 }
 
 
@@ -2875,13 +2999,17 @@ def undo_available(action):
     return bool(path) and vigil_owned(path)
 
 
-# Dismissing marks a warning as reviewed. Failures never can be, and neither
-# can these, which are direct evidence or a live privilege grant.
-NEVER_DISMISS = {"ld-preload", "bumblebee", "passwordless-sudo"}
+# Any finding that is not passing can be marked as reviewed: it stops counting
+# and stays reviewed through later checks. For these, which report evidence
+# (what was found, not a setting), a review covers what was found then; if
+# something new turns up, the finding comes back.
+EVIDENCE_CHECKS = {"open-ports", "persistence", "file-changes", "exposed-secrets", "malicious-packages",
+                   "virus-scan", "ld-preload", "bumblebee", "scanner-arch-audit", "aur-status",
+                   "omarchy-plugins", "aur-packages"}
 
 
 def dismissible(c):
-    return c["status"] == "warn" and c["weight"] > 0 and c["id"] not in NEVER_DISMISS
+    return c["status"] not in ("pass", "na")
 
 
 # ---------------------------------------------------------------------------
@@ -2985,8 +3113,11 @@ def state_history(state):
 
 
 def fingerprint(c):
-    h = hashlib.sha256((c["status"] + "\n" + c["summary"] + "\n" + c["detail"]).encode()).hexdigest()[:12]
-    return c["id"] + ":" + h
+    """What a review covers: the check and its status, plus what was found for evidence checks."""
+    basis = c["status"]
+    if c["id"] in EVIDENCE_CHECKS:
+        basis += "\n" + (c["detail"] or c["summary"])
+    return c["id"] + ":" + hashlib.sha256(basis.encode()).hexdigest()[:12]
 
 
 def update_state(report):
@@ -3045,7 +3176,8 @@ def set_dismissed(check_id, on):
             if not dismissible(c):
                 return {"ok": False, "action": "", "message": "This finding cannot be marked as reviewed."}
             dismissed[fingerprint(c)] = report["generatedAt"][:10]
-            msg = "Marked as reviewed. It comes back if the finding changes."
+            msg = ("Marked as reviewed. It no longer counts, and comes back only if something new is found."
+                   if c["id"] in EVIDENCE_CHECKS else "Marked as reviewed. It no longer counts.")
         else:
             dismissed = {f: a for f, a in dismissed.items() if f.split(":", 1)[0] != check_id}
             msg = "Showing it again."
@@ -3076,9 +3208,66 @@ def score_of(checks):
     return max(0, min(100, score))
 
 
+UNKNOWN_HOWTO = ("Vigil could not finish this check. Press R to check again; if it keeps happening, "
+                 "mark it as reviewed.")
+
+# For findings Vigil cannot fix itself: how to fix it, and a button that
+# helps (a read-only command in a terminal, or a maintained guide).
+CHECK_HELP = {
+    "ssh-keys": ("Make ~/.ssh a normal folder owned by you, not a link, then press R.",
+                 ("docs", "arch-ssh-keys", "Learn more")),
+    "gnupg": ("Make ~/.gnupg a normal folder owned by you, not a link, then press R.",
+              ("docs", "arch-gnupg", "Learn more")),
+    "disk-encryption": ("Encryption can only be turned on when installing: back up, then reinstall Omarchy "
+                        "with encryption on. If this machine never leaves home, mark it as reviewed.",
+                        ("docs", "arch-dm-crypt", "Learn more")),
+    "secure-boot": ("Secure Boot is set up with sbctl: make keys, enrol them in the firmware, sign the boot "
+                    "files. It is optional and a mistake can stop the machine booting, so read the guide first.",
+                    ("docs", "arch-secure-boot", "Learn more")),
+    "login-lockout": ("Add pam_faillock to the login rules, or set deny=3 in /etc/security/faillock.conf. "
+                      "The guide shows the exact lines.", ("docs", "arch-faillock", "Learn more")),
+    "open-ports": ("See which program is listening (Show listeners). Stop or uninstall what you do not "
+                   "need; the firewall keeps the rest from being reached from outside.",
+                   ("terminal", "show-listeners", "Show listeners")),
+    "persistence": ("Open each file listed under Details and remove lines you do not recognise. If you are "
+                    "not sure what a line does, ask before deleting it.", ("docs", "arch-autostart", "Learn more")),
+    "ld-preload": ("If you did not set this up, look at the file (Show file). Do not delete it blindly: get "
+                   "help first, because something may be hiding in every program.",
+                   ("terminal", "show-ld-preload", "Show file")),
+    "aur-packages": ("Keep only the ones you recognise and still use; remove the rest with "
+                     "omarchy pkg drop <name>.",
+                     ("docs", "arch-aur", "Learn more")),
+    "virus-scan": ("Install ClamUI, which sets up ClamAV; Vigil then scans Downloads every week.",
+                   ("terminal", "install-clamui", "Install ClamUI")),
+    "bumblebee": ("Install the Bumblebee plugin and let it scan; if it finds something, open it from the bar "
+                  "for the affected packages and what to do.", ("docs", "bumblebee", "Learn more")),
+    "omarchy-plugins": ("Nothing to fix. Remove plugins you do not use with omarchy plugin remove <id>.",
+                        ("terminal", "show-plugins", "List plugins")),
+    "exposed-secrets": ("Treat each key as leaked: revoke or rotate it with the service that issued it, then "
+                        "delete the line from your shell history (Edit history).",
+                        ("terminal", "edit-shell-history", "Edit history")),
+    "black-ops": ("Optional. Install Black Ops from the Omarchy plugin catalog to block telemetry.",
+                  ("docs", "black-ops", "Learn more")),
+}
+
+
+def add_help(c):
+    """Make sure every finding that is not passing says how to fix it and has a button."""
+    if c["status"] in ("pass", "na"):
+        return c
+    howto, learn = CHECK_HELP.get(c["id"], ("", None))
+    if c["fix"]["kind"] == "none" and learn and c["status"] != "unknown":
+        c["fix"] = fix(*learn)
+    if not c.get("howto"):
+        c["howto"] = UNKNOWN_HOWTO if c["status"] == "unknown" else howto
+    return c
+
+
 def tidy(c):
-    for k in ("title", "summary", "why"):
-        c[k] = clean(c[k], 400 if k == "why" else STR_MAX)
+    add_help(c)
+    c.setdefault("howto", "")
+    for k in ("title", "summary", "why", "howto"):
+        c[k] = clean(c[k], 400 if k in ("why", "howto") else STR_MAX)
     c["detail"] = clean(c["detail"], 3000) if "\n" not in c["detail"] else "\n".join(
         clean(x, STR_MAX) for x in c["detail"].splitlines()[:LIST_MAX + 1])
     return c
@@ -3121,7 +3310,8 @@ def audit(peek=False):
     for name in ("omarchy-launch-floating-terminal-with-presentation", "omarchy-setup-security-usb-authorization",
                  "omarchy-setup-security-thunderbolt-authorization", "omarchy-setup-security-fido2",
                  "omarchy-sudo-passwordless", "omarchy-remove-security-sudoless-docker", "omarchy-update",
-                 "omarchy-pkg-add", "omarchy-update-orphan-pkgs", "omarchy-toggle-idle"):
+                 "omarchy-pkg-add", "omarchy-update-orphan-pkgs", "omarchy-toggle-idle", "omarchy-shell-config",
+                 "omarchy-plugin-list", "xdg-open"):
         p = find_tool(name)
         tools[name] = p.rsplit("/", 1)[0] if p else ""
     report = {

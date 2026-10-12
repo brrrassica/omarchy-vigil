@@ -20,7 +20,10 @@ const TOOLS = {
   "omarchy-update": "/usr/bin",
   "omarchy-pkg-add": "/usr/share/omarchy/bin",
   "omarchy-update-orphan-pkgs": "/usr/bin",
-  "omarchy-toggle-idle": "/usr/bin"
+  "omarchy-toggle-idle": "/usr/bin",
+  "omarchy-shell-config": "/usr/share/omarchy/bin",
+  "omarchy-plugin-list": "/usr/share/omarchy/bin",
+  "xdg-open": "/usr/bin"
 }
 
 function check(over = {}) {
@@ -65,7 +68,7 @@ test("rejects malformed reports whole", () => {
   assert.equal(parse(report({ checks: [check({ weight: 1.5 })] })), null)
   assert.equal(parse(report({ checks: [check({ weight: Infinity })] })), null)
   assert.equal(parse(report({ checks: [check({ summary: "x".repeat(401) })] })), null)
-  assert.equal(parse(report({ checks: Array.from({ length: 81 }, (_, i) => check({ id: "c" + i })) })), null)
+  assert.equal(parse(report({ checks: Array.from({ length: 161 }, (_, i) => check({ id: "c" + i })) })), null)
   assert.equal(parse(report({ tools: { "omarchy-update": "/home/me/bin" } })), null)
   assert.equal(parse(report({ tools: { "rm": "/usr/bin" } })), null)
   assert.equal(parse(report({ new: ["not-a-check"] })), null)
@@ -249,7 +252,8 @@ test("undo, review and history fields are validated", () => {
   const warn = { status: "warn", weight: 1 }
   assert.ok(parse(report({ checks: [check(Object.assign({ dismissible: true, dismissed: true, dismissedAt: "2026-10-12" }, warn))] })))
   assert.equal(parse(report({ checks: [check(Object.assign({ dismissible: false, dismissed: true }, warn))] })), null)
-  assert.equal(parse(report({ checks: [check({ status: "fail", dismissible: true, dismissed: true })] })), null)
+  assert.ok(parse(report({ checks: [check({ status: "fail", dismissible: true, dismissed: true })] })))
+  assert.equal(parse(report({ checks: [check({ status: "pass", dismissible: true, dismissed: true })] })), null)
   assert.equal(parse(report({ checks: [check(Object.assign({ dismissible: "yes" }, warn))] })), null)
   assert.equal(parse(report({ checks: [check(Object.assign({ dismissible: true, dismissed: true, dismissedAt: "<b>" }, warn))] })), null)
 
@@ -387,4 +391,33 @@ test("clean all and the Lynis copy are fixed scripts with absolute paths", () =>
   assert.match(lynis, /sudo \/usr\/bin\/lynis audit system --quick --quiet/)
   assert.match(lynis, /sudo \/usr\/bin\/grep -E .*\/var\/log\/lynis-report\.dat > "\$HOME\/\.local\/state\/omarchy-vigil\/lynis\.dat\.new"/)
   assert.ok(M.isHelperAction("clean-user"))
+})
+
+// ---------------------------------------------------------------------------
+// Learn more pages and How to fix
+
+test("learn-more pages come only from the fixed table or a Lynis test ID", () => {
+  assert.equal(M.docsUrl("arch-secure-boot"), "https://wiki.archlinux.org/title/Unified_Extensible_Firmware_Interface/Secure_Boot")
+  assert.equal(M.docsUrl("lynis-auth-9262"), "https://cisofy.com/lynis/controls/AUTH-9262/")
+  for (const bad of ["lynis-auth-92620", "lynis-../x", "https://evil.example", "", null, "toString", "__proto__"])
+    assert.equal(M.docsUrl(bad), "", String(bad))
+  for (const url of Object.values(M.DOCS)) assert.match(url, /^https:\/\/(wiki\.archlinux\.org|github\.com)\//)
+  assert.deepEqual(M.docsCommand("lynis-auth-9262", TOOLS), ["/usr/bin/xdg-open", "https://cisofy.com/lynis/controls/AUTH-9262/"])
+  assert.deepEqual(M.docsCommand("lynis-auth-9262", {}), [])
+  const r = parse(report({ checks: [check({ status: "info", fix: { kind: "docs", action: "nope", label: "Learn more" } })] }))
+  assert.equal(r.checks[0].fix.kind, "none")
+})
+
+test("how to fix comes from the helper, or from what the fix button does", () => {
+  const r = parse(report({ checks: [
+    check({ id: "a", howto: "Do this." }),
+    check({ id: "b", fix: { kind: "terminal", action: "firewall-on", label: "Turn it on" } }),
+    check({ id: "c", status: "pass" }),
+    check({ id: "d", fix: { kind: "none", action: "", label: "" } })
+  ] }))
+  assert.equal(M.howTo(r.checks[0]), "Do this.")
+  assert.match(M.howTo(r.checks[1]), /^Press Turn it on: Runs: sudo ufw enable .* It opens a terminal and asks before changing anything\.$/)
+  assert.equal(M.howTo(r.checks[2]), "")
+  assert.equal(M.howTo(r.checks[3]), "")
+  assert.equal(parse(report({ checks: [check({ howto: 5 })] })), null)
 })

@@ -639,14 +639,20 @@ def test_full_audit_shape(v):
     report = v.audit()
     json.dumps(report)
     ids = [c["id"] for c in report["checks"]]
-    assert len(ids) == len(set(ids)) and len(ids) <= 80
+    assert len(ids) == len(set(ids)) and len(ids) <= 160
     for c in report["checks"]:
         assert re.fullmatch(r"[a-z0-9-]{1,40}", c["id"])
         assert c["category"] in ("harden", "detect", "supply", "privacy", "care")
         assert c["status"] in ("pass", "warn", "fail", "info", "na", "unknown")
-        assert c["fix"]["kind"] in ("terminal", "helper", "none")
+        assert c["fix"]["kind"] in ("terminal", "helper", "app", "docs", "none")
         assert isinstance(c["weight"], int) and 0 <= c["weight"] <= 3
-        assert len(c["summary"]) <= 240 and len(c["why"]) <= 400
+        assert len(c["summary"]) <= 240 and len(c["why"]) <= 400 and len(c["howto"]) <= 400
+        # Every open finding has a button, and can be marked as reviewed.
+        if c["status"] in ("warn", "fail", "info"):
+            assert c["fix"]["kind"] != "none", c["id"]
+        assert c["dismissible"] == (c["status"] not in ("pass", "na")), c["id"]
+        if c["status"] == "unknown":
+            assert c["howto"], c["id"]
     assert 0 <= report["score"] <= 100
 
 
@@ -805,16 +811,59 @@ def test_dismissal_lapses_when_finding_changes(v):
     assert not ports["dismissed"] and "open-ports" in report["new"]
 
 
-def test_failures_and_evidence_cannot_be_dismissed(v):
+def test_every_open_finding_can_be_reviewed(v):
     ufw(v, enabled="no", active="inactive")
     sysfile(v, "/etc/ld.so.preload", "/usr/lib/libevil.so\n")
     v.audit()
-    assert v.set_dismissed("firewall", True)["ok"] is False
-    assert v.set_dismissed("ld-preload", True)["ok"] is False
+    assert v.set_dismissed("firewall", True)["ok"] is True
+    assert v.set_dismissed("ld-preload", True)["ok"] is True
     assert v.set_dismissed("nonexistent", True)["ok"] is False
-    v.UNITS[("is-active", "systemd-resolved.service")] = "active"
     c = {c["id"]: c for c in v.audit(peek=True)["checks"]}
-    assert c["firewall"]["dismissible"] is False and c["llmnr"]["dismissible"] is True
+    assert c["firewall"]["dismissed"] and c["ld-preload"]["dismissed"]
+    assert c["ssh-server"]["dismissible"] is False          # passing: nothing to review
+
+
+def test_reviews_survive_changing_numbers_but_not_new_evidence(v):
+    put(Path(v.HOME, ".cache/app/old.bin"), "x" * 2_000_000)
+    aged(Path(v.HOME, ".cache/app/old.bin"), 10)
+    v.audit()
+    assert v.set_dismissed("user-cache", True)["ok"]
+    put(Path(v.HOME, ".cache/app/older.bin"), "x" * 3_000_000)
+    aged(Path(v.HOME, ".cache/app/older.bin"), 10)
+    assert {c["id"]: c for c in v.audit(peek=True)["checks"]}["user-cache"]["dismissed"]   # size changed
+    sysfile(v, "/etc/ld.so.preload", "/usr/lib/libevil.so\n")
+    v.audit()
+    assert v.set_dismissed("ld-preload", True)["ok"]
+    sysfile(v, "/etc/ld.so.preload", "/usr/lib/libevil.so\n/usr/lib/libworse.so\n")
+    assert not {c["id"]: c for c in v.audit(peek=True)["checks"]}["ld-preload"]["dismissed"]   # new evidence
+
+
+def test_every_finding_without_its_own_fix_has_help(v):
+    """Static guard: a check that can report warn, fail or info without a fix button must have
+    How to fix text and a Learn button in CHECK_HELP."""
+    import ast
+    src = (REPO / "bin" / "vigil").read_text()
+    tree = ast.parse(src)
+    missing = set()
+    for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+        cid = None
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Assign) and isinstance(n.value, ast.Tuple) and n.value.elts \
+                    and isinstance(n.value.elts[0], ast.Constant) and len(n.targets) == 1 \
+                    and isinstance(n.targets[0], ast.Tuple) and n.targets[0].elts[0].id == "cid":
+                cid = n.value.elts[0].value
+        for n in ast.walk(fn):
+            if not (isinstance(n, ast.Call) and getattr(n.func, "id", None) == "result" and len(n.args) > 3):
+                continue
+            st = n.args[3]
+            statuses = {st.value} if isinstance(st, ast.Constant) else {"warn", "info"}
+            has_fix = any(k.arg == "fix" for k in n.keywords) or len(n.args) > 7
+            if statuses & {"warn", "fail", "info"} and not has_fix and fn.name not in ("_lynis_check", "audit"):
+                if cid is None or cid not in v.CHECK_HELP:
+                    missing.add((fn.name, cid))
+    assert not missing, missing
+    for cid, (howto, learn) in v.CHECK_HELP.items():
+        assert howto and learn and learn[0] in ("terminal", "docs", "helper", "app"), cid
 
 
 def test_dismissed_finding_does_not_notify(v):
@@ -1427,31 +1476,67 @@ def test_parse_lynis(v):
     assert v.parse_lynis("") is None
 
 
-def test_lynis_check_lists_findings_without_scoring(v):
+CATALOG = """AUTH-9262:test:security:authentication::Checking presence password strength testing tools (PAM):
+NETW-2705:test:security:networking::Check availability two nameservers:
+KRNL-6000:test:security:kernel_hardening::Check sysctl key pairs in scan profile:
+MALW-3280:test:security:malware::Check if anti-virus tool is installed:
+PKGS-7398:test:security:ports_packages::Check for package audit tool:
+"""
+
+
+def test_lynis_catalog_names_and_pillars(v):
+    sysfile(v, "/usr/share/lynis/db/tests.db", CATALOG + "garbage line\nX:y\n")
+    cat = v.lynis_catalog()
+    assert cat["AUTH-9262"] == ("authentication", "Presence password strength testing tools (PAM)")
+    assert cat["NETW-2705"] == ("networking", "Availability two nameservers")
+    shown = {"warnings": [], "suggestions": [
+        {"id": "MALW-3280", "text": "Install an antivirus", "detail": "", "solution": ""},
+        {"id": "PKGS-7398", "text": "Install a package audit tool", "detail": "", "solution": ""},
+        {"id": "AUTH-9262", "text": "Install a PAM module", "detail": "", "solution": "Install libpwquality"},
+        {"id": "LYNIS", "text": "Lynis is old", "detail": "", "solution": ""}]}
+    rows = {r["id"]: r for r in v._lynis_rows(shown, cat)}
+    assert rows["lynis-malw-3280"]["category"] == "detect"
+    assert rows["lynis-pkgs-7398"]["category"] == "supply"
+    auth = rows["lynis-auth-9262"]
+    assert auth["category"] == "harden" and auth["status"] == "info" and auth["weight"] == 0
+    assert auth["title"] == "Presence password strength testing tools (PAM)"
+    assert auth["summary"] == "Lynis suggestion: Install a PAM module"
+    assert "Fix: Install libpwquality" in auth["detail"]
+    assert "cisofy.com/lynis/controls/AUTH-9262/" in auth["detail"]
+    assert auth["fix"] == {"kind": "docs", "action": "lynis-auth-9262", "label": "Learn more"}
+    assert auth["howto"]
+    assert rows["lynis-lynis"]["fix"]["kind"] == "none"           # no page for a test without a number
+
+
+def test_lynis_row_and_findings_in_a_full_audit(v):
     v.TRUSTED.add(v.sys_path("/usr/bin/lynis"))
+    sysfile(v, "/usr/share/lynis/db/tests.db", CATALOG)
     c = lynis_check(v)
     assert c["status"] == "info" and "Run it once" in c["summary"] and c["fix"]["action"] == "run-lynis"
     put(Path(v.HOME, ".local/state/omarchy-vigil/lynis.dat"), LYNIS_DAT, 0o600)
-    c = lynis_check(v)
-    assert c["status"] == "info" and c["weight"] == 0
-    assert c["summary"].startswith("Hardening index 64 of 100. 1 warning, 3 suggestions.")
-    assert "\u2022 Couldn't find 2 responsive nameservers (NETW-2705)" in c["detail"]
-    assert c["fix"]["label"] == "Run again"
+    checks = {c["id"]: c for c in v.audit(peek=True)["checks"]}
+    row = checks["scanner-lynis"]
+    assert row["summary"].startswith("Hardening index 64 of 100.") and row["fix"]["label"] == "Run again"
+    assert "lynis-netw-2705" in checks and "lynis-auth-9262" in checks and "lynis-boot-5122" in checks
+    assert checks["lynis-auth-9262"]["dismissible"] and checks["lynis-auth-9262"]["weight"] == 0
+    # Marking a Lynis finding as reviewed survives the next Lynis run.
+    assert v.set_dismissed("lynis-auth-9262", True)["ok"]
+    put(Path(v.HOME, ".local/state/omarchy-vigil/lynis.dat"), LYNIS_DAT.replace("64", "66"), 0o600)
+    assert {c["id"]: c for c in v.audit(peek=True)["checks"]}["lynis-auth-9262"]["dismissed"]
 
 
-def test_lynis_detail_is_capped_with_a_count(v):
+def test_lynis_rows_are_capped(v):
     lines = "".join("suggestion[]=TEST-%04d|Suggestion number %d|-|-|\n" % (i, i) for i in range(60))
-    shown, covered = v._lynis_fold(v.parse_lynis(lines), None)
-    out = v._lynis_detail(shown, covered).splitlines()
-    assert len(out) == v.LIST_MAX + 1
-    assert out[0].startswith("For any item: sudo lynis show details <ID>")
-    assert out[-1].startswith("\u2026 and 23 more.")       # 3 header lines + 37 shown of 60
+    shown, _ = v._lynis_fold(v.parse_lynis(lines), None)
+    assert len(v._lynis_rows(shown, {})) == v.LYNIS_MAX_ROWS
 
 
 LYNIS_OVERLAP = """hardening_index=70
 warning[]=FIRE-4590|No firewall found|-|-|
 suggestion[]=SSH-7408|Consider hardening SSH configuration|MaxAuthTries (6 --> 3)|-|
 suggestion[]=AUTH-9262|Install a PAM module for password strength testing|-|Install libpam-passwdqc|
+suggestion[]=NETW-3200|Determine if protocol 'dccp' is really needed on this system|-|-|
+suggestion[]=NETW-3200|Determine if protocol 'sctp' is really needed on this system|-|-|
 suggestion[]=KRNL-6000|One or more sysctl values differ from the scan profile and could be tweaked||Change sysctl value or disable test (skip-test=KRNL-6000:<sysctl-key>)|
 details[]=KRNL-6000|sysctl|desc:Disable sending of redirects;field:net.ipv4.conf.all.send_redirects;prefval:0;value:1;|
 details[]=KRNL-6000|sysctl|desc:Log martians;field:net.ipv4.conf.all.log_martians;prefval:1;value:0;|
@@ -1461,17 +1546,14 @@ details[]=SSH-7408|sshd|field:MaxAuthTries;prefval:3;value:6;|
 
 def test_lynis_leaves_out_what_vigil_checks(v):
     shown, covered = v._lynis_fold(v.parse_lynis(LYNIS_OVERLAP), {
-        "firewall": "Firewall", "network-hardening": "Network stack"})   # SSH server did not run
-    assert covered == ["Firewall", "Network stack"]
+        "firewall": "Firewall", "network-hardening": "Network stack",
+        "rare-protocols": "Rarely used network protocols"})        # SSH server did not run
+    assert covered == ["Firewall", "Rarely used network protocols", "Network stack"]
     assert shown["warnings"] == []
-    ids = [s["id"] for s in shown["suggestions"]]
-    assert ids == ["SSH-7408", "AUTH-9262", "KRNL-6000"]
+    assert [s["id"] for s in shown["suggestions"]] == ["SSH-7408", "AUTH-9262", "KRNL-6000"]
     krnl = shown["suggestions"][2]
     assert "net.ipv4.conf.all.log_martians (Lynis prefers 1, now 0)" in krnl["detail"]
     assert "send_redirects" not in krnl["detail"] and krnl["solution"] == ""
-    detail = v._lynis_detail(shown, covered)
-    assert "Left out because Vigil already checks them: Firewall, Network stack." in detail
-    assert "   Fix: Install libpam-passwdqc" in detail
 
 
 def test_lynis_sysctl_item_disappears_when_vigil_manages_every_setting(v):
@@ -1487,10 +1569,13 @@ def test_audit_folds_lynis_into_vigil_checks(v):
     checks = [v.result("firewall", "harden", "Firewall", "warn", "Off."),
               v.result("ssh-server", "harden", "SSH server", "na", "Not installed."),
               lynis_check(v)]
-    assert checks[2]["summary"].startswith("Hardening index 70 of 100. 1 warning, 3 suggestions.")
     v.fold_lynis(checks)
-    assert checks[2]["summary"].startswith("Hardening index 70 of 100. 0 warnings, 3 suggestions.")
+    ids = [c["id"] for c in checks]
+    assert "lynis-fire-4590" not in ids                       # Vigil's firewall row covers it
+    assert "lynis-ssh-7408" in ids                            # Vigil's SSH check did not run
     assert "Left out because Vigil already checks them: Firewall." in checks[2]["detail"]
+    netw = next(c for c in checks if c["id"] == "lynis-netw-3200")
+    assert netw["summary"].endswith("(and 1 more)")
 
 
 def test_lynis_copy_must_be_ours(v, tmp_path):
@@ -1501,3 +1586,30 @@ def test_lynis_copy_must_be_ours(v, tmp_path):
     os.symlink(elsewhere, state / "lynis.dat")
     c = lynis_check(v)
     assert "Run it once" in c["summary"]
+
+
+# --------------------------------------------------------------------------
+# Rarely used protocols and FireWire (Vigil's answers to Lynis NETW-3200 and STRG-1846)
+
+def test_rare_protocols(v):
+    c = v.check_rare_protocols()
+    assert c["status"] == "info" and c["fix"]["action"] == "protocols-off"
+    assert c["summary"] == "dccp, sctp, rds and tipc can still load."
+    sysfile(v, "/etc/modprobe.d/90-omarchy-vigil-protocols.conf", v.ETC_MARK + "\n" + "".join(
+        "install %s /bin/false\n" % p for p in v.RARE_PROTOCOLS))
+    assert v.check_rare_protocols()["status"] == "pass"
+    assert v.undo_available("undo-protocols")
+    sysfile(v, "/etc/modprobe.d/90-omarchy-vigil-protocols.conf", "install dccp /bin/false\n")
+    assert v.check_rare_protocols()["summary"] == "sctp, rds and tipc can still load."
+    assert not v.undo_available("undo-protocols")            # no longer Vigil's file
+
+
+def test_firewire_only_matters_with_a_port(v):
+    assert v.check_firewire()["summary"] == "This machine has no FireWire port."
+    sysfile(v, "/sys/bus/pci/devices/0000:00:1f.0/class", "0x060100\n")
+    sysfile(v, "/sys/bus/pci/devices/0000:03:00.0/class", "0x0c0010\n")
+    c = v.check_firewire()
+    assert c["status"] == "info" and c["fix"]["action"] == "firewire-off"
+    sysfile(v, "/etc/modprobe.d/90-omarchy-vigil-firewire.conf",
+            v.ETC_MARK + "\ninstall firewire-core /bin/false\n")
+    assert v.check_firewire()["status"] == "pass" and v.undo_available("undo-firewire")

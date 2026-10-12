@@ -107,7 +107,24 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.10 (this release): Clean all, Lynis in the panel
+## 0.11 (this release): every finding explains itself
+
+- [x] Every finding: **Why it matters** in one or two sentences, **How to
+      fix**, and a button: Fix, or Learn more / Show (a guide or a read-only
+      command), and Undo once Vigil changed something.
+- [x] **Mark as reviewed** on every finding that is not passing, kept
+      through later checks and Lynis runs; evidence findings come back only
+      when something new is found.
+- [x] Lynis findings are rows in the pillars (named from Lynis's own test
+      list), with Learn more and Mark as reviewed.
+- [x] New: rarely used network protocols and FireWire (with Undo), which
+      also answer Lynis NETW-3200 and STRG-1846; Add a passphrase for SSH
+      keys; screen lock reset to Omarchy's 5-minute default.
+- [x] Clean all fixed: the trash is emptied without a desktop session, the
+      package cache also drops removed packages and shows what can be freed,
+      and unused application caches are cleared.
+
+## 0.10: Clean all, Lynis in the panel
 
 - [x] **Clean all** on the Care tab (and `C`): one confirmation listing every
       cleanup on offer with its size; the no-root ones run at once, the root
