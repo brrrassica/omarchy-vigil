@@ -40,6 +40,7 @@ Panel {
   readonly property bool autoUpdate: setting("autoUpdate", true) === true
   property string feedBuffer: ""
   property bool feedOverflow: false
+  property bool feedForced: false
   // One bar per monitor means one copy of this widget per monitor. Only the
   // first screen's copy schedules audits, records findings and notifies.
   readonly property bool isPrimary: root.QsWindow.window !== null
@@ -113,13 +114,16 @@ Panel {
 
   // Runs `bin/vigil refresh-feeds` in the background; the helper refreshes
   // only the sources that are due and retries failures the next day.
-  function refreshFeeds() {
+  function refreshFeeds(force) {
     if (feedProc.running) return
     feedBuffer = ""
     feedOverflow = false
+    feedForced = force === true
     feedProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, "refresh-feeds"]
+      .concat(feedForced ? ["--force"] : [])
     feedProc.running = true
     feedDeadline.restart()
+    if (feedForced) setStatus("Updating every source and checking everything. This can take a few minutes.", false)
   }
 
   function notifyNew(count) {
@@ -339,7 +343,14 @@ Panel {
     onExited: function(exitCode, exitStatus) {
       feedKill.stop()
       feedDeadline.stop()
+      var parsed = (!root.feedOverflow && exitCode === 0) ? Model.parseFixResult(root.feedBuffer.trim()) : null
       root.feedBuffer = ""
+      // Only the button reports back; the weekly background run stays quiet.
+      if (root.feedForced) {
+        if (!parsed) root.setStatus("The update did not finish.", true)
+        else root.setStatus(parsed.message, !parsed.ok)
+      }
+      root.feedForced = false
       root.runAudit()
     }
   }
@@ -428,6 +439,7 @@ Panel {
       onTextKey: function(t) {
         if (t === "r" || t === "R") root.runAudit()
         else if (t === "f" || t === "F") root.requestFix(root.selectedCheck())
+        else if (t === "u" || t === "U") root.refreshFeeds(true)
         else if (t === "d" || t === "D") {
           var sel = root.selectedCheck()
           if (sel) root.setReviewed(sel, !sel.dismissed)
@@ -574,6 +586,31 @@ Panel {
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
             }
+            Row {
+              width: parent.width
+              spacing: Style.space(10)
+              Button {
+                id: updateAllButton
+                text: feedProc.running ? "Updating\u2026" : "Update and check everything"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                bordered: true
+                enabled: !feedProc.running
+                onClicked: root.refreshFeeds(true)
+              }
+              Text {
+                textFormat: Text.PlainText
+                anchors.verticalCenter: updateAllButton.verticalCenter
+                width: parent.width - updateAllButton.width - parent.spacing
+                text: root.report && root.report.feedsUpdated !== ""
+                  ? "Sources updated " + Model.shortDate(root.report.feedsUpdated) + ". Next update is automatic."
+                  : "Updates virus and threat sources and re-checks every pillar."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
             ScoreHistory {
               visible: root.report !== null && root.report.history.length > 0
               width: parent.width
@@ -631,7 +668,7 @@ Panel {
           Text {
             textFormat: Text.PlainText
             width: parent.width
-            text: "R check again · ← → tabs · Enter details · F fix · D reviewed · Vigil " + (root.report ? root.report.version : "")
+            text: "R check again · ← → tabs · Enter details · F fix · D reviewed · U update all · Vigil " + (root.report ? root.report.version : "")
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

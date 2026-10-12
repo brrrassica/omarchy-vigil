@@ -43,7 +43,7 @@ import sys
 import time
 from base64 import b64decode
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1330,7 +1330,7 @@ for _spec in SCANNERS:
 # press Check now. A failed refresh is retried after a day. Results are
 # cached in the state folder; checks read only the cache.
 
-FEED_FILES = {"arch-audit": "arch-audit.json", "osv": "osv.json", "aur": "aur.json"}
+FEED_FILES = {"arch-audit": "arch-audit.json", "osv": "osv.json", "aur": "aur.json", "virus-scan": "virus-scan.json"}
 FEED_DAYS = 7
 FEED_RETRY_DAYS = 1
 
@@ -1362,6 +1362,8 @@ def feed_available(name):
         return is_trusted_executable(sys_path("/usr/bin/osv-scanner")) and bool(osv_targets())
     if name == "aur":
         return is_trusted_executable(sys_path("/usr/bin/curl")) and is_trusted_executable(sys_path("/usr/bin/pacman"))
+    if name == "virus-scan":
+        return is_trusted_executable(sys_path("/usr/bin/clamscan")) and _downloads_dir() != ""
     return False
 
 
@@ -1374,6 +1376,18 @@ def feed_due(name):
     if done is not None and done < FEED_DAYS:
         return False
     return tried is None or tried >= FEED_RETRY_DAYS
+
+
+def feeds_updated():
+    """The oldest completed date among the available feeds, or ''."""
+    dates = []
+    for name in FEED_FILES:
+        if feed_available(name):
+            cache = feed_cache(name)
+            if cache is None:
+                return ""
+            dates.append(cache["at"])
+    return min(dates) if dates else ""
 
 
 def save_feed(name, body, ok=True):
@@ -1600,14 +1614,85 @@ def check_aur_status():
                   clean_block(lines), fix=refresh, weight=0)
 
 
-FEED_REFRESH = {"arch-audit": refresh_arch_audit, "osv": refresh_osv, "aur": refresh_aur}
+# Weekly virus scan: ClamAV scans ~/Downloads as you (never as root), with
+# the signatures ClamAV's own service keeps current. A detection is a match
+# against ClamAV's published signatures; potentially-unwanted-program rules
+# stay off (ClamAV's default), so adware-style guesses do not show up.
+
+def _downloads_dir():
+    p = home_path("Downloads")
+    try:
+        return p if stat.S_ISDIR(os.lstat(p).st_mode) else ""
+    except OSError:
+        return ""
 
 
-def refresh_due_feeds():
-    """Refresh every feed that is due. Used by the weekly background update."""
+def parse_clamscan(text):
+    """[{path, signature}] from `clamscan --infected --no-summary` output."""
+    found = []
+    for line in text.splitlines()[:20000]:
+        if not line.endswith(" FOUND") or ": " not in line:
+            continue
+        path, sig = line[:-len(" FOUND")].rsplit(": ", 1)
+        if re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", sig):
+            found.append({"path": clean(_shown(path), 200), "signature": sig})
+        if len(found) >= 500:
+            break
+    return found
+
+
+def refresh_virus_scan():
+    target = _downloads_dir()
+    if not target:
+        save_feed("virus-scan", {"found": [], "scanned": ""})
+        return "There is no Downloads folder to scan."
+    rc, out = run(["/usr/bin/clamscan", "--recursive", "--infected", "--no-summary", "--stdout", "--", target],
+                  timeout=3600, limit=4 * 1024 * 1024)
+    if rc not in (0, 1):
+        save_feed("virus-scan", {}, ok=False)
+        raise Refused("the virus scan did not finish (missing signatures, or it took too long)")
+    found = parse_clamscan(out) if rc == 1 else []
+    save_feed("virus-scan", {"found": found, "scanned": _shown(target)})
+    return "%d infected file%s found." % (len(found), "" if len(found) == 1 else "s")
+
+
+@check
+def check_virus_scan():
+    cid, cat, title = "virus-scan", "detect", "Weekly virus scan"
+    why = ("Once a week ClamAV scans your Downloads folder, where most harmful files arrive, using the "
+           "signatures ClamAV keeps up to date. It runs as you, in the background, and needs no password. "
+           "For other folders, scheduled scans and quarantine, use ClamUI.")
+    if not is_trusted_executable(sys_path("/usr/bin/clamscan")):
+        return result(cid, cat, title, "info", "Needs ClamAV. Install ClamUI (below) to set it up.", why, weight=0)
+    if not _downloads_dir():
+        return result(cid, cat, title, "na", "You have no ~/Downloads folder.", why, weight=0)
+    cache = feed_cache("virus-scan")
+    now = fix("helper", "virus-scan-now", "Scan now")
+    if cache is None:
+        return result(cid, cat, title, "info", "The first scan runs within a day.", why, fix=now, weight=0)
+    found = [f for f in cache.get("found", []) if isinstance(f, dict)][:500] if isinstance(cache.get("found"), list) else []
+    if found:
+        lines = ["%s: %s" % (clean(f.get("path"), 200), clean(f.get("signature"), 120)) for f in found]
+        handoff = fix("app", "open-clamui", "Open ClamUI to quarantine them") if clamui_install() else now
+        return result(cid, cat, title, "fail", "%d infected file%s in Downloads (%s)." % (
+            len(found), "" if len(found) == 1 else "s", feed_when(cache).replace("checked", "scanned")),
+            why + " Do not open these files. Quarantine or delete them.", clean_block(lines), handoff, weight=3)
+    return result(cid, cat, title, "pass", "No infected files in Downloads (%s)." % (
+        feed_when(cache).replace("checked", "scanned")), why, fix=now, weight=3)
+
+
+FEED_REFRESH = {"arch-audit": refresh_arch_audit, "osv": refresh_osv, "aur": refresh_aur,
+                "virus-scan": refresh_virus_scan}
+FEED_LABELS = {"arch-audit": "known vulnerabilities", "osv": "malicious packages", "aur": "AUR status",
+               "virus-scan": "virus scan"}
+
+
+def refresh_due_feeds(force=False):
+    """Refresh every feed that is due (the weekly background update), or every
+    available feed when `force` is set (the Update and check everything button)."""
     done, failed = [], []
     for name, fn in FEED_REFRESH.items():
-        if not feed_due(name):
+        if not (feed_available(name) if force else feed_due(name)):
             continue
         try:
             fn()
@@ -1615,10 +1700,13 @@ def refresh_due_feeds():
         except (Refused, OSError):
             failed.append(name)
     if not done and not failed:
+        if force:
+            return {"ok": True, "action": "", "message": "Nothing to update yet. Install the tools offered in the "
+                    "Detect and Supply tabs (ClamUI, arch-audit, osv-scanner) to add them to the weekly check."}
         return {"ok": True, "action": "", "message": "Everything is up to date."}
-    msg = "Updated: %s." % (", ".join(done) or "nothing")
+    msg = "Updated: %s." % (", ".join(FEED_LABELS[n] for n in done) or "nothing")
     if failed:
-        msg += " Will retry tomorrow: %s." % ", ".join(failed)
+        msg += " Could not update: %s; Vigil retries tomorrow." % ", ".join(FEED_LABELS[n] for n in failed)
     return {"ok": not failed, "action": "", "message": clean(msg)}
 
 
@@ -2629,6 +2717,7 @@ def audit(peek=False):
         "checks": checks, "tools": tools, "apps": {"clamui": clamui_install()},
         "new": [], "stateSaved": False, "history": state_history(state),
         "feedsDue": any(feed_due(n) for n in FEED_FILES),
+        "feedsUpdated": feeds_updated(),
     }
     if not peek:
         report["new"], report["stateSaved"] = update_state(report)
@@ -2827,6 +2916,7 @@ FIXES = {
     "arch-audit-refresh": lambda: refresh_arch_audit() if feed_available("arch-audit") else _missing("arch-audit"),
     "osv-refresh": lambda: refresh_osv() if feed_available("osv") else _missing("osv-scanner"),
     "aur-refresh": lambda: refresh_aur() if feed_available("aur") else _missing("pacman or curl"),
+    "virus-scan-now": lambda: refresh_virus_scan() if feed_available("virus-scan") else _missing("ClamAV"),
     "ssh-perms": fix_ssh_perms,
     "gnupg-perms": fix_gnupg_perms,
     "optout-on": fix_optout_on,
@@ -2872,13 +2962,13 @@ def main(argv):
     if len(argv) == 3 and argv[1] in ("dismiss", "undismiss") and re.fullmatch(r"[a-z0-9-]{1,40}", argv[2]):
         emit(set_dismissed(argv[2], argv[1] == "dismiss"))
         return 0
-    if len(argv) == 2 and argv[1] == "refresh-feeds":
-        emit(refresh_due_feeds())
+    if len(argv) in (2, 3) and argv[1] == "refresh-feeds" and argv[2:] in ([], ["--force"]):
+        emit(refresh_due_feeds(force=len(argv) == 3))
         return 0
     if len(argv) == 2 and argv[1] == "version":
         emit({"version": VERSION})
         return 0
-    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil refresh-feeds | vigil version\n")
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil refresh-feeds [--force] | vigil version\n")
     return 2
 
 

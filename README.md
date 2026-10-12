@@ -26,7 +26,7 @@ root runs in a terminal you can watch.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.5.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.6.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -51,6 +51,7 @@ you ask.
 | `↑` `↓`, `Enter` | Move through findings, open one |
 | `F` | Fix the selected finding (asks first) |
 | `D` | Mark the selected warning as reviewed, or show it again |
+| `U` | Update and check everything now |
 | `R` | Check again |
 | `Esc` | Cancel a confirmation, or close |
 
@@ -59,6 +60,25 @@ login. It turns red when something needs fixing and a softer red when only
 improvements are left. The **Overview** tab shows a score out of 100, a bar
 for each of the last 30 days, how each pillar is doing, and the findings to
 fix first.
+
+### When Vigil runs what
+
+| What | When |
+|---|---|
+| Every check in every pillar (reading local settings) | every 30 minutes, and whenever you open the panel; offline, under a second |
+| Known vulnerabilities, malicious packages, AUR status | once a week |
+| Virus scan of `~/Downloads` (ClamAV, as you) | once a week |
+| ClamAV virus signatures | continuously, by ClamAV's own update service |
+| Bumblebee's catalog and scan | by the Bumblebee plugin |
+| Rootkit Hunter, Lynis | only when you run them; they need your password |
+| Cleaning (Care) | only when you ask; Vigil only measures sizes by itself |
+
+**Update and check everything** on the Overview (or `U`) runs all the
+weekly work at once: refreshes every source and runs the virus scan, then
+checks every pillar again. It needs no password. ClamAV's signatures are not
+part of it because they already update by themselves (and doing it by hand
+needs root); Rootkit Hunter and Lynis stay in the terminal for the same
+reason. Turning off `autoUpdate` leaves the weekly work to this button.
 
 ### Reviewed warnings
 
@@ -96,7 +116,7 @@ settings:
 |---|---|---|
 | `refreshMinutes` | `30` | How often to check in the background (5 to 1440). |
 | `notifyOnNew` | `true` | One desktop notification when a check that was fine starts failing. It only says how many. |
-| `autoUpdate` | `true` | Refresh the maintained sources once a week (see [Where the data comes from](#where-the-data-comes-from)). Off means only when you press **Check now**. |
+| `autoUpdate` | `true` | The weekly work: refresh the maintained sources (see [Where the data comes from](#where-the-data-comes-from)) and scan `~/Downloads` for viruses. Off means only with **Update and check everything**. |
 
 ## What Vigil checks
 
@@ -135,6 +155,7 @@ score; checks with weight 0 are information and never lower it.
 | Startup files | Reads shell startup files, autostart entries, user services and timers, uwsm and environment.d files, Hyprland config and your crontab, and flags lines that download and run code, decode hidden code, or open reverse shells. These are leads to read, not proof. |
 | System-wide preload | Fails if `/etc/ld.so.preload` loads anything; rootkits use it to hide. |
 | Changes to important files | Records a fingerprint of accounts, PAM, SSH settings, `~/.ssh/authorized_keys`, system and user services, autostart entries and your startup files, and lists anything changed, added or removed since. Changes that match exactly what a package update shipped (from pacman's own records) are not reported, nor are system users that packages add. Changes to who can log in or what runs at start are warnings; changes to your own shell files are information. **Accept these changes** records the current state as the new normal. |
+| Weekly virus scan | ClamAV scans `~/Downloads` once a week, as you, with signatures ClamAV keeps current. Infected files are listed with **Open ClamUI** to quarantine them. Only ClamAV's published signatures count; its guess-based "potentially unwanted" rules stay off. |
 | ClamUI | Vigil hands virus scanning to [ClamUI](https://github.com/linx-systems/clamui): file and folder scans, scheduled scans, USB drive scans and quarantine. When it is installed, **Open ClamUI** starts it; otherwise Vigil offers to install it from Flathub. |
 | ClamAV virus engine | Whether ClamAV is installed and its signatures keep themselves up to date. Vigil turns on ClamAV's own update service (`clamav-freshclam`) when it installs ClamAV or ClamUI, and offers to if it is off. Quick scan of `~/Downloads` in a terminal. |
 | Rootkit Hunter | Installs rkhunter, records a baseline, and runs `rkhunter --check` after updating its data files from its maintainers. |
@@ -240,6 +261,7 @@ service (ClamAV's servers), rkhunter's data update, and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/arch-audit.json` | the helper, mode 0600 | weekly and on Check now: package names and severities an update fixes |
 | `~/.local/state/omarchy-vigil/osv.json` | the helper, mode 0600 | weekly and on Check now: known-malicious packages found, if any, and which folders were checked |
 | `~/.local/state/omarchy-vigil/aur.json` | the helper, mode 0600 | weekly and on Check now: names of AUR packages that left the AUR or have no maintainer |
+| `~/.local/state/omarchy-vigil/virus-scan.json` | the helper, mode 0600 | weekly and on Scan now: names of infected files found in Downloads, if any |
 | `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` | the helper | only when you set the opt-out variables |
 | `/etc/sysctl.d/90-omarchy-vigil.conf` | terminal action | only when you apply the kernel settings |
 | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf` | terminal action | only when you turn LLMNR off |

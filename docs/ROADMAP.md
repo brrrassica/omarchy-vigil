@@ -81,7 +81,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       `/etc/sudoers.d` is root-only, so it cannot be watched without root.
 - [x] Read-only capability audit of other Omarchy plugins.
 
-## Phase 4.5 (0.5, this release): maintained sources, no false alarms
+## Phase 4.5 (0.5): maintained sources, no false alarms
 
 - [x] Removed the hand-kept list (`data/known-bad.json`) and the malware
       process-name check, which had no maintained source.
@@ -106,6 +106,15 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       formats only. Bumblebee staleness, plugin capabilities and AUR status
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
+
+## 0.6 (this release): one schedule, one button
+
+- [x] Weekly virus scan of `~/Downloads` with ClamAV, as the user, in the
+      same weekly cycle as the sources; infected files hand off to ClamUI.
+- [x] **Update and check everything** button (and `U`): refreshes every
+      available source and runs the virus scan now, then re-checks every
+      pillar. Reports back; the weekly run stays quiet.
+- [x] "When Vigil runs what" table in the README.
 
 ## Phase 5: privacy and recovery
 

@@ -292,3 +292,10 @@ test("feedsDue is a strict boolean", () => {
   assert.equal(parse(report({ feedsDue: true })).feedsDue, true)
   assert.equal(parse(report({ feedsDue: "yes" })), null)
 })
+
+test("feedsUpdated is a date or empty", () => {
+  assert.equal(parse(report()).feedsUpdated, "")
+  assert.equal(parse(report({ feedsUpdated: "2026-10-12" })).feedsUpdated, "2026-10-12")
+  assert.equal(parse(report({ feedsUpdated: "<b>soon</b>" })), null)
+  assert.ok(M.confirmation("helper", "virus-scan-now"))
+})

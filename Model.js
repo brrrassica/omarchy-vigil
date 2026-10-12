@@ -52,7 +52,8 @@ function inList(v, list) {
 // the report only names an action id, and an unknown id does nothing.
 
 var HELPER_ACTIONS = ["ssh-perms", "gnupg-perms", "optout-on", "optout-off", "clean-thumbnails", "empty-trash",
-                      "credential-perms", "integrity-accept", "arch-audit-refresh", "osv-refresh", "aur-refresh"]
+                      "credential-perms", "integrity-accept", "arch-audit-refresh", "osv-refresh", "aur-refresh",
+                      "virus-scan-now"]
 
 // What the confirmation card says before a helper action runs.
 var HELPER_INFO = {
@@ -81,6 +82,9 @@ var HELPER_INFO = {
                    what: ["Runs osv-scanner on your AUR build folders and global npm and Bun installs.",
                           "It sends package names and versions (never your files) to OSV.dev, run by Google.",
                           "Vigil also does this once a week by itself."] },
+  "virus-scan-now": { title: "Scan Downloads for viruses now",
+                      what: ["Runs ClamAV on ~/Downloads as you, in the background. Nothing is deleted.",
+                             "Large folders can take a few minutes. Vigil also does this once a week."] },
   "aur-refresh": { title: "Check your AUR packages now",
                    what: ["Asks aur.archlinux.org about the AUR packages you have installed, the same lookup",
                           "yay and paru make on every update. Vigil also does this once a week by itself."] }
@@ -561,8 +565,14 @@ function parseReport(text) {
   var history = parseHistory(d.history)
   if (!history) return null
   if (d.feedsDue !== undefined && typeof d.feedsDue !== "boolean") return null
+  var feedsUpdated = ""
+  if (d.feedsUpdated !== undefined && d.feedsUpdated !== "") {
+    if (!isString(d.feedsUpdated, 10) || !/^\d{4}-\d{2}-\d{2}$/.test(d.feedsUpdated)) return null
+    feedsUpdated = d.feedsUpdated
+  }
   return {
     feedsDue: d.feedsDue === true,
+    feedsUpdated: feedsUpdated,
     history: history,
     version: plain(d.version, 20), generatedAt: plain(d.generatedAt, 40),
     score: Math.round(d.score), level: d.level, checks: checks, tools: tools, apps: apps, fresh: fresh

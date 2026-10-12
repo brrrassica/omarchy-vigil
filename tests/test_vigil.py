@@ -1051,7 +1051,7 @@ def test_feed_due_and_retry(v):
     v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
     assert v.feed_due("arch-audit") is True
     res = v.refresh_due_feeds()                           # fake run fails: (None, "")
-    assert res["ok"] is False and "retry tomorrow" in res["message"]
+    assert res["ok"] is False and "retries tomorrow" in res["message"]
     assert v.feed_due("arch-audit") is False              # tried today, waits a day
     p = Path(v.HOME, ".local/state/omarchy-vigil/arch-audit.json")
     meta = json.loads(p.read_text())
@@ -1151,3 +1151,83 @@ def test_aur_refresh_failure_is_retried(v):
     v.COMMANDS[("/usr/bin/pacman", "-Qmq")] = (0, "yay\n")
     assert v.run_fix("aur-refresh")["ok"] is False        # curl fake returns nothing
     assert v.check_aur_status()["status"] == "info" and v.feed_due("aur") is False
+
+
+# --------------------------------------------------------------------------
+# Weekly virus scan and the Update and check everything button
+
+def scan_argv(v):
+    return ("/usr/bin/clamscan", "--recursive", "--infected", "--no-summary", "--stdout", "--",
+            os.path.join(v.HOME, "Downloads"))
+
+
+def test_clamscan_parse():
+    mod = load_vigil()
+    mod.HOME = "/home/alice"
+    out = ("/home/alice/Downloads/invoice.pdf.exe: Win.Trojan.Agent-123 FOUND\n"
+           "/home/alice/Downloads/odd: name: with colons.zip: Eicar-Signature FOUND\n"
+           "/home/alice/Downloads/<b>x</b>: Bad sig with spaces FOUND\n"
+           "some warning line\n")
+    got = mod.parse_clamscan(out)
+    assert got == [{"path": "~/Downloads/invoice.pdf.exe", "signature": "Win.Trojan.Agent-123"},
+                   {"path": "~/Downloads/odd: name: with colons.zip", "signature": "Eicar-Signature"}]
+
+
+def test_virus_scan_states(v):
+    assert v.check_virus_scan()["status"] == "info"                       # no ClamAV
+    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
+    assert v.check_virus_scan()["status"] == "na"                         # no Downloads
+    os.makedirs(os.path.join(v.HOME, "Downloads"))
+    c = v.check_virus_scan()
+    assert c["status"] == "info" and c["fix"]["action"] == "virus-scan-now"
+    v.COMMANDS[scan_argv(v)] = (1, os.path.join(v.HOME, "Downloads/x.exe") + ": Win.Test.EICAR_HDB-1 FOUND\n")
+    assert v.run_fix("virus-scan-now")["ok"]
+    c = v.check_virus_scan()
+    assert c["status"] == "fail" and "~/Downloads/x.exe: Win.Test.EICAR_HDB-1" in c["detail"]
+    v.TRUSTED.add(v.ROOT + "/usr/bin/clamui")
+    assert v.check_virus_scan()["fix"]["kind"] == "app"                   # hand off quarantine to ClamUI
+    v.COMMANDS[scan_argv(v)] = (0, "")
+    v.run_fix("virus-scan-now")
+    assert v.check_virus_scan()["status"] == "pass"
+
+
+def test_virus_scan_error_is_not_a_clean_result(v):
+    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
+    os.makedirs(os.path.join(v.HOME, "Downloads"))
+    v.COMMANDS[scan_argv(v)] = (2, "LibClamAV Error: cli_loaddbdir(): No supported database files found\n")
+    assert v.run_fix("virus-scan-now")["ok"] is False
+    assert v.check_virus_scan()["status"] == "info"                       # still "first scan pending"
+
+
+def test_force_refresh_runs_everything_available(v):
+    v.TRUSTED |= {v.ROOT + "/usr/bin/arch-audit", v.ROOT + "/usr/bin/clamscan"}
+    os.makedirs(os.path.join(v.HOME, "Downloads"))
+    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
+    v.COMMANDS[scan_argv(v)] = (0, "")
+    assert v.refresh_due_feeds()["ok"]                                    # first run: both due
+    assert v.refresh_due_feeds()["message"] == "Everything is up to date."
+    res = v.refresh_due_feeds(force=True)                                 # the button ignores "due"
+    assert res["ok"] and "known vulnerabilities" in res["message"] and "virus scan" in res["message"]
+
+
+def test_force_refresh_with_nothing_installed_says_how_to_start(v):
+    res = v.refresh_due_feeds(force=True)
+    assert res["ok"] and "Install the tools" in res["message"]
+
+
+def test_feeds_updated_is_oldest_completed_source(v):
+    assert v.feeds_updated() == ""
+    v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
+    assert v.feeds_updated() == ""                                        # available but never completed
+    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
+    v.run_fix("arch-audit-refresh")
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", v.feeds_updated())
+    assert v.audit(peek=True)["feedsUpdated"] == v.feeds_updated()
+
+
+def test_cli_refresh_feeds_arguments():
+    import subprocess
+    vigil = str(REPO / "bin" / "vigil")
+    for args in (["refresh-feeds", "--all"], ["refresh-feeds", "--force", "x"]):
+        p = subprocess.run(["/usr/bin/python3", "-I", "-S", vigil] + args, capture_output=True, timeout=30)
+        assert p.returncode == 2, args

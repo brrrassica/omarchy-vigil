@@ -140,6 +140,10 @@ by itself, and only once the relevant tool is installed:
   =https --max-time 30 --max-filesize 4194304 -- <url>` to a fixed host,
   with package names checked against a strict pattern and percent-encoded.
   `tests/test_marketplace_rules.py` fails if any other network call appears.
+- The weekly virus scan runs `/usr/bin/clamscan --recursive --infected
+  --no-summary --stdout -- ~/Downloads` as you, never as root. File names in
+  its output are chosen by whoever named the file, so they are cleaned,
+  capped and shown as plain text, and never reach a command or notification.
 - Results are parsed with byte caps and strict patterns, and only names,
   severities, IDs and counts are kept. A failed refresh keeps the last good
   result and retries after a day, so an offline machine is not hammered.
