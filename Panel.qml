@@ -12,9 +12,9 @@ import "Model.js" as Model
 // All the checking is done by bin/vigil, run as an argv array with a cleared
 // environment. Its stdout is read in raw chunks with a hard size limit and
 // validated by Model.parseReport before anything is shown. Nothing here
-// builds a shell string from data: helper actions are fixed ids, and
-// terminal actions are constant scripts in Model.js shown to you, in a
-// visible terminal, before they run.
+// builds a shell string from data: helper actions are fixed ids, and every
+// other action is a constant script from Model.js, shown in full on the
+// confirmation card before it runs.
 Panel {
   id: root
   moduleName: "keasbeexd.vigil"
@@ -97,7 +97,9 @@ Panel {
   property string expandedId: ""
   property string pendingKind: ""
   property string pendingAction: ""
-  readonly property var pending: pendingAction === "" ? null : Model.confirmation(pendingKind, pendingAction, report)
+  readonly property string homeDir: Quickshell.env("HOME") || ""
+  readonly property var pending: pendingAction === "" ? null
+    : Model.confirmation(pendingKind, pendingAction, report, homeDir)
   readonly property var cleanPlan: Model.cleanAllPlan(report)
 
   readonly property var visibleChecks: tab === "overview" ? [] : Model.checksFor(report, tab)
@@ -305,7 +307,7 @@ Panel {
   // print is shown on the result card afterwards.
   function startAction(id) {
     if (actionProc.running) return
-    var steps = Model.actionPlan(id, report.tools, Quickshell.env("HOME") || "")
+    var steps = Model.actionPlan(id, report.tools, root.homeDir)
     if (steps.length === 0) { setStatus("This action is not available on this system.", true); return }
     var a = Model.terminalAction(id)
     actionSteps = steps
@@ -884,6 +886,51 @@ Panel {
                   foreground: root.foreground
                   fontFamily: root.fontFamily
                   onClicked: root.cancelPending()
+                }
+              }
+              // Exactly what Run starts, every root step in full: the program
+              // with its options, then the script as it is passed. Constants
+              // from Model.js, so nothing here is stripped or shortened.
+              Column {
+                visible: root.pending !== null && root.pending.commands.length > 0
+                width: parent.width
+                topPadding: Style.space(6)
+                spacing: Style.space(4)
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  text: "EXACT COMMANDS"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  font.letterSpacing: 1
+                }
+                Repeater {
+                  model: root.pending ? root.pending.commands : []
+                  delegate: Column {
+                    required property var modelData
+                    width: confirmColumn.width
+                    spacing: Style.space(2)
+                    Text {
+                      textFormat: Text.PlainText
+                      width: parent.width
+                      text: String(modelData.who)
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      wrapMode: Text.WordWrap
+                    }
+                    Text {
+                      textFormat: Text.PlainText
+                      width: parent.width
+                      text: String(modelData.text)
+                      color: root.dim
+                      font.family: "monospace"
+                      font.pixelSize: Style.font.caption
+                      wrapMode: Text.WrapAnywhere
+                    }
+                  }
                 }
               }
             }

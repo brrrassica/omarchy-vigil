@@ -10,9 +10,18 @@ with a cleared environment, and reads exactly one JSON object from stdout.
 
 Rules this file keeps (they follow the marketplace review guidance):
 
-- It never asks for root. Everything it reads is readable by the logged-in
-  account; anything that needs root is done by Omarchy's own commands or by a
-  constant command the user watches run in a terminal (see Panel.qml).
+- It runs as you, and never runs a file from the plugin folder as root. Its
+  only root steps are two constant pkexec commands, started only by a run
+  button you pressed, never in the background: the ClamAV signatures and
+  Bumblebee update (root_updates_argv; Run update check, Run all) and the
+  password check (NO_PASSWORD_ARGV; Run all). The panel shows both in full on
+  the confirmation card first. Every other root step is a constant script
+  from Model.js that the panel runs the same way.
+- Its network use is the checks' own tools (arch-audit, osv-scanner,
+  checkupdates, flatpak, fwupdmgr) and two curl calls to fixed addresses (the
+  AUR and Perplexity's Bumblebee lists). Nothing it downloads is ever run.
+- If the plugin is removed while a scan or update runs, it stops within
+  seconds (plugin_removed), so removal leaves nothing running.
 - Every child process is an absolute path, runs in its own session with a
   minimal environment, has a hard deadline, and has its output capped at the
   producer (cap + 1 bytes, overflow is an error, not a truncation).
@@ -24,7 +33,7 @@ Rules this file keeps (they follow the marketplace review guidance):
 - Output strings are control-character-free and length-capped; counts are
   capped. The QML side applies the same limits again.
 
-Standard library only. No network access of any kind.
+Standard library only.
 """
 import errno
 import fcntl
@@ -46,7 +55,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta, timezone
 
-VERSION = "0.28.3"
+VERSION = "0.29.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -70,6 +79,10 @@ STATE_NAME = "state.json"
 BASELINE_NAME = "baseline.json"
 STATE_FILE_MAX = 256 * 1024
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# This file, by the path the panel started it with (a development install's
+# link included). Removing the plugin deletes it; see plugin_removed().
+SELF = os.path.abspath(__file__)
+REMOVED_LOOK_SECONDS = 5
 OPT_OUT_DIR = (".config", "uwsm", "env.d")
 OPT_OUT_NAME = "90-omarchy-vigil-opt-out"
 
@@ -285,6 +298,13 @@ def _kill_group(proc):
             continue
 
 
+def plugin_removed():
+    """True once this helper's own file is gone, which is what removing the
+    plugin does. A scan or update that is running then stops within seconds,
+    instead of running on to its deadline with no panel left to stop it."""
+    return not os.path.exists(SELF)
+
+
 def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False, env=None):
     """Run an absolute argv; return (returncode, stdout_text) or (None, '').
 
@@ -292,6 +312,8 @@ def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False, env=N
     byte budget, stderr discarded. Overflow and timeout both return None.
     With `on_line`, each output line is handed to it as it arrives and only
     the lines it returns True for are kept (and counted against `limit`).
+    During a scan or update (the run lock is held), it also looks every few
+    seconds whether the plugin was removed, and if so stops the program.
     """
     if not argv or not argv[0].startswith("/") or STOP["on"]:
         return None, b"" if raw else ""
@@ -315,14 +337,23 @@ def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False, env=N
     buf = bytearray()
     pending = b""
     deadline = time.monotonic() + timeout
+    look = 0.0
     ok = False
     sel = selectors.DefaultSelector()
     try:
         sel.register(proc.stdout, selectors.EVENT_READ)
         while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not sel.select(remaining):
+            now = time.monotonic()
+            remaining = deadline - now
+            if remaining <= 0:
                 break
+            if RUN_LOCK["fd"] is not None and now >= look:
+                look = now + REMOVED_LOOK_SECONDS
+                if plugin_removed():
+                    STOP["on"] = True
+                    break
+            if not sel.select(min(remaining, REMOVED_LOOK_SECONDS)):
+                continue
             chunk = os.read(proc.stdout.fileno(), 65536)
             if not chunk:
                 if on_line is not None and pending:
@@ -2473,7 +2504,8 @@ def check_virus_scan():
     cache = feed_cache("virus-scan")
     now = fix("helper", "virus-scan-now", "Scan now")
     if cache is None:
-        return result(cid, cat, title, "info", "The first scan runs within a day.", why, fix=now, weight=0)
+        return result(cid, cat, title, "info", "The first scan runs within a day.", why, fix=now, weight=0,
+                      howto="Press Scan now to scan your home folder now, or wait for the next weekly check.")
     found = current_detections()
     ignored = ignored_detections()
     items, live = [], []
@@ -3181,6 +3213,8 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
     PROGRESS["spans"] = spans
     done, failed, why, timed_out, notes = [], [], {}, [], []
     for i, name in enumerate(steps, 1):
+        if not STOP["on"] and plugin_removed():
+            STOP["on"] = True                        # the plugin was removed: start nothing more
         if STOP["on"]:
             break
         if name == "root-updates":
@@ -3390,21 +3424,27 @@ def _lexists(path):
 
 def clamui_schedule():
     """ClamUI's own scheduled scan, if its timer is on: (when, inside_home).
-    inside_home is None when ClamUI's settings cannot be read."""
+    inside_home is None when ClamUI's settings cannot be read. The Arch and
+    Flatpak ClamUI share one timer, so it is inside your home folder only when
+    every schedule switched on in either is, and neither settings file is a
+    link or unreadable: the same rule the hand-over script applies."""
     if not _lexists(home_path(*CLAMUI_TIMER_WANTS)):
         return None
-    settings = None
+    enabled, unreadable = [], False
     for parts in CLAMUI_SETTINGS:
         try:
             raw = read_file(home_path(*parts), 1024 * 1024)
             data = json.loads(raw.decode("utf-8", "replace")) if raw else None
         except (Refused, ValueError):
-            data = None
-        if isinstance(data, dict) and data.get("scheduled_scans_enabled") is True:
-            settings = data
-            break
-    if settings is None:
+            unreadable = True
+            continue
+        if data is not None and not isinstance(data, dict):
+            unreadable = True
+        elif isinstance(data, dict) and data.get("scheduled_scans_enabled") is True:
+            enabled.append(data)
+    if not enabled:
         return ("on a schedule", None)
+    settings = enabled[0]
     freq = settings.get("schedule_frequency")
     at = settings.get("schedule_time") if isinstance(settings.get("schedule_time"), str) \
         and re.fullmatch(r"\d{2}:\d{2}", settings["schedule_time"]) else ""
@@ -3414,21 +3454,24 @@ def clamui_schedule():
         when = "every " + _WEEKDAYS[day]
     if at:
         when += " at " + at
-    targets = settings.get("schedule_targets")
-    if not isinstance(targets, list) or not targets or len(targets) > 100:
+    if unreadable:
         return (when, None)
     home = os.path.normpath(HOME)
     inside = True
-    for t in targets:
-        if not isinstance(t, str) or not t or "\x00" in t:
+    for one in enabled:
+        targets = one.get("schedule_targets")
+        if not isinstance(targets, list) or not targets or len(targets) > 100:
             return (when, None)
-        if t == "~" or t.startswith("~/"):
-            t = HOME + t[1:]
-        if not t.startswith("/"):
-            return (when, None)                       # "~other" or relative: not something to guess at
-        path = os.path.normpath(t)
-        if not (path == home or path.startswith(home + "/")):
-            inside = False
+        for t in targets:
+            if not isinstance(t, str) or not t or "\x00" in t:
+                return (when, None)
+            if t == "~" or t.startswith("~/"):
+                t = HOME + t[1:]
+            if not t.startswith("/"):
+                return (when, None)                   # "~other" or relative: not something to guess at
+            path = os.path.normpath(t)
+            if not (path == home or path.startswith(home + "/")):
+                inside = False
     return (when, inside)
 
 
@@ -3451,9 +3494,18 @@ def plugin_enabled(pid):
 
 
 def handover_marks():
-    """The changes an earlier hand-over made, from its marker files."""
+    """The changes an earlier hand-over made, from its marker files. Only
+    regular files count, as in Undo's script: a link planted at a marker's
+    name is not a record of anything Vigil did."""
     base = home_path(*STATE_DIR, HANDOVER_DIR)
-    return [m for m in HANDOVER_MARKS if _lexists(os.path.join(base, m))]
+    out = []
+    for m in HANDOVER_MARKS:
+        try:
+            if stat.S_ISREG(os.lstat(os.path.join(base, m)).st_mode):
+                out.append(m)
+        except OSError:
+            pass
+    return out
 
 
 @check
@@ -3485,7 +3537,7 @@ def check_other_schedules():
             clean_block(twice + kept), fix=fix("terminal", "hand-over-schedules", "Let Vigil run them"),
             weight=0, undo=undo,
             howto="Press Let Vigil run them: Vigil turns off the other schedules listed above, the same way "
-                  "you would in each app. Your scans still run, once, on Vigil's weekly schedule.")
+                  "you would in each app. Your scans still run, once, on Vigil's own schedule.")
     return result(cid, cat, title, "pass", "No scan runs twice.", why, clean_block(kept), weight=0, undo=undo)
 
 
@@ -4642,7 +4694,8 @@ CHECK_HELP = {
                      ("docs", "arch-flatpak", "Learn more")),
     "firmware": ("The weekly check looks for firmware updates. The Arch Wiki explains fwupd and LVFS.",
                  ("docs", "arch-fwupd", "Learn more")),
-    "virus-scan": ("Install ClamUI, which sets up ClamAV; Vigil then scans Downloads every week.",
+    "virus-scan": ("Install ClamUI, which sets up ClamAV; Vigil then scans your home folder in each weekly "
+                   "check and what is new in Downloads every day.",
                    ("terminal", "install-clamui", "Install ClamUI")),
     "bumblebee": ("Bumblebee runs with the daily check. Perplexity explains what it checks and how its list "
                   "is kept.", ("docs", "bumblebee", "Learn more")),
@@ -4719,7 +4772,7 @@ def audit(peek=False):
                  "omarchy-remove-security-fingerprint",
                  "omarchy-sudo-passwordless", "omarchy-remove-security-sudoless-docker", "omarchy-update",
                  "omarchy-pkg-add", "omarchy-update-orphan-pkgs", "omarchy-toggle-idle", "omarchy-shell-config",
-                 "omarchy-plugin-list", "xdg-open", "pkexec"):
+                 "omarchy-plugin-list", "omarchy-plugin-disable", "omarchy-plugin-enable", "xdg-open", "pkexec"):
         p = find_tool(name)
         tools[name] = p.rsplit("/", 1)[0] if p else ""
     running = run_in_progress()

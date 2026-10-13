@@ -28,7 +28,7 @@ needs root then asks for your password, and the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.28.3.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.29.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -230,7 +230,7 @@ lower it. A warning you mark as reviewed stops counting.
 | System-wide preload | Fails if `/etc/ld.so.preload` loads anything; rootkits use it to hide. |
 | Changes to important files | Records a fingerprint of accounts, PAM, SSH settings, `~/.ssh/authorized_keys`, system and user services, autostart entries and your startup files, and lists anything changed, added or removed since. Changes that match exactly what a package update shipped (from pacman's own records) are not reported, nor are system users that packages add. Changes to who can log in or what runs at start are warnings; changes to your own shell files are information. **Accept these changes** records the current state as the new normal. |
 | Virus scan | ClamAV scans your home folder in each weekly check, and every day what is new in Downloads, as you, with signatures ClamAV keeps current. Infected files are listed with **Open ClamUI** to quarantine them. If ClamAV is wrong about a file you know is safe (a game's DLL, say), press **False positive** next to it: Vigil records that exact file's SHA-256 and stops counting it, and reports it again if the file ever changes. **Not a false positive** counts it again. Only ClamAV's published signatures count; its guess-based "potentially unwanted" rules stay off. |
-| Scans scheduled twice | Finds other apps that repeat what Vigil already runs: a scheduled scan in ClamUI whose folders are all inside your home folder, and the older Bumblebee plugin (once Vigil runs Bumblebee itself). **Let Vigil run them** turns those off the way you would in each app: ClamUI's timer and its own Scheduled scans setting, and `omarchy plugin disable` for the plugin. Undo turns back on exactly what it turned off. A ClamUI schedule that also covers folders outside your home folder, and the Security Scan plugin (it runs AUR-Malware, which Vigil does not), are listed but left on. Nothing is offered when Vigil's background checks are off. |
+| Scans scheduled twice | Finds other apps that repeat what Vigil already runs: a scheduled scan in ClamUI whose folders are all inside your home folder, and the older Bumblebee plugin (once Vigil runs Bumblebee itself). **Let Vigil run them** turns those off the way you would in each app: ClamUI's timer and its own Scheduled scans setting, and `omarchy plugin disable` for the plugin. Undo turns back on exactly what it turned off. A ClamUI schedule that also covers folders outside your home folder (Arch or Flatpak ClamUI: they share one timer, so ClamUI is then left alone entirely), and the Security Scan plugin (it runs AUR-Malware, which Vigil does not), are listed but left on. Nothing is offered when Vigil's background checks are off. |
 | ClamUI | Vigil hands virus scanning to [ClamUI](https://github.com/linx-systems/clamui): file and folder scans, scheduled scans, USB drive scans and quarantine. When it is installed, **Open ClamUI** starts it; otherwise Vigil installs it from the Arch repositories (`clamui`), so the Omarchy update keeps it current, and it uses the system's ClamAV. A ClamUI you installed from Flathub keeps working. |
 | ClamAV virus engine | Whether ClamAV is installed and its signatures keep themselves up to date. Vigil turns on ClamAV's own update service (`clamav-freshclam`) when it installs ClamAV or ClamUI, and offers to if it is off. |
 
@@ -314,7 +314,8 @@ The panel always says which kind an action is:
    from the report reaches it.
 3. **Script actions** run one of the constant scripts in
    [`Model.js`](Model.js) without a terminal. The panel first shows what it
-   will do, in plain words and then the exact commands, and waits for
+   will do in plain words, with the exact commands under the **Run** button
+   (every step that runs as root in full, as it will run), and waits for
    **Run**. Scripts that need root run through `pkexec`, so Omarchy's own
    password dialog asks; cancelling it changes nothing. The panel then shows
    what the script printed. Only tools that ask you questions as they go
@@ -329,8 +330,8 @@ The panel always says which kind an action is:
    no shell. Pages come only from a fixed list in `Model.js` (Arch Wiki,
    MITRE ATT&CK, Perplexity's Bumblebee, Black Ops); nothing in the report becomes a URL.
    They change nothing, so they do not ask first.
-5. **Mark as reviewed** and **Show again** only change Vigil's own state
-   file, so they do not ask first either.
+5. **Mark as reviewed**, **Show again** and **Not a false positive** only
+   change Vigil's own state file, so they do not ask first either.
 
 Vigil never runs a file from its own folder as root (root only ever runs
 `/usr/bin/bash` with one of the fixed scripts, after your password), never
@@ -439,7 +440,7 @@ servers), Flatpak and firmware updates, and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/ignored-detections.json` | the helper, mode 0600 | when you mark a virus detection as a false positive: the file's path, the signature name and the file's SHA-256 |
 | `~/.local/state/omarchy-vigil/busy/` | the helper, mode 0700, empty | once: the folder Vigil locks so only one scan or update runs at a time |
 | `~/.local/state/omarchy-vigil/last-run.json` | the helper, mode 0600 | after each daily or update check: its date, time and whether every source updated |
-| `/usr/local/bin/bumblebee` | the Install button, as root | only when you install or update Bumblebee: Perplexity's program, version 0.1.2, checked against the SHA-256 in Vigil's code |
+| `/usr/local/bin/bumblebee` | the Install, Update Bumblebee, Run update check or Run all button, as root | only when you install Bumblebee, or update an older one: Perplexity's program, version 0.1.2, checked against the SHA-256 in Vigil's code |
 | `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` | the helper | only when you set the opt-out variables |
 | `/etc/sysctl.d/90-omarchy-vigil.conf` | a script action, as root | only when you apply the kernel settings |
 | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf` | a script action, as root | only when you turn LLMNR off |
@@ -447,6 +448,8 @@ servers), Flatpak and firmware updates, and `omarchy-update`.
 | `/etc/ssh/sshd_config.d/00-omarchy-vigil.conf` | a script action, as root | only when you harden SSH |
 | `/etc/NetworkManager/conf.d/90-omarchy-vigil-connectivity.conf` | a script action, as root | only when you turn the connectivity check off |
 | `/etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf` | a script action, as root | only when you change the hardware address setting |
+| `/etc/modprobe.d/90-omarchy-vigil-firewire.conf` | a script action, as root | only when you turn FireWire off |
+| `/etc/modprobe.d/90-omarchy-vigil-protocols.conf` | a script action of an earlier Vigil, as root | only if you turned rarely used network protocols off before 0.12; its Undo still removes it |
 | `/etc/avahi/avahi-daemon.conf` (first original kept at `avahi-daemon.conf.vigil-backup`) | a script action, as root | only when you stop Avahi announcements |
 
 Every file in `/etc` that Vigil creates starts with the line
@@ -459,8 +462,10 @@ files; see their documentation.
 omarchy plugin remove keasbeexd.vigil
 ```
 
-This removes the plugin folder. Vigil runs no services, timers or daemons, so
-nothing keeps running. These stay behind until you remove them:
+This removes the plugin folder. Vigil runs no services, timers or daemons of
+its own, and a scan or update that is running when you remove it stops within
+seconds, so nothing of Vigil's keeps running. These stay behind until you
+remove them:
 
 - `~/.local/state/omarchy-vigil/` (seen findings, score history, the file
   baseline and the cached results of the checks). It holds nothing you need
@@ -482,7 +487,10 @@ nothing keeps running. These stay behind until you remove them:
   `arch-audit` or `osv-scanner` with `omarchy pkg drop <name>` (and `lynis`
   or `rkhunter`, if an earlier Vigil installed them). Remove Bumblebee with
   `sudo rm /usr/local/bin/bumblebee`.
-  ClamAV's update service stops with `sudo systemctl disable --now clamav-freshclam.service`.
+- Services Vigil switched on for you. They belong to their packages and keep
+  protecting you without Vigil: ClamAV's update service stops with
+  `sudo systemctl disable --now clamav-freshclam.service`, and the firewall,
+  if you turned it on here, with `sudo ufw disable`.
 
 ## Requirements
 

@@ -2053,6 +2053,52 @@ def test_stop_ends_a_real_run_and_its_program(tmp_path):
         child.wait()
 
 
+def test_removing_the_plugin_stops_a_run_within_seconds(tmp_path):
+    """omarchy plugin remove deletes the helper: a scan it is running stops,
+    with the program it started, rather than running on to its deadline."""
+    import shutil
+    import subprocess as sp
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    plugin = tmp_path / "plugin" / "bin"
+    plugin.mkdir(parents=True)
+    helper = plugin / "vigil"
+    shutil.copy(REPO / "bin" / "vigil", helper)
+    script = tmp_path / "child.py"
+    script.write_text(STOP_CHILD)
+    child = sp.Popen(["/usr/bin/python3", "-I", str(script), str(helper), str(home)], stdout=sp.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "ready"
+        mod = load_vigil()
+        mod.HOME = str(home)
+        for _ in range(50):                                 # until the sleep is recorded
+            info = mod._state_json(mod.RUN_FILE) or {}
+            if info.get("child"):
+                break
+            time.sleep(0.05)
+        sleeper = info["child"]
+        started = time.monotonic()
+        shutil.rmtree(tmp_path / "plugin")                  # what removing the plugin does
+        assert json.loads(child.stdout.readline()) == {"rc": None, "stopped": True}
+        assert time.monotonic() - started < mod.REMOVED_LOOK_SECONDS + 3
+        assert mod.proc_start(sleeper) is None              # the program it ran is gone too
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_a_removed_plugin_starts_no_further_step(v, monkeypatch):
+    clamscan_ok(v)
+    monkeypatch.setattr(v, "SELF", str(Path(v.HOME, "gone", "vigil")))
+    ran = []
+    monkeypatch.setattr(v, "refresh_virus_scan", lambda cb: ran.append("virus-scan"))
+    try:
+        out = v.refresh_due_feeds(scan_only=True)
+    finally:
+        v.STOP["on"] = False
+    assert ran == [] and out["stopped"] is True
+
+
 def test_stop_ends_a_program_left_behind_by_a_killed_run(tmp_path):
     import subprocess as sp
     home = tmp_path / "home"
@@ -2120,6 +2166,27 @@ def test_clamui_scans_beyond_home_or_unreadable_are_left_alone(v):
         assert other_schedules(v)["status"] == "pass", evil
 
 
+def test_clamui_is_judged_by_both_installs_which_share_one_timer(v):
+    """As in the hand-over script: the Arch ClamUI's home-only scan is not
+    offered while the Flatpak ClamUI's schedule reaches outside the home folder,
+    or while either settings file is a link or cannot be read."""
+    clamui_timer_on(v, {"scheduled_scans_enabled": True, "schedule_targets": ["~/Downloads"]})
+    assert other_schedules(v)["status"] == "info"
+    flat = Path(v.HOME, ".var/app/io.github.linx_systems.ClamUI/config/clamui/settings.json")
+    put(flat, json.dumps({"scheduled_scans_enabled": True, "schedule_targets": ["~/Pictures", "/srv"]}))
+    c = other_schedules(v)
+    assert c["status"] == "pass" and "outside your home folder" in c["detail"]
+    put(flat, json.dumps({"scheduled_scans_enabled": False, "schedule_targets": ["/srv"]}))
+    assert other_schedules(v)["status"] == "info"                      # switched off there: no reason to hold back
+    for bad in ("{not json", "[]"):
+        put(flat, bad)
+        c = other_schedules(v)
+        assert c["status"] == "pass" and "could not read which folders" in c["detail"], bad
+    flat.unlink()
+    flat.symlink_to(Path(v.HOME, ".config/clamui/settings.json"))
+    assert other_schedules(v)["status"] == "pass"
+
+
 def test_bumblebee_plugin_counts_only_when_on_and_vigil_runs_bumblebee(v):
     pid = "io.github.duketopceo.bumblebee"
     Path(v.HOME, ".config/omarchy/plugins", pid).mkdir(parents=True)
@@ -2147,6 +2214,7 @@ def test_hand_over_markers_bring_undo(v):
     marks.mkdir(parents=True)
     (marks / "clamui-timer").write_text("")
     (marks / "unexpected").write_text("")
+    (marks / "bumblebee-plugin").symlink_to(marks / "clamui-timer")     # a planted link records nothing
     assert v.handover_marks() == ["clamui-timer"]
     assert other_schedules(v)["undo"] == {"action": "undo-schedules", "label": "Turn them back on"}
 
@@ -2520,6 +2588,33 @@ def test_update_check_updates_bumblebee_behind_the_same_password(v):
     calls.clear()
     v.refresh_due_feeds(sources_only=True)
     assert [c for c in calls if c[0] == "/usr/bin/pkexec"] == [bee]
+
+
+def test_the_cards_show_the_helpers_root_steps_exactly(v):
+    """The run cards show the helper's two root steps; they must be the very
+    scripts the helper starts, for every combination it can start."""
+    import subprocess as sp
+    js = json.loads(sp.run(["node", "-e", """
+const M = require(process.argv[1])
+process.stdout.write(JSON.stringify({ sig: M.SIGNATURES_SCRIPT, nopw: M.NO_PASSWORD_STEP,
+  both: M.rootUpdatesScript(true, true), sig_only: M.rootUpdatesScript(true, false), bee_only: M.rootUpdatesScript(false, true) }))
+""", str(REPO / "Model.js")], capture_output=True, text=True, check=True).stdout)
+    assert js["sig"] == v.SIGNATURES_SCRIPT
+    assert js["nopw"] == v.ROOT_STEP and v.NO_PASSWORD_ARGV == [v.PKEXEC, "/usr/bin/bash", "-c", js["nopw"]]
+    for key, sig, bee in (("both", True, True), ("sig_only", True, False), ("bee_only", False, True)):
+        assert v.root_updates_argv(sig, bee) == [v.PKEXEC, "/usr/bin/bash", "-c", js[key]], key
+
+
+def test_every_omarchy_command_a_script_uses_is_one_the_helper_looks_up(v):
+    """Scripts name Omarchy's commands by absolute path, from the helper's trusted lookup."""
+    uses = set(re.findall(r'"(omarchy-[a-z0-9-]+)"', " ".join(re.findall(r"uses: \[([^\]]*)\]",
+                                                                       (REPO / "Model.js").read_text()))))
+    assert uses == {"omarchy-plugin-disable", "omarchy-plugin-enable"}
+    for name in uses:
+        v.TRUSTED.add(v.ROOT + "/usr/share/omarchy/bin/" + name)
+    tools = v.audit(peek=True)["tools"]
+    for name in uses:
+        assert tools[name] == "/usr/share/omarchy/bin", name
 
 
 def test_the_install_script_is_the_same_in_the_panel_and_the_helper(v):

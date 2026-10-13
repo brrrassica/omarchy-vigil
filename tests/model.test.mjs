@@ -25,6 +25,8 @@ const TOOLS = {
   "omarchy-toggle-idle": "/usr/bin",
   "omarchy-shell-config": "/usr/share/omarchy/bin",
   "omarchy-plugin-list": "/usr/share/omarchy/bin",
+  "omarchy-plugin-disable": "/usr/share/omarchy/bin",
+  "omarchy-plugin-enable": "/usr/share/omarchy/bin",
   "xdg-open": "/usr/bin",
   "pkexec": "/usr/bin"
 }
@@ -190,7 +192,7 @@ test("pillars are the only categories", () => {
   assert.equal(parse(report({ checks: [check({ category: "scan" })] })), null)
 })
 
-import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, mkdirSync, symlinkSync, statSync, readdirSync } from "node:fs"
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, mkdirSync, symlinkSync, statSync, lstatSync, readdirSync } from "node:fs"
 import { tmpdir } from "node:os"
 
 // Run a terminal action's body for real, with its /etc paths moved into a
@@ -714,9 +716,11 @@ test("hand-over turns off exactly the duplicate schedules, and Undo turns exactl
   const shell = put(".config/omarchy/shell.json",
     JSON.stringify({ bar: { layout: { right: [{ id: "io.github.duketopceo.bumblebee" }] } } }))
   const run = (id) => {
+    // The Omarchy commands are named by absolute path (not found through PATH),
+    // so the stand-ins replace those paths and PATH holds no stand-in.
     const body = M.actionPlan(id, TOOLS, home)[0].argv[2].replaceAll("/usr/bin/systemctl", path.join(bin, "systemctl"))
-      .replaceAll("/usr/local/bin/bumblebee", bee)
-    return spawnSync("/usr/bin/bash", ["-c", body], { env: { HOME: home, PATH: bin + ":/usr/bin:/bin" }, encoding: "utf8" })
+      .replaceAll("/usr/local/bin/bumblebee", bee).replaceAll("/usr/share/omarchy/bin/", bin + "/")
+    return spawnSync("/usr/bin/bash", ["-c", body], { env: { HOME: home, PATH: "/usr/bin:/bin" }, encoding: "utf8" })
   }
   const marks = path.join(home, ".local/state/omarchy-vigil/handed-over")
   let r = run("hand-over-schedules")
@@ -909,4 +913,248 @@ test("Add a passphrase never puts SSH key file names in a program's arguments", 
   assert.match(seen, /^ssh-keygen -p -f \/proc\/self\/fd\/3$/m)
   assert.equal((seen.match(/^ssh-keygen -p /gm) || []).length, 1)                                        // known_hosts is not a key
   rmSync(home, { recursive: true, force: true })
+})
+
+// A home with ClamUI's schedule, its timer, Vigil's Bumblebee and the Bumblebee
+// plugin, and stand-ins for systemctl and Omarchy's plugin commands.
+function handoverHome() {
+  const dir = mkdtempSync(path.join(tmpdir(), "vigil-handover-"))
+  const home = path.join(dir, "home"), bin = path.join(dir, "bin"), log = path.join(dir, "log")
+  mkdirSync(bin, { recursive: true }); writeFileSync(log, "")
+  for (const name of ["systemctl", "omarchy-plugin-disable", "omarchy-plugin-enable"])
+    writeFileSync(path.join(bin, name), `#!/bin/bash\necho "${name} $*" >> "${log}"\n`, { mode: 0o755 })
+  const put = (rel, text, mode = 0o644) => {
+    const f = path.join(home, rel)
+    mkdirSync(path.dirname(f), { recursive: true })
+    writeFileSync(f, text, { mode })
+    return f
+  }
+  put(".config/systemd/user/clamui-scheduled-scan.timer", "[Timer]\n")
+  const wants = path.join(home, ".config/systemd/user/timers.target.wants/clamui-scheduled-scan.timer")
+  mkdirSync(path.dirname(wants), { recursive: true })
+  symlinkSync("../clamui-scheduled-scan.timer", wants)
+  const settings = put(".config/clamui/settings.json",
+    JSON.stringify({ scheduled_scans_enabled: true, schedule_targets: ["~/Downloads"] }), 0o600)
+  const bee = path.join(dir, "bumblebee"); writeFileSync(bee, "#!/bin/sh\n", { mode: 0o755 })
+  mkdirSync(path.join(home, ".config/omarchy/plugins/io.github.duketopceo.bumblebee"), { recursive: true })
+  put(".config/omarchy/shell.json", JSON.stringify({ plugins: [{ id: "io.github.duketopceo.bumblebee" }] }))
+  const run = (id) => {
+    const body = M.actionPlan(id, TOOLS, home)[0].argv[2].replaceAll("/usr/bin/systemctl", path.join(bin, "systemctl"))
+      .replaceAll("/usr/local/bin/bumblebee", bee).replaceAll("/usr/share/omarchy/bin/", bin + "/")
+    return spawnSync("/usr/bin/bash", ["-c", body], { env: { HOME: home, PATH: "/usr/bin:/bin" }, encoding: "utf8" })
+  }
+  const state = path.join(home, ".local/state/omarchy-vigil")
+  return { dir, home, log, put, settings, run, state, marks: path.join(state, "handed-over"),
+           logged: () => readFileSync(log, "utf8"), on: (f) => JSON.parse(readFileSync(f, "utf8")).scheduled_scans_enabled }
+}
+
+test("hand-over leaves ClamUI alone when another of its schedules reaches outside the home folder", () => {
+  const h = handoverHome()
+  // Both ClamUI installs share one timer. The Arch one scans only ~/Downloads,
+  // but the Flatpak one also scans /srv: turning the timer off would stop that too.
+  const flat = h.put(".var/app/io.github.linx_systems.ClamUI/config/clamui/settings.json",
+    JSON.stringify({ scheduled_scans_enabled: true, schedule_targets: ["~/Pictures", "/srv"] }), 0o600)
+  let r = h.run("hand-over-schedules")
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /ClamUI: left as it is/)
+  assert.ok(!/clamui|systemctl/.test(h.logged()), h.logged())
+  assert.equal(h.on(h.settings), true); assert.equal(h.on(flat), true)
+  assert.deepEqual(readdirSync(h.marks), ["bumblebee-plugin"])                  // the plugin still hands over
+  h.put(".config/omarchy/shell.json", JSON.stringify({ disabledPlugins: ["io.github.duketopceo.bumblebee"] }))
+  // A settings file that cannot be checked (not JSON, or a link) also keeps ClamUI as it is.
+  for (const bad of ["not json", "link"]) {
+    rmSync(flat)
+    if (bad === "link") symlinkSync(h.settings, flat); else writeFileSync(flat, bad)
+    writeFileSync(h.log, "")
+    r = h.run("hand-over-schedules")
+    assert.equal(r.status, 0, r.stderr)
+    assert.equal(h.logged(), "", bad)
+    assert.equal(h.on(h.settings), true, bad)
+  }
+  // A Flatpak ClamUI with its schedule off does not hold back the Arch one.
+  rmSync(flat); writeFileSync(flat, JSON.stringify({ scheduled_scans_enabled: false, schedule_targets: ["/srv"] }))
+  r = h.run("hand-over-schedules")
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(h.logged(), /systemctl --user disable --now clamui-scheduled-scan.timer/)
+  assert.equal(h.on(h.settings), false); assert.equal(h.on(flat), false)
+  rmSync(h.dir, { recursive: true, force: true })
+})
+
+test("hand-over and its Undo refuse links planted in their way", () => {
+  const h = handoverHome()
+  const victim = path.join(h.dir, "victim")
+  writeFileSync(victim, "must survive")
+  // A link at a marker's name is replaced by the marker, never written through.
+  mkdirSync(h.marks, { recursive: true })
+  symlinkSync(victim, path.join(h.marks, "clamui-timer"))
+  let r = h.run("hand-over-schedules")
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(readFileSync(victim, "utf8"), "must survive")
+  for (const m of ["clamui-timer", "clamui-setting-native", "bumblebee-plugin"])
+    assert.ok(lstatSync(path.join(h.marks, m)).isFile(), m)
+  assert.deepEqual(readdirSync(h.marks).filter(n => n.startsWith(".")), [])  // no temporary left behind
+  // ClamUI's settings: edited through a fresh file, so its mode is kept and no link is followed.
+  assert.equal(statSync(h.settings).mode & 0o777, 0o600)
+  // Undo counts only regular markers: a link there is not a record of a change.
+  r = h.run("undo-schedules")
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(h.on(h.settings), true)
+  writeFileSync(h.log, "")
+  mkdirSync(h.marks, { recursive: true })
+  symlinkSync(victim, path.join(h.marks, "bumblebee-plugin"))
+  r = h.run("undo-schedules")
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(h.logged(), "")
+  assert.equal(readFileSync(victim, "utf8"), "must survive")
+  rmSync(h.marks, { recursive: true })
+  // A state folder (or one above it) that is a link is refused before anything changes.
+  for (const linked of [h.state, path.dirname(h.state)]) {
+    const elsewhere = path.join(h.dir, "elsewhere-" + path.basename(linked))
+    mkdirSync(elsewhere)
+    rmSync(linked, { recursive: true, force: true })
+    symlinkSync(elsewhere, linked)
+    for (const id of ["hand-over-schedules", "undo-schedules"]) {
+      writeFileSync(h.log, "")
+      r = h.run(id)
+      assert.equal(r.status, 1, id + " " + linked)
+      assert.match(r.stdout, /^Refused: .* is a link or not a folder of yours, so nothing was changed\.$/m)
+      assert.equal(h.logged(), "", id)
+      assert.equal(h.on(h.settings), true, id)
+      assert.deepEqual(readdirSync(elsewhere), [], id)
+    }
+    rmSync(linked)
+  }
+  rmSync(h.dir, { recursive: true, force: true })
+})
+
+test("Stop auto-joining refuses a planted link, keeps earlier records, and records what it changed even if a step fails", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "vigil-wifi-links-"))
+  const home = path.join(dir, "home"); mkdirSync(home)
+  const log = path.join(dir, "log"); writeFileSync(log, "")
+  const U = (n) => `0000000${n}-0000-4000-8000-00000000000${n}`
+  const fake = path.join(dir, "nmcli")
+  const nets = path.join(dir, "nets")
+  writeFileSync(fake, `#!/bin/bash
+case "$*" in
+  "-t -f UUID,TYPE,AUTOCONNECT connection show") cat "${nets}" ;;
+  "-g 802-11-wireless-security.key-mgmt connection show "*) echo "" ;;
+  *"${U(9)}"*) exit 1 ;;
+  *) echo "nmcli $*" >> "${log}" ;;
+esac
+`, { mode: 0o755 })
+  const run = (id) => spawnSync("/usr/bin/bash", ["-c", M.actionPlan(id, TOOLS, home)[0].argv[2].replaceAll("/usr/bin/nmcli", fake)],
+                                { env: { HOME: home, PATH: "/usr/bin:/bin" }, encoding: "utf8" })
+  const state = path.join(home, ".local/state/omarchy-vigil"), m = path.join(state, "wifi-autojoin-off")
+  writeFileSync(nets, `${U(1)}:802-11-wireless:yes\n`)
+  let r = run("wifi-autojoin-off")
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(readFileSync(m, "utf8"), U(1) + "\n")
+  // A second run adds to the list, so Undo still restores the first network.
+  writeFileSync(nets, `${U(2)}:802-11-wireless:yes\n`)
+  r = run("wifi-autojoin-off")
+  assert.equal(readFileSync(m, "utf8"), U(1) + "\n" + U(2) + "\n")
+  // A step that fails stops the run, but what changed before it is recorded.
+  writeFileSync(nets, `${U(3)}:802-11-wireless:yes\n${U(9)}:802-11-wireless:yes\n`)
+  r = run("wifi-autojoin-off")
+  assert.notEqual(r.status, 0)
+  assert.equal(readFileSync(m, "utf8"), U(1) + "\n" + U(2) + "\n" + U(3) + "\n")
+  assert.deepEqual(readdirSync(state).filter(n => n.startsWith(".")), [])
+  // A link planted at the list is refused, and the file it points to is untouched.
+  const victim = path.join(dir, "victim"); writeFileSync(victim, "must survive")
+  rmSync(m); symlinkSync(victim, m)
+  writeFileSync(log, ""); writeFileSync(nets, `${U(4)}:802-11-wireless:yes\n`)
+  r = run("wifi-autojoin-off")
+  assert.equal(r.status, 1)
+  assert.match(r.stdout, /^Refused: the list of networks Vigil changed is a link/m)
+  assert.equal(readFileSync(log, "utf8"), ""); assert.equal(readFileSync(victim, "utf8"), "must survive")
+  r = run("undo-wifi-autojoin")
+  assert.match(r.stdout, /Nothing to undo/); assert.equal(readFileSync(log, "utf8"), "")
+  // So is a state folder that is a link.
+  rmSync(state, { recursive: true })
+  const elsewhere = path.join(dir, "elsewhere"); mkdirSync(elsewhere)
+  symlinkSync(elsewhere, state)
+  for (const id of ["wifi-autojoin-off", "undo-wifi-autojoin"]) {
+    r = run(id)
+    assert.equal(r.status, 1, id)
+    assert.match(r.stdout, /^Refused: /m)
+    assert.deepEqual(readdirSync(elsewhere), [], id)
+  }
+  assert.equal(readFileSync(log, "utf8"), "")
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test("Add a passphrase shows key names escaped, so a name cannot send control codes to the terminal", () => {
+  const home = mkdtempSync(path.join(tmpdir(), "vigil-ssh-names-"))
+  const ssh = path.join(home, ".ssh"); mkdirSync(ssh, { mode: 0o700 })
+  const evil = "id\x1b]0;pwned\x07\x1b[2J"
+  writeFileSync(path.join(ssh, evil), "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n", { mode: 0o600 })
+  const bin = path.join(home, "bin"); mkdirSync(bin)
+  const keygen = path.join(bin, "ssh-keygen")
+  writeFileSync(keygen, "#!/bin/bash\nexit 0\n", { mode: 0o755 })
+  const body = M.TERMINAL_ACTIONS["ssh-passphrase"].run.replaceAll("/usr/bin/ssh-keygen", keygen)
+  const r = spawnSync("/usr/bin/bash", ["-c", body], { encoding: "utf8", env: { HOME: home, PATH: "/usr/bin:/bin", LC_ALL: "C" } })
+  assert.equal(r.status, 0, r.stderr)
+  assert.ok(!/[\x00-\x08\x0b-\x1f\x7f]/.test(r.stdout), JSON.stringify(r.stdout))
+  assert.equal(r.stdout, "Passphrase for ~/.ssh/$'id\\E]0;pwned\\a\\E[2J'\n")
+  rmSync(home, { recursive: true, force: true })
+})
+
+test("every confirmation shows in full the commands Run starts, root steps included", () => {
+  const home = "/home/marc"
+  const r = parse(report())
+  for (const id of Object.keys(M.TERMINAL_ACTIONS)) {
+    const card = M.confirmation("terminal", id, r, home)
+    const mode = M.runMode(id)
+    if (mode === "terminal") {
+      assert.equal(card.commands.length, 1, id)
+      assert.ok(M.terminalScript(id, TOOLS).endsWith("( set -e; " + card.commands[0].text + " )"), id)
+      continue
+    }
+    const plan = M.actionPlan(id, TOOLS, home)
+    assert.equal(card.commands.length, plan.length, id)
+    plan.forEach((step, i) => {
+      const shown = card.commands[i]
+      // The whole argv, the script last and unabridged.
+      assert.equal(shown.text, step.argv.slice(0, -1).join(" ") + "\n" + step.argv[step.argv.length - 1], id)
+      assert.equal(/^As root, through pkexec/.test(shown.who), step.asRoot, id)
+    })
+    if (mode === "root") assert.ok(card.commands[0].text.startsWith("/usr/bin/pkexec /usr/bin/env HOME=/home/marc /usr/bin/bash -c\n"), id)
+  }
+  // Helper actions run Vigil's own code as you: nothing to show as a command.
+  assert.deepEqual(M.confirmation("helper", "ssh-perms", r, home).commands, [])
+  // The plugin commands are named by absolute path in what the card shows.
+  const hand = M.confirmation("terminal", "hand-over-schedules", r, home).commands[0].text
+  assert.match(hand, /^omarchy_plugin_disable=\/usr\/share\/omarchy\/bin\/omarchy-plugin-disable$/m)
+  assert.ok(!/^\s*omarchy-plugin-disable /m.test(hand))
+  const missing = M.confirmation("terminal", "hand-over-schedules", parse(report({ tools: { pkexec: "/usr/bin" } })), home)
+  assert.match(missing.commands[0].text, /^omarchy_plugin_disable=$/m)               // not found: that step is skipped
+})
+
+test("run cards show the helper's root steps exactly as the helper starts them", () => {
+  const sig = { id: "signatures", label: "ClamAV signatures", date: "", time: "", state: "never", tried: "" }
+  const older = check({ id: "bumblebee", category: "supply", status: "info", weight: 0,
+                        fix: { kind: "terminal", action: "update-bumblebee", label: "Update Bumblebee" } })
+  const card = (kind, over) => M.confirmation(kind, "all", parse(report(over)), "/home/marc").commands
+  assert.deepEqual(card("update-sources", {}), [])                                       // nothing runs as root
+  let c = card("update-sources", { sources: [sig] })
+  assert.equal(c.length, 1)
+  assert.equal(c[0].text, "/usr/bin/pkexec /usr/bin/bash -c\n" + M.rootUpdatesScript(true, false))
+  assert.ok(c[0].text.includes(M.SIGNATURES_SCRIPT) && !c[0].text.includes(M.BUMBLEBEE_INSTALL))
+  c = card("update-sources", { sources: [sig], checks: [check(), older] })
+  assert.equal(c[0].text, "/usr/bin/pkexec /usr/bin/bash -c\n" + M.rootUpdatesScript(true, true))
+  assert.ok(c[0].text.includes(M.BUMBLEBEE_INSTALL))
+  c = card("full-scan", { checks: [check(), older] })
+  assert.equal(c.length, 2)
+  assert.equal(c[0].text, "/usr/bin/pkexec /usr/bin/bash -c\n" + M.rootUpdatesScript(false, true))
+  assert.equal(c[1].text, "/usr/bin/pkexec /usr/bin/bash -c\n" + M.NO_PASSWORD_STEP)
+  assert.deepEqual(card("full-scan", { tools: {} }), [])                                 // no pkexec: no root step
+  assert.deepEqual(card("daily-check", {}), [])
+  assert.deepEqual(card("weekly-check", {}), [])
+  // Clean all: the root half, in full.
+  const care = parse(report({ checks: [check({ id: "journal", category: "care", status: "info", weight: 0,
+    fix: { kind: "terminal", action: "clean-journal", label: "Keep two weeks" } })] }))
+  const clean = M.confirmation("clean-all", "care", care, "/home/marc").commands
+  assert.equal(clean.length, 1)
+  assert.equal(clean[0].text, M.actionPlan("clean-system", TOOLS, "/home/marc")[0].argv.slice(0, -1).join(" ")
+    + "\n" + M.actionPlan("clean-system", TOOLS, "/home/marc")[0].argv[5])
 })
