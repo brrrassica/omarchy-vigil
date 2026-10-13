@@ -10,7 +10,7 @@
 // Must match manifest.json and VERSION in bin/vigil (a test checks). The
 // helper runs from disk every time, but this file stays loaded until the
 // shell restarts, so after an update the two can differ for a while.
-var VERSION = "0.24.1"
+var VERSION = "0.25.0"
 var MAX_REPORT_CHARS = 512 * 1024
 var MAX_CHECKS = 160
 var MAX_STR = 400
@@ -1088,11 +1088,13 @@ function scheduleLines(report, autoUpdate, now, refreshMinutes) {
   var nextCheck = checked ? new Date(checked.getTime() + (refreshMinutes || 30) * 60000) : null
   var out = []
   var d = countdown(report.nextDaily, now, nextCheck)
-  if (d !== "") out.push("Next daily check: " + d + " (new downloads, waiting updates, Bumblebee)")
+  if (d !== "") out.push("Next daily check: " + d + " (ClamAV scan of ~/Downloads, System update check, "
+                         + "Flatpak update check, Bumblebee scan)")
   var f = countdown(report.nextFullScan, now, nextCheck)
-  if (f !== "") out.push("Next weekly check: " + f + " (whole home folder and firmware)")
+  if (f !== "") out.push("Next weekly check: " + f + " (ClamAV scan of ~, Firmware check)")
   var u = countdown(report.nextUpdate, now, nextCheck)
-  if (u !== "") out.push("Next update check: " + u + " (the lists Vigil checks against)")
+  if (u !== "") out.push("Next update check: " + u + " (Arch security list, OSV malicious-package list, "
+                         + "AUR package status, Bumblebee list, Bumblebee release check)")
   if (report.lastRun && report.lastRun.at !== "" && !report.lastRun.ok)
     out.push("The last update could not reach every source; Vigil tries again tomorrow.")
   return out
@@ -1195,15 +1197,15 @@ function updateConfirmation(report) {
     return false
   }
   var n = 1
-  if (has("signatures")) lines.push((n++) + ". ClamAV virus signatures. Omarchy asks for your password for this one step,"
+  if (has("signatures")) lines.push((n++) + ". ClamAV signatures. Omarchy asks for your password for this one step,"
     + " because ClamAV keeps them in a system folder.")
-  if (has("pending-updates")) lines.push((n++) + ". The list of waiting system and Omarchy updates (nothing is installed).")
-  if (has("flatpak")) lines.push((n++) + ". Your Flatpak apps, ClamUI among them: installs their updates (no password).")
-  if (has("arch-audit")) lines.push((n++) + ". The Arch security team list of known holes in packages.")
-  if (has("osv")) lines.push((n++) + ". The OSV.dev list of malicious npm and Bun packages.")
-  if (has("aur")) lines.push((n++) + ". The status of your AUR packages.")
-  if (has("bumblebee-list")) lines.push((n++) + ". Perplexity list of known-compromised packages, for Bumblebee,"
-    + " and Bumblebee itself when a newer release has been out for a week (same password prompt).")
+  if (has("pending-updates")) lines.push((n++) + ". System update check: waiting system and Omarchy updates (nothing is installed).")
+  if (has("flatpak")) lines.push((n++) + ". Flatpak update check, and the updates for your own Flatpak apps (no password).")
+  if (has("arch-audit")) lines.push((n++) + ". Arch security list: known holes in your packages, from the Arch security team.")
+  if (has("osv")) lines.push((n++) + ". OSV malicious-package list: malicious npm and Bun packages, from OSV.dev.")
+  if (has("aur")) lines.push((n++) + ". AUR package status: whether your AUR packages are still maintained.")
+  if (has("bumblebee-list")) lines.push((n++) + ". Bumblebee list and Bumblebee release check, from Perplexity; a newer"
+    + " Bumblebee that has been out for a week is installed with the same password prompt.")
   if (n === 1) lines = ["Nothing to update yet. Install ClamAV, arch-audit or osv-scanner (Detect and Supply tabs) to add them."]
   lines.push("No scan runs, and nothing on your computer changes. The panel shows the progress.")
   lines.push("Technical: wake clamav-freshclam (pkexec), checkupdates, arch-audit --upgradable, osv-scanner, an AUR lookup and Perplexity threat_intel, both with curl")
@@ -1216,13 +1218,13 @@ function fullScanConfirmation(report) {
   if (!report) return null
   return { title: "Full scan", lines: [
     "Runs every check and scan Vigil has, in this order:",
-    "1. Checks that every account has a password. Omarchy asks for your password for this one step.",
-    "2. Checks for system and Omarchy updates, and updates the lists of known security holes,",
-    "   malicious packages and AUR status.",
-    "3. Has Bumblebee check your packages, if it is installed.",
-    "4. Checks for firmware updates, if fwupd is installed.",
-    "5. Scans your home folder for viruses, if ClamAV is installed. This can take a while.",
-    "6. Checks every setting in every tab again.",
+    "1. Password check: every account has a password. Omarchy asks for your password for this one step.",
+    "2. System update check, Flatpak update check, Arch security list, OSV malicious-package list,",
+    "   AUR package status, Bumblebee list and Bumblebee release check.",
+    "3. Bumblebee scan, if Bumblebee is installed.",
+    "4. Firmware check, if fwupd is installed.",
+    "5. ClamAV scan of ~ (your whole home folder), if ClamAV is installed. This can take a while.",
+    "6. Settings checks in every tab.",
     "The panel shows the progress, and you get a notification when it is done."] }
 }
 

@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta, timezone
 
-VERSION = "0.24.1"
+VERSION = "0.25.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1143,7 +1143,7 @@ def pending_updates(last_update):
 
 @check
 def check_updates():
-    cid, cat, title = "updates", "harden", "System updates"
+    cid, cat, title = "updates", "harden", "System update check"
     why = ("Most attacks use security holes that already have a fix. Updating every week or two "
            "keeps those fixes on your machine.")
     try:
@@ -1347,11 +1347,11 @@ def check_foreign_packages():
 
 SCANNERS = [
     # id, binary, category, title, why, run action, install action
-    ("clamav", "clamscan", "detect", "ClamAV virus engine",
+    ("clamav", "clamscan", "detect", "ClamAV signatures (virus engine)",
      ("ClamAV checks files against a database of known malware, mostly Windows malware, so it "
       "matters most for downloads and files you pass on. ClamUI is the easiest way to use it."),
      "", "install-clamav"),
-    ("arch-audit", "arch-audit", "supply", "Known vulnerabilities (arch-audit)",
+    ("arch-audit", "arch-audit", "supply", "Arch security list (known vulnerabilities)",
      "arch-audit checks your installed packages against the Arch security team's tracker and lists the "
      "ones where an update fixes a published vulnerability. Vigil refreshes it once a week (it contacts "
      "security.archlinux.org); Check now does it straight away.", "run-arch-audit", "install-arch-audit"),
@@ -1728,8 +1728,15 @@ def feed_cache(name):
 
 
 def feed_when(cache):
+    """When a feed last ran, with the time when recent: "checked today at 09:41"."""
     d = _days_since(cache.get("at"))
-    return "checked today" if not d else "checked %d day%s ago" % (d, "" if d == 1 else "s")
+    tm = cache.get("time") if isinstance(cache.get("time"), str) and re.fullmatch(r"\d{2}:\d{2}", cache["time"]) else ""
+    at = " at " + tm if tm else ""
+    if not d:
+        return "checked today" + at
+    if d == 1:
+        return "checked yesterday" + at
+    return "checked %d days ago" % d
 
 
 def feed_available(name):
@@ -1923,21 +1930,21 @@ def source_status():
         add(name, label, at, tm if at else "", state, tried if state == "failed" else "")
 
     if feed_available("virus-scan"):
-        feed("virus-scan", "Virus scan (home folder)")
+        feed("virus-scan", ITEM_NAME["virus-scan"] + " (weekly)")
         ext = clamui_last("scan")                       # a scan you ran in ClamUI counts too
         mine = out[-1]
         if ext[0] and _newer(ext, (mine["date"], mine["time"])) == ext and ext != (mine["date"], mine["time"]):
             out[-1] = dict(mine, date=ext[0], time=ext[1], state=fresh(ext[0], FEED_DAYS + FEED_RETRY_DAYS),
                            tried="", by="ClamUI")
     if feed_available("downloads-scan"):
-        feed("downloads-scan", "Daily scan of new downloads")
+        feed("downloads-scan", ITEM_NAME["downloads-scan"] + " (daily)")
     if feed_available("bumblebee"):
-        feed("bumblebee", "Bumblebee scan")
+        feed("bumblebee", ITEM_NAME["bumblebee"] + " (daily)")
     if feed_available("firmware"):
-        feed("firmware", "Firmware update check")
+        feed("firmware", ITEM_NAME["firmware"] + " (weekly)")
     d, _ = no_password_scan()
     _, t = _mtime_stamp([home_path(*STATE_DIR, NO_PASSWORD_NAME)]) if d else ("", "")
-    add("password-check", "Password check (Full scan button only)", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
+    add("password-check", ITEM_NAME["password-check"] + " (Full scan only)", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
     if is_trusted_executable(sys_path("/usr/bin/clamscan")):
         # Whoever updated them: ClamAV's own service (freshclam.dat changes on
         # every check, even when nothing new came out), Vigil, or ClamUI.
@@ -1951,12 +1958,10 @@ def source_status():
         ext = clamui_last("update")
         by = "ClamUI" if ext[0] and _newer(ext, (d, t)) == ext and ext != (d, t) else ""
         d, t = _newer(ext, (d, t))
-        add("signatures", "ClamAV virus signatures", d, t, fresh(d, FEED_DAYS), by=by)
-    for name, label in (("pending-updates", "Check for system and Omarchy updates"),
-                        ("flatpak", "Check for Flatpak app updates"),
-                        ("arch-audit", "Arch vulnerability database"), ("osv", "OSV malicious-package database"),
-                        ("aur", "AUR package status"), ("bumblebee-list", "Bumblebee compromised-package list"),
-                        ("bumblebee-release", "Check for a new Bumblebee")):
+        add("signatures", ITEM_NAME["signatures"] + " (automatic)", d, t, fresh(d, FEED_DAYS), by=by)
+    for name, label in ((n, ITEM_NAME[n] + (" (daily)" if n in DAILY_FEEDS else " (weekly)"))
+                        for n in ("pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee-list",
+                                  "bumblebee-release")):
         if feed_available(name):
             feed(name, label)
     return out
@@ -2100,7 +2105,7 @@ def refresh_osv():
 
 @check
 def check_osv():
-    cid, cat, title = "malicious-packages", "supply", "Known-malicious npm and Bun packages"
+    cid, cat, title = "malicious-packages", "supply", "OSV malicious-package list (npm, Bun)"
     why = ("Attackers publish poisoned npm and Bun packages that steal passwords and keys; the "
            "2026 Atomic Arch attack pulled one into AUR builds. Vigil asks OSV.dev about the "
            "packages in your AUR build folders and global npm and Bun installs, sending names and "
@@ -2439,7 +2444,7 @@ def refresh_virus_scan(on_progress=None):
 
 @check
 def check_virus_scan():
-    cid, cat, title = "virus-scan", "detect", "Virus scan"
+    cid, cat, title = "virus-scan", "detect", "ClamAV scans of ~ and ~/Downloads"
     why = ("Every week, and in each Full scan, ClamAV scans your home folder for known malware, as you and "
            "in the background; every day it scans what is new in Downloads. Caches, game libraries, "
            "node_modules and .git folders are skipped.")
@@ -2775,7 +2780,7 @@ def update_user_flatpaks():
 
 @check
 def check_flatpak():
-    cid, cat, title = "flatpak-apps", "harden", "App updates (Flatpak)"
+    cid, cat, title = "flatpak-apps", "harden", "Flatpak update check"
     why = ("Omarchy's own updater does not update apps installed with Flatpak, ClamUI among them. An app that "
            "is never updated keeps its security holes, so Vigil checks them with each update and Update "
            "sources installs the updates for your own apps.")
@@ -2802,7 +2807,7 @@ def check_flatpak():
 
 @check
 def check_firmware():
-    cid, cat, title = "firmware", "harden", "Firmware updates"
+    cid, cat, title = "firmware", "harden", "Firmware check"
     why = ("Firmware is the software inside your hardware: the BIOS, the SSD, the Thunderbolt chip. Hardware "
            "makers publish security fixes for it on LVFS, and fwupd installs them.")
     if not feed_available("firmware"):
@@ -3130,22 +3135,22 @@ def refresh_bumblebee():
 
 STEP_WEIGHT = {"virus-scan": 30, "downloads-scan": 3, "osv": 2, "bumblebee": 2, "firmware": 2, "signatures": 2, "flatpak": 4}
 
-STEP_TEXT = {"arch-audit": "Updating the Arch vulnerability database",
-             "osv": "Updating the OSV malicious-package database",
-             "aur": "Checking your AUR packages",
-             "virus-scan": "Scanning your home folder for viruses",
-             "bumblebee": "Checking your packages with Bumblebee",
-             "bumblebee-list": "Updating Bumblebee's list of compromised packages",
-             "pending-updates": "Checking for system and Omarchy updates",
-             "bumblebee-release": "Checking for a new Bumblebee",
-             "flatpak": "Checking your Flatpak apps for updates",
-             "flatpak-update": "Updating your Flatpak apps",
-             "bumblebee-update": "Updating Bumblebee (Omarchy asks for your password)",
-             "signatures-and-bumblebee": "Updating ClamAV virus signatures and Bumblebee (Omarchy asks for your password)",
-             "firmware": "Checking for firmware updates",
-             "downloads-scan": "Scanning new downloads for viruses",
-             "password-check": "Checking for accounts without a password (Omarchy asks for your password)",
-             "signatures": "Updating ClamAV virus signatures (Omarchy asks for your password)"}
+# One name for each thing Vigil runs, used everywhere: the progress line, the
+# Last run list and (in Model.js) the schedule lines, so what will run, what
+# ran and what is running now always read the same. Must match Model.js.
+ITEM_NAME = {"downloads-scan": "ClamAV scan of ~/Downloads", "virus-scan": "ClamAV scan of ~",
+             "bumblebee": "Bumblebee scan", "firmware": "Firmware check", "password-check": "Password check",
+             "signatures": "ClamAV signatures", "pending-updates": "System update check",
+             "flatpak": "Flatpak update check", "arch-audit": "Arch security list",
+             "osv": "OSV malicious-package list", "aur": "AUR package status", "bumblebee-list": "Bumblebee list",
+             "bumblebee-release": "Bumblebee release check"}
+ASKS = " (Omarchy asks for your password)"
+STEP_TEXT = dict(ITEM_NAME, **{
+    "flatpak-update": "Flatpak app updates",
+    "password-check": ITEM_NAME["password-check"] + ASKS,
+    "signatures": ITEM_NAME["signatures"] + ASKS,
+    "bumblebee-update": "Bumblebee update" + ASKS,
+    "signatures-and-bumblebee": "ClamAV signatures and Bumblebee update" + ASKS})
 
 
 def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=False):
@@ -3334,7 +3339,7 @@ def check_clamui():
 
 @check
 def check_bumblebee():
-    cid, cat, title = "bumblebee", "supply", "Known-compromised packages (Bumblebee)"
+    cid, cat, title = "bumblebee", "supply", "Bumblebee scan (known-compromised packages)"
     why = ("Attackers sometimes take over a popular npm, PyPI or other package and publish a poisoned version. "
            "Perplexity's Bumblebee checks your packages, editor and browser extensions and MCP configs "
            "against the compromised releases Perplexity tracks.")

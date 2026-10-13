@@ -456,12 +456,12 @@ test("schedule lines: countdowns with the time, in local time", () => {
   const r = { generatedAt: "2026-10-12T09:58:00+0200", lastRun: { at: "2026-10-12 09:52", ok: true },
               nextUpdate: "2026-10-19 09:52", nextFullScan: "2026-10-12 21:15", nextDaily: "2026-10-13 07:40" }
   assert.deepEqual(M.scheduleLines(r, true, now, 30), [
-    "Next daily check: tomorrow at 07:40 (new downloads, waiting updates, Bumblebee)",
-    "Next weekly check: today at 21:15 (whole home folder and firmware)",
-    "Next update check: in 7 days (the lists Vigil checks against)"])
+    "Next daily check: tomorrow at 07:40 (ClamAV scan of ~/Downloads, System update check, Flatpak update check, Bumblebee scan)",
+    "Next weekly check: today at 21:15 (ClamAV scan of ~, Firmware check)",
+    "Next update check: in 7 days (Arch security list, OSV malicious-package list, AUR package status, Bumblebee list, Bumblebee release check)"])
   // Already due: it runs at the next background check, 30 minutes after the last one.
   assert.equal(M.scheduleLines(Object.assign({}, r, { nextDaily: "now" }), true, now, 30)[0],
-    "Next daily check: today at 10:28 (new downloads, waiting updates, Bumblebee)")
+    "Next daily check: today at 10:28 (ClamAV scan of ~/Downloads, System update check, Flatpak update check, Bumblebee scan)")
   assert.equal(M.scheduleLines(Object.assign({}, r, { nextDaily: "" }), true, now, 30).length, 2)  // nothing daily set up
   assert.equal(M.countdown("2026-10-13 08:05", now, null), "tomorrow at 08:05")
   assert.equal(M.countdown("2026-10-12", now, null), "today at 10:00")       // older helper: date only
@@ -476,9 +476,9 @@ test("schedule lines: countdowns with the time, in local time", () => {
   assert.equal(parse(report({ nextDaily: "<b>" })), null)
 })
 test("progress lines are validated and worded", () => {
-  const p = M.parseProgress(JSON.stringify({ progress: { step: 3, of: 4, doing: "Scanning your home folder for viruses", done: 500, total: 1000 } }))
+  const p = M.parseProgress(JSON.stringify({ progress: { step: 3, of: 4, doing: "ClamAV scan of ~", done: 500, total: 1000 } }))
   assert.equal(p.fraction, (2 + 0.5) / 4)
-  assert.match(M.progressText(p), /^Step 3 of 4: Scanning your home folder for viruses \(500 of 1,?000 files\)$/)
+  assert.match(M.progressText(p), /^Step 3 of 4: ClamAV scan of ~ \(500 of 1,?000 files\)$/)
   for (const bad of ['{"ok":true}', "nope", JSON.stringify({ progress: { step: 5, of: 4, doing: "x", done: 0, total: 0 } }),
                      JSON.stringify({ progress: { step: 1, of: 1, doing: 7, done: 0, total: 0 } })])
     assert.equal(M.parseProgress(bad), null, bad)
@@ -532,8 +532,8 @@ test("update sources card: lists what updates and where the password comes in", 
     { id: "arch-audit", label: "Arch vulnerability database", date: "", time: "", state: "never", tried: "" }] }))
   const card = M.confirmation("update-sources", "all", r)
   assert.equal(card.title, "Update sources")
-  assert.match(card.lines[1], /^1\. ClamAV virus signatures\. Omarchy asks for your password/)
-  assert.match(card.lines[2], /^2\. The Arch security team list/)
+  assert.match(card.lines[1], /^1\. ClamAV signatures\. Omarchy asks for your password/)
+  assert.match(card.lines[2], /^2\. Arch security list: known holes/)
   assert.ok(card.lines[card.lines.length - 1].startsWith("Technical: "))
   const none = M.confirmation("update-sources", "all", parse(report()))
   assert.match(none.lines[0], /^Nothing to update yet/)
@@ -650,7 +650,7 @@ test("an action in the panel shows how far it got; the words come from Vigil, no
 
 test("a scan started elsewhere is followed, and anything odd is refused", () => {
   assert.equal(parse(report()).running, null)
-  const r = parse(report({ running: { step: 2, of: 3, doing: "Scanning your home folder for viruses", done: 5, total: 10 } }))
+  const r = parse(report({ running: { step: 2, of: 3, doing: "ClamAV scan of ~", done: 5, total: 10 } }))
   assert.equal(r.running.step, 2)
   assert.equal(M.progressText(parse(report({ running: { step: 0, of: 0, doing: "", done: 0, total: 0 } })).running), "Working…")
   for (const bad of ["yes", [1], { step: 5, of: 3, doing: "x", done: 0, total: 0 }])
@@ -803,7 +803,7 @@ test("a rejected report says which part failed", () => {
 })
 
 test("the progress bar gives the long virus scan most of its length", () => {
-  const p = M.parseProgress(JSON.stringify({ progress: { step: 9, of: 9, doing: "Scanning your home folder for viruses",
+  const p = M.parseProgress(JSON.stringify({ progress: { step: 9, of: 9, doing: "ClamAV scan of ~",
     done: 5082, total: 172762, at: 0.2, span: 0.8 } }))
   assert.ok(p.fraction > 0.2 && p.fraction < 0.25, String(p.fraction))          // 3% of the scan, not 89% of the bar
   const old = M.parseProgress(JSON.stringify({ progress: { step: 9, of: 9, doing: "x", done: 0, total: 0 } }))
@@ -852,4 +852,16 @@ esac
   r = run("undo-wifi-autojoin")
   assert.match(r.stdout, /Nothing to undo/); assert.equal(readFileSync(log, "utf8"), "")
   rmSync(dir, { recursive: true, force: true })
+})
+
+
+test("every name in the schedule lines is a row in the Last run list", () => {
+  const helper = readFileSync(path.join(here, "..", "bin", "vigil"), "utf8")
+  const names = [...helper.matchAll(/"[a-z-]+": "([^"]+)"/g)].map(m => m[1])
+  const r = { generatedAt: "2026-10-12T09:58:00+0200", lastRun: { at: "", ok: true },
+              nextUpdate: "2026-10-19 09:52", nextFullScan: "2026-10-12 21:15", nextDaily: "2026-10-13 07:40" }
+  for (const line of M.scheduleLines(r, true, new Date(2026, 9, 12, 10, 0), 30)) {
+    const inside = /\((.*)\)$/.exec(line)[1]
+    for (const item of inside.split(", ")) assert.ok(names.includes(item), item + " is not an ITEM_NAME in bin/vigil")
+  }
 })

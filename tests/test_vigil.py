@@ -1350,7 +1350,7 @@ def test_progress_lines_for_the_panel(v, capsys, monkeypatch):
     monkeypatch.setattr(v, "feed_available", lambda n: n in ("arch-audit", "full-scan"))
     v.refresh_due_feeds(sources_only=True)
     out = [json.loads(l) for l in capsys.readouterr().out.splitlines()]
-    assert out == [{"progress": {"step": 1, "of": 1, "doing": "Updating the Arch vulnerability database",
+    assert out == [{"progress": {"step": 1, "of": 1, "doing": "Arch security list",
                                  "done": 0, "total": 0, "at": 0.0, "span": 1.0}}]
 
 
@@ -1463,11 +1463,12 @@ def test_last_run_list_scans_then_updates_with_times(v):
     assert [s["id"] for s in v.source_status()] == ["password-check"]       # always offered
     v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan", v.ROOT + "/usr/bin/arch-audit"}
     got = [(s["id"], s["label"], s["state"]) for s in v.source_status()]
-    assert got == [("virus-scan", "Virus scan (home folder)", "never"),
-                   ("downloads-scan", "Daily scan of new downloads", "never"),
-                   ("password-check", "Password check (Full scan button only)", "never"),
-                   ("signatures", "ClamAV virus signatures", "never"),
-                   ("arch-audit", "Arch vulnerability database", "never")]
+    assert got == [("virus-scan", "ClamAV scan of ~ (weekly)", "never"),
+                   ("downloads-scan", "ClamAV scan of ~/Downloads (daily)", "never"),
+                   ("password-check", "Password check (Full scan only)", "never"),
+                   ("signatures", "ClamAV signatures (automatic)", "never"),
+                   ("arch-audit", "Arch security list (weekly)", "never")]
+    assert all(len(s["label"]) <= 40 for s in v.source_status())          # the panel's limit
     v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
     v.run_fix("arch-audit-refresh")
     src = {s["id"]: s for s in v.source_status()}["arch-audit"]
@@ -1824,8 +1825,8 @@ def test_full_scan_runs_bumblebee_before_the_long_virus_scan(v, capsys, monkeypa
     clamscan_ok(v)
     v.refresh_due_feeds(full=True)
     steps = [json.loads(l)["progress"]["doing"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
-    assert steps.index("Checking your packages with Bumblebee") < steps.index("Scanning your home folder for viruses")
-    assert steps[-1] == "Scanning your home folder for viruses"
+    assert steps.index("Bumblebee scan") < steps.index("ClamAV scan of ~")
+    assert steps[-1] == "ClamAV scan of ~"
 
 
 # --------------------------------------------------------------------------
@@ -1866,12 +1867,12 @@ def test_a_run_started_elsewhere_shows_in_the_report(v):
     try:
         assert v.run_in_progress() == {"step": 0, "of": 0, "doing": "", "done": 0, "total": 0}
         put(Path(v.HOME, ".local/state/omarchy-vigil/progress.json"), json.dumps({"progress": {
-            "step": 2, "of": 3, "doing": "Scanning your home folder for viruses", "done": 5, "total": 10}}))
-        assert v.run_in_progress()["doing"] == "Scanning your home folder for viruses"
+            "step": 2, "of": 3, "doing": "ClamAV scan of ~", "done": 5, "total": 10}}))
+        assert v.run_in_progress()["doing"] == "ClamAV scan of ~"
         report = v.audit(peek=True)
         assert report["running"]["step"] == 2 and report["feedsDue"] is False
         for bad in ({"doing": "rm -rf ~"}, {"step": 4}, {"step": True}, {"done": -1}, {"of": 99, "step": 50}):
-            body = dict({"step": 2, "of": 3, "doing": "Scanning your home folder for viruses", "done": 5, "total": 10}, **bad)
+            body = dict({"step": 2, "of": 3, "doing": "ClamAV scan of ~", "done": 5, "total": 10}, **bad)
             put(Path(v.HOME, ".local/state/omarchy-vigil/progress.json"), json.dumps({"progress": body}))
             assert v.run_in_progress()["step"] == 0, bad
     finally:
@@ -1894,9 +1895,9 @@ def test_programs_a_run_starts_keep_the_lock(tmp_path):
 
 def test_progress_goes_to_a_file_while_the_lock_is_held(v, monkeypatch):
     v.RUN_LOCK["fd"] = 99999                           # held (never used as a real descriptor here)
-    v.progress(1, 2, "Checking your AUR packages")
+    v.progress(1, 2, "AUR package status")
     p = json.loads(Path(v.HOME, ".local/state/omarchy-vigil/progress.json").read_text())["progress"]
-    assert p == {"step": 1, "of": 2, "doing": "Checking your AUR packages", "done": 0, "total": 0}
+    assert p == {"step": 1, "of": 2, "doing": "AUR package status", "done": 0, "total": 0}
     v.RUN_LOCK["fd"] = None
 
 
@@ -2316,7 +2317,7 @@ def test_full_scan_checks_firmware_before_the_virus_scan(v, capsys, monkeypatch)
     clamscan_ok(v)
     v.refresh_due_feeds(full=True)
     steps = [json.loads(l)["progress"]["doing"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
-    assert steps.index("Checking for firmware updates") < steps.index("Scanning your home folder for viruses")
+    assert steps.index("Firmware check") < steps.index("ClamAV scan of ~")
     v.PROGRESS["on"] = False
 
 
@@ -2326,7 +2327,7 @@ def test_update_sources_checks_for_waiting_updates(v, capsys):
     v.PROGRESS["on"] = True
     v.refresh_due_feeds(sources_only=True)
     steps = [json.loads(l)["progress"]["doing"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
-    assert "Checking for system and Omarchy updates" in steps
+    assert "System update check" in steps
     v.PROGRESS["on"] = False
     assert any(s["id"] == "pending-updates" and s["state"] == "ok" for s in v.source_status())
 
@@ -2378,7 +2379,7 @@ def test_progress_shares_give_the_virus_scan_most_of_the_bar(v, capsys, monkeypa
     v.COMMANDS[("/usr/bin/checkupdates", "--nocolor")] = (2, "")
     v.refresh_due_feeds(full=True)
     lines = [json.loads(l)["progress"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
-    scan = [p for p in lines if p["doing"] == "Scanning your home folder for viruses"][-1]
+    scan = [p for p in lines if p["doing"] == "ClamAV scan of ~"][-1]
     assert scan["span"] >= 0.8 and abs(scan["at"] + scan["span"] - 1) < 0.001
     firsts = {}
     for p in lines:

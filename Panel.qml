@@ -777,7 +777,7 @@ Panel {
           id: column
           // A fixed gutter for the scroll bar, so it never sits on top of text
           // (and the layout does not reflow when the bar appears).
-          width: panelFlick.width - Style.space(12)
+          width: panelFlick.width - Style.space(22)
           spacing: Style.space(12)
 
           PanelHero {
