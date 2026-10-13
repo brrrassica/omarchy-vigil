@@ -10,7 +10,7 @@
 // Must match manifest.json and VERSION in bin/vigil (a test checks). The
 // helper runs from disk every time, but this file stays loaded until the
 // shell restarts, so after an update the two can differ for a while.
-var VERSION = "0.26.1"
+var VERSION = "0.27.0"
 var MAX_REPORT_CHARS = 512 * 1024
 var MAX_CHECKS = 160
 var MAX_STR = 400
@@ -133,6 +133,8 @@ function confirmation(kind, id, report) {
   if (kind === "ignore") return ignoreConfirmation(id, report)
   if (kind === "update-sources") return updateConfirmation(report)
   if (kind === "full-scan") return fullScanConfirmation(report)
+  if (kind === "daily-check") return dailyConfirmation(report)
+  if (kind === "weekly-check") return weeklyConfirmation(report)
   var a = kind === "helper" ? helperInfo(id) : (kind === "terminal" ? terminalAction(id) : null)
   if (!a) return null
   var lines = a.what.slice(0)
@@ -285,7 +287,7 @@ var OLD_SERVICES = ["telnet.socket", "rsh.socket", "rlogin.socket", "ftpd.servic
 // Installs or updates Bumblebee, as root: the newest Perplexity release that has
 // been public for 7 days, checked against the SHA-256 Perplexity published with
 // it, installed only as a regular file, and never run as root. The helper runs
-// the same script in Update sources. Must equal BUMBLEBEE_SCRIPT in bin/vigil
+// the same script in Run update check. Must equal BUMBLEBEE_SCRIPT in bin/vigil
 // (a test checks).
 var BUMBLEBEE_INSTALL = "a=; case \"$(/usr/bin/uname -m)\" in x86_64) a=amd64 ;; aarch64) a=arm64 ;; esac\nif [ -z \"$a\" ]; then echo 'Bumblebee has no build for this computer.'; exit 0; fi\nt=$(/usr/bin/mktemp -d); trap '/usr/bin/rm -rf \"$t\"' EXIT\n/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 60 --max-filesize 4194304 -o \"$t/releases.json\" 'https://api.github.com/repos/perplexityai/bumblebee/releases?per_page=30'\nv=$(/usr/bin/jq -r --argjson now \"$(/usr/bin/date +%s)\" '[.[] | select(type == \"object\") | select((.draft != true) and (.prerelease != true)) | select((.tag_name | type) == \"string\" and (.tag_name | test(\"^v[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$\"))) | select((.published_at | type) == \"string\" and (.published_at | fromdateiso8601) <= ($now - 604800)) | .tag_name | ltrimstr(\"v\")] | sort_by(split(\".\") | map(tonumber)) | last // \"\"' \"$t/releases.json\")\nif ! [[ $v =~ ^[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$ ]]; then echo 'No Bumblebee release has been out for 7 days yet.'; exit 1; fi\nf=\"bumblebee_${v}_linux_${a}.tar.gz\"; u=\"https://github.com/perplexityai/bumblebee/releases/download/v${v}\"\n/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 180 --max-filesize 67108864 -o \"$t/$f\" \"$u/$f\"\n/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 60 --max-filesize 65536 -o \"$t/checksums.txt\" \"$u/checksums.txt\"\nwant=$(/usr/bin/awk -v f=\"$f\" '$2 == f { print $1 }' \"$t/checksums.txt\")\nhave=$(/usr/bin/sha256sum \"$t/$f\" | /usr/bin/cut -d' ' -f1)\nif ! [[ $want =~ ^[0-9a-f]{64}$ ]] || [ \"$want\" != \"$have\" ]; then echo 'Bumblebee did not match the checksum Perplexity published, so it was not installed.'; exit 1; fi\n/usr/bin/tar --no-same-owner --no-same-permissions -xzf \"$t/$f\" -C \"$t\" bumblebee\nif [ ! -f \"$t/bumblebee\" ] || [ -L \"$t/bumblebee\" ]; then echo 'Bumblebee was not a plain program file, so it was not installed.'; exit 1; fi\nif [ -f /usr/local/bin/bumblebee ] && [ ! -L /usr/local/bin/bumblebee ] && /usr/bin/cmp -s \"$t/bumblebee\" /usr/local/bin/bumblebee; then echo \"Bumblebee $v is already installed.\"; exit 0; fi\n/usr/bin/install -D -o root -g root -m 0755 \"$t/bumblebee\" /usr/local/bin/bumblebee\necho \"Bumblebee $v is installed.\"\n"
 
@@ -479,7 +481,7 @@ var TERMINAL_ACTIONS = {
     title: "Update Bumblebee",
     what: ["Installs the newest Bumblebee from Perplexity, once it has been out for a week.",
            "It is installed only if it matches the checksum Perplexity published with it.",
-           "Update sources on the Overview does this too, behind the same password prompt.",
+           "Run update check on the Overview does this too, behind the same password prompt.",
            "Technical: GitHub release list, release archive and checksums.txt over HTTPS, installed as root to /usr/local/bin/bumblebee"],
     run: BUMBLEBEE_INSTALL
   },
@@ -658,7 +660,7 @@ var TERMINAL_ACTIONS = {
       + "&& [ -d \"$HOME/.config/omarchy/plugins/$p\" ] && [ -f \"$c\" ] && /usr/bin/jq -e --arg id \"$p\" "
       + "'((.disabledPlugins // []) | index($id) | not) and (tostring | contains(\"\\\"\" + $id + \"\\\"\"))' \"$c\" >/dev/null 2>&1; then\n"
       + "  omarchy-plugin-disable \"$p\"\n"
-      + "  : > \"$s/bumblebee-plugin\"; echo 'Bumblebee plugin: off. Vigil runs Bumblebee in its Full scan.'\n"
+      + "  : > \"$s/bumblebee-plugin\"; echo 'Bumblebee plugin: off. Vigil runs Bumblebee in its daily check.'\n"
       + "fi\n"
       + "echo 'Done. Vigil runs these on its own weekly schedule now.'"
   },
@@ -1023,7 +1025,7 @@ function sourceLine(src, now) {
 }
 
 function lastRunLine(run, now) {
-  if (!run || run.at === "") return "No update yet. It runs within a day, or press Update sources."
+  if (!run || run.at === "") return "No update yet. It runs within a day, or press Run update check."
   var time = run.at.substring(11, 16)
   return "Last update " + relativeDay(run.at, now) + " at " + time
     + (run.ok ? ". Every source refreshed." : ". Some sources did not refresh; Vigil tries again tomorrow.")
@@ -1188,44 +1190,78 @@ function missingLabel(report) {
   return "MISSING " + names.join(", ") + ". INSTALL"
 }
 
-// The Update sources card: what gets updated, and the one step that asks.
-function updateConfirmation(report) {
-  if (!report) return null
-  var lines = ["Downloads the latest of everything Vigil checks against:"]
+// The four run buttons share one helper: what each runs, in the names the
+// Last run list uses, one numbered line each.
+function runLines(report, ids) {
   var has = function(id) {
     for (var i = 0; i < report.sources.length; i++) if (report.sources[i].id === id) return true
     return false
   }
-  var n = 1
-  if (has("signatures")) lines.push((n++) + ". ClamAV signatures. Omarchy asks for your password for this one step,"
-    + " because ClamAV keeps them in a system folder.")
-  if (has("pending-updates")) lines.push((n++) + ". System update check: waiting system and Omarchy updates (nothing is installed).")
-  if (has("flatpak")) lines.push((n++) + ". Flatpak update check, and the updates for your own Flatpak apps (no password).")
-  if (has("arch-audit")) lines.push((n++) + ". Arch security list: known holes in your packages, from the Arch security team.")
-  if (has("osv")) lines.push((n++) + ". OSV malware list: malicious npm and Bun packages, from OSV.dev.")
-  if (has("aur")) lines.push((n++) + ". AUR package status: whether your AUR packages are still maintained.")
-  if (has("bumblebee-list")) lines.push((n++) + ". Bumblebee list and Bumblebee release check, from Perplexity; a newer"
-    + " Bumblebee that has been out for a week is installed with the same password prompt.")
-  if (n === 1) lines = ["Nothing to update yet. Install ClamAV, arch-audit or osv-scanner (Detect and Supply tabs) to add them."]
-  lines.push("No scan runs, and nothing on your computer changes. The panel shows the progress.")
-  lines.push("Technical: wake clamav-freshclam (pkexec), checkupdates, arch-audit --upgradable, osv-scanner, an AUR lookup and Perplexity threat_intel, both with curl")
-  return { title: "Update sources", lines: lines }
+  var what = {
+    "settings": "Settings checks: every row in every tab.",
+    "downloads-scan": "ClamAV scan of ~/Downloads: what is new there since the last scan.",
+    "pending-updates": "System update check: waiting system and Omarchy updates (nothing is installed).",
+    "flatpak": "Flatpak update check, and the updates for your own Flatpak apps (no password).",
+    "bumblebee": "Bumblebee scan: your npm, Bun and other packages against the Bumblebee list.",
+    "virus-scan": "ClamAV scan of ~: your whole home folder, Downloads included. This can take a while.",
+    "firmware": "Firmware check: firmware updates for this computer, from LVFS.",
+    "password-check": "Password check: every account has a password. Omarchy asks for your password.",
+    "signatures": "ClamAV signatures. Omarchy asks for your password, because ClamAV keeps them in a system folder.",
+    "arch-audit": "Arch security list: known holes in your packages, from the Arch security team.",
+    "osv": "OSV malware list: malicious npm and Bun packages, from OSV.dev.",
+    "aur": "AUR package status: whether your AUR packages are still maintained.",
+    "bumblebee-list": "Bumblebee list and Bumblebee release check, from Perplexity; a newer Bumblebee that has"
+      + " been out for a week is installed with the same password prompt as the signatures."
+  }
+  var lines = [], n = 1
+  for (var i = 0; i < ids.length; i++)
+    if (ids[i] === "settings" || has(ids[i])) lines.push((n++) + ". " + what[ids[i]])
+  return lines
 }
 
-// The Full scan card. Everything runs in the background; the one step that
-// needs your password uses Omarchy's own password dialog, not a terminal.
+var UPDATE_IDS = ["signatures", "arch-audit", "osv", "aur", "bumblebee-list"]
+var DAILY_IDS = ["pending-updates", "flatpak", "bumblebee", "downloads-scan", "settings"]
+var WEEKLY_IDS = ["firmware", "virus-scan"]
+var DONE_LINE = "The panel shows the progress, and you get a notification when it is done."
+
+// Run update check: the lists Vigil checks against, and the one step that asks.
+function updateConfirmation(report) {
+  if (!report) return null
+  var lines = runLines(report, UPDATE_IDS)
+  if (lines.length === 0) lines = ["Nothing to update yet. Install ClamAV, arch-audit or osv-scanner (Detect and Supply tabs) to add them."]
+  else lines.unshift("Downloads the latest of everything Vigil checks against:")
+  lines.push("No scan runs. " + DONE_LINE)
+  lines.push("Technical: wake clamav-freshclam (pkexec), arch-audit --upgradable, osv-scanner, an AUR lookup and Perplexity threat_intel, both with curl")
+  return { title: "Run update check", lines: lines }
+}
+
+// Run daily check: light work, no password.
+function dailyConfirmation(report) {
+  if (!report) return null
+  return { title: "Run daily check", lines: ["Runs the daily check now, in this order:"]
+    .concat(runLines(report, DAILY_IDS)).concat(["No password needed. " + DONE_LINE]) }
+}
+
+// Run weekly check: the long one.
+function weeklyConfirmation(report) {
+  if (!report) return null
+  var lines = runLines(report, WEEKLY_IDS)
+  if (lines.length === 0) lines = ["Nothing to run yet. Install ClamUI (Detect tab) to add the scan of your home folder."]
+  return { title: "Run weekly check", lines: ["Runs the weekly check now, in this order:"]
+    .concat(lines).concat(["No password needed. You can close this panel. " + DONE_LINE]) }
+}
+
+// Run all: the update check, the daily check and the weekly check, plus the
+// password check. The scan of your home folder covers Downloads, so Downloads
+// is not scanned twice. The steps that ask for your password come first.
 function fullScanConfirmation(report) {
   if (!report) return null
-  return { title: "Full scan", lines: [
-    "Runs every check and scan Vigil has, in this order:",
-    "1. Password check: every account has a password. Omarchy asks for your password for this one step.",
-    "2. System update check, Flatpak update check, Arch security list, OSV malware list,",
-    "   AUR package status, Bumblebee list and Bumblebee release check.",
-    "3. Bumblebee scan, if Bumblebee is installed.",
-    "4. Firmware check, if fwupd is installed.",
-    "5. ClamAV scan of ~ (your whole home folder), if ClamAV is installed. This can take a while.",
-    "6. Settings checks in every tab.",
-    "The panel shows the progress, and you get a notification when it is done."] }
+  var ids = UPDATE_IDS.slice(0, 1).concat(["password-check"]).concat(UPDATE_IDS.slice(1))
+    .concat(DAILY_IDS.filter(function(id) { return id !== "downloads-scan" })).concat(WEEKLY_IDS)
+  return { title: "Run all", lines: ["Runs the update check, the daily check and the weekly check, in this order:"]
+    .concat(runLines(report, ids))
+    .concat(["The ClamAV scan of ~ includes Downloads, so ~/Downloads is not scanned twice.",
+             "Omarchy asks for your password at the start, up to twice. " + DONE_LINE]) }
 }
 
 function parseHistory(h) {

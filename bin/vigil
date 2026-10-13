@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta, timezone
 
-VERSION = "0.26.1"
+VERSION = "0.27.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1395,7 +1395,7 @@ def _scanner_check(sid, binary, cat, title, why, run_action, install_action):
 
 # --- Accounts, shell history and old network services -----------------------
 # What a newcomer gains from a full audit tool, done Vigil's own way. Only the
-# empty-password check needs root (/etc/shadow): Full scan's terminal step
+# empty-password check needs root (/etc/shadow): Run all (one password prompt)
 # writes just the names of such accounts to NO_PASSWORD_NAME in the state
 # folder, and the date of that file is when the check last ran.
 
@@ -1421,7 +1421,7 @@ def _passwd_entries():
 
 
 def no_password_scan():
-    """(date, names) from the last Full scan's password check, or ("", None) if it never ran."""
+    """(date, names) from the last password check (Run all), or ("", None) if it never ran."""
     try:
         dirfd = _open_home_dir(list(STATE_DIR))
     except (OSError, Refused):
@@ -1471,7 +1471,7 @@ def can_update_signatures():
 
 
 def root_updates_argv(signatures, bumblebee):
-    """One password prompt for everything Update sources does as root. Each part
+    """One password prompt for everything Run update check (and Run all) does as root. Each part
     runs in its own subshell and reports its own exit code on a marker line."""
     parts = []
     if signatures:
@@ -1577,7 +1577,7 @@ def check_accounts():
     if not problems:
         return result(cid, cat, title, "pass",
                       "No extra root accounts, shared IDs or accounts without a password." if date else
-                      "No extra root accounts or shared IDs. A Full scan also checks for accounts without a "
+                      "No extra root accounts or shared IDs. Run all also checks for accounts without a "
                       "password.", why, weight=3)
     return result(cid, cat, title, "fail" if roots or nopw else "warn", _and(problems)[:1].upper() + _and(problems)[1:] + ".", why,
                   clean_block(lines), weight=3, howto=" ".join(howto))
@@ -1705,8 +1705,8 @@ FEED_FILES = {"arch-audit": "arch-audit.json", "osv": "osv.json", "aur": "aur.js
               "pending-updates": "pending-updates.json", "firmware": "firmware.json", "flatpak": "flatpak.json",
               "downloads-scan": "downloads-scan.json",
               "bumblebee-release": "bumblebee-release.json"}
-# Two weekly timers: the sources (Update sources), and the automatic part of
-# a Full scan (the virus scan of the home folder and a Bumblebee rescan).
+# Two weekly timers: the update check, and the weekly check
+# (the virus scan of the home folder and firmware); the daily check daily.
 SOURCE_FEEDS = ("bumblebee-release", "pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee-list")
 FEED_DAYS = 7
 FEED_RETRY_DAYS = 1
@@ -1808,7 +1808,7 @@ def next_daily():
 
 
 def next_full_scan():
-    """When the next automatic Full scan (its background part) falls due."""
+    """When the next weekly check falls due."""
     return _next_due(("full-scan",))
 
 
@@ -1946,7 +1946,7 @@ def source_status():
         feed("firmware", ITEM_NAME["firmware"] + WEEKLY)
     d, _ = no_password_scan()
     _, t = _mtime_stamp([home_path(*STATE_DIR, NO_PASSWORD_NAME)]) if d else ("", "")
-    add("password-check", ITEM_NAME["password-check"] + " (Full scan only)", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
+    add("password-check", ITEM_NAME["password-check"] + " (Run all only)", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
     for name in ("pending-updates", "flatpak"):
         if feed_available(name):
             feed(name, ITEM_NAME[name] + DAILY)
@@ -2242,7 +2242,7 @@ def parse_clamscan(text):
     return found
 
 
-# Full scan covers the whole home folder except what only holds rebuildable
+# The weekly check covers the whole home folder except what only holds rebuildable
 # or downloaded-by-tools data, which is large and rarely where malware sits.
 HOME_SCAN_SKIP = (".cache", ".local/share/Steam", ".local/share/containers", ".local/share/flatpak", ".var",
                   ".npm", ".cargo", ".rustup", "go/pkg", ".local/share/mise")
@@ -2448,7 +2448,7 @@ def refresh_virus_scan(on_progress=None):
 @check
 def check_virus_scan():
     cid, cat, title = "virus-scan", "detect", "ClamAV scans of ~ and ~/Downloads"
-    why = ("Every week, and in each Full scan, ClamAV scans your home folder for known malware, as you and "
+    why = ("Every week, and in each Run all, ClamAV scans your home folder for known malware, as you and "
            "in the background; every day it scans what is new in Downloads. Caches, game libraries, "
            "node_modules and .git folders are skipped.")
     if not is_trusted_executable(sys_path("/usr/bin/clamscan")):
@@ -2734,7 +2734,7 @@ def refresh_firmware():
 # --- Flatpak apps --------------------------------------------------------------
 # Omarchy's updater does not update Flatpak apps, and Vigil installs ClamUI
 # (which carries its own ClamAV) as one. Your own (--user) apps update without
-# a password, in Update sources; apps installed for every account (--system)
+# a password, in Run daily check and Run all; apps installed for every account (--system)
 # need Omarchy's password dialog, so only their button does that.
 
 FLATPAK = "/usr/bin/flatpak"
@@ -2774,7 +2774,7 @@ def refresh_flatpak():
 
 
 def update_user_flatpaks():
-    """Update sources: your own Flatpak apps, without a password, then check again."""
+    """Run daily check and Run all: your own Flatpak apps, without a password, then check again."""
     rc, _ = run([FLATPAK, "update", "--user", "--noninteractive"], timeout=1800, limit=2 * 1024 * 1024)
     if rc != 0:
         raise Refused("Flatpak could not update your apps")
@@ -2792,7 +2792,7 @@ def check_flatpak():
     cache = feed_cache("flatpak")
     if cache is None:
         return result(cid, cat, title, "info", "Checked with the next update.", why, weight=0,
-                      howto="Press Update sources on the Overview.")
+                      howto="Press Run daily check on the Overview.")
     ids = {w: [x for x in cache.get(w, []) if isinstance(x, str) and _APP_ID.match(x)][:200]
            if isinstance(cache.get(w), list) else [] for w in ("user", "system")}
     total = len(ids["user"]) + len(ids["system"])
@@ -2804,7 +2804,7 @@ def check_flatpak():
     return result(cid, cat, title, "warn", "%d Flatpak app%s %s updates waiting (%s)." % (
         total, "" if total == 1 else "s", "has" if total == 1 else "have", when), why, clean_block(lines),
         fix=fix("terminal", "update-flatpaks", "Update apps"), weight=1,
-        howto="Press Update apps, or Update sources on the Overview (it updates your own apps; apps "
+        howto="Press Update apps, or Run daily check on the Overview (it updates your own apps; apps "
               "installed for every account ask for your password, so only Update apps does those).")
 
 
@@ -2820,8 +2820,8 @@ def check_firmware():
                             "scan checks your firmware.")
     cache = feed_cache("firmware")
     if cache is None:
-        return result(cid, cat, title, "info", "Checked in the next Full scan.", why, weight=0,
-                      howto="Press Full scan on the Overview.")
+        return result(cid, cat, title, "info", "Checked in the next weekly check.", why, weight=0,
+                      howto="Press Run weekly check on the Overview.")
     ups = [u for u in cache.get("updates", []) if isinstance(u, dict)][:50] \
         if isinstance(cache.get("updates"), list) else []
     when = feed_when(cache)
@@ -2882,8 +2882,8 @@ def feed_findings():
 # installed packages, lockfiles, editor and browser extensions and MCP configs
 # against exposure catalogs of known-compromised releases that Perplexity
 # maintains in the same repository (threat_intel/). The Install button puts
-# the release binary, checksum-verified, at BUMBLEBEE_BIN; Update sources
-# fetches the current catalogs; the Full scan runs it as you, read-only.
+# the release binary, checksum-verified, at BUMBLEBEE_BIN; the update check
+# fetches the current catalogs; the daily check runs it as you, read-only.
 BUMBLEBEE_BIN = "/usr/local/bin/bumblebee"
 BUMBLEBEE_RELEASES_URL = "https://api.github.com/repos/perplexityai/bumblebee/releases?per_page=30"
 RELEASE_AGE_DAYS = 7
@@ -3124,7 +3124,7 @@ def refresh_bumblebee():
         raise Refused("it is not installed")
     catalog = home_path(*STATE_DIR, BUMBLEBEE_CATALOG)
     if not exists(catalog):
-        raise Refused("its list has not been downloaded yet; press Update sources")
+        raise Refused("its list has not been downloaded yet; press Run update check")
     rc, out = run([BUMBLEBEE_BIN, "scan", "--profile", "baseline", "--exposure-catalog", catalog,
                    "--findings-only", "--output", "stdout", "--max-duration", "5m"],
                   timeout=360, limit=4 * 1024 * 1024)
@@ -3158,38 +3158,50 @@ STEP_TEXT = dict(ITEM_NAME, **{
     "signatures-and-bumblebee": "ClamAV signatures and Bumblebee update" + ASKS})
 
 
-def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=False):
-    """Run what is due (the weekly background run), or on request:
-    sources_only (Update sources), full or force (Full scan, background part),
-    scan_only (the virus scan alone). Emits progress lines when asked to."""
-    sources = [] if scan_only else [n for n in SOURCE_FEEDS if feed_available(n) and (
-        force or full or sources_only or feed_due(n))]
-    run_full = full or force or (not sources_only and not scan_only and feed_due("full-scan"))
-    # The password step only when you press Full scan (never in the weekly run),
-    # and first, while you are still at the screen.
+def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=False, daily_only=False,
+                      weekly_only=False):
+    """Run what is due (the background run), or what a button asks for:
+    sources_only (Run update check), daily_only (Run daily check), weekly_only
+    (Run weekly check), full or force (Run all), scan_only (the virus scan of
+    your home folder alone). Emits progress lines when asked to."""
+    full = full or force
+    background = not (full or sources_only or scan_only or daily_only or weekly_only)
+    pressed = not background
+    # The update check: the lists. The daily check: the update and Flatpak
+    # checks, Bumblebee over your packages, a scan of what is new in Downloads.
+    # The weekly check: firmware and the whole home folder.
+    want_update = full or sources_only or background
+    want_daily = full or daily_only or background
+    run_full = full or weekly_only or (background and feed_due("full-scan"))
+    update = [n for n in SOURCE_FEEDS if n not in DAILY_FEEDS and feed_available(n) and (pressed or feed_due(n))] \
+        if want_update else []
+    daily = [n for n in SOURCE_FEEDS if n in DAILY_FEEDS and feed_available(n) and (pressed or feed_due(n))] \
+        if want_daily else []
     # Steps that ask for your password come first, while you are at the screen,
-    # and only when you press a button: never in the weekly background run.
-    # In Update sources the Bumblebee release check comes first, so the one
-    # password step can include a Bumblebee update when a newer release is ready.
-    early = [n for n in sources if n == "bumblebee-release"] if sources_only else []
-    sources = [n for n in sources if n not in early]
+    # and only when you press a button: never in the background run. The
+    # Bumblebee release check comes before them, so the one password step for
+    # the update check can include a Bumblebee update when a newer release is ready.
+    early = [n for n in update if n == "bumblebee-release"] if pressed else []
+    update = [n for n in update if n not in early]
     # The password step: decided when it is reached (see the loop), after the release check.
-    root_step = "root-updates" if sources_only and can_ask_password() \
+    root_step = "root-updates" if (full or sources_only) and can_ask_password() \
         and (can_update_signatures() or bumblebee_ok()) else ""
-    steps = (["password-check"] if full and can_ask_password() else []) + early \
-        + ([root_step] if root_step else []) + list(sources)
-    if run_full and bumblebee_ok():
+    steps = early + ([root_step] if root_step else []) \
+        + (["password-check"] if full and can_ask_password() else []) + update + daily
+    sources = [n for n in steps if n in SOURCE_FEEDS]
+    catalog = exists(home_path(*STATE_DIR, BUMBLEBEE_CATALOG))
+    if bumblebee_ok() and (full or (daily_only and catalog) or
+                           (background and (run_full or (feed_due("bumblebee") and catalog)))):
         steps.append("bumblebee")
-    daily = not sources_only and not scan_only and not run_full
-    if daily and bumblebee_ok() and feed_due("bumblebee") and exists(home_path(*STATE_DIR, BUMBLEBEE_CATALOG)):
-        steps.append("bumblebee")
-    if daily and feed_due("downloads-scan"):
+    # Run all scans the whole home folder, Downloads included, so not Downloads twice.
+    if (daily_only or (background and not run_full)) and feed_available("downloads-scan") and \
+            (daily_only or feed_due("downloads-scan")):
         steps.append("downloads-scan")
     if run_full and feed_available("firmware"):
         steps.append("firmware")
     if (run_full or scan_only) and feed_available("virus-scan"):
         steps.append("virus-scan")                    # last: it takes longest
-    
+
     # Each step's share of the progress bar: the virus scan takes most of the
     # time, so it gets most of the bar, and the quick steps a sliver each.
     weights = [STEP_WEIGHT.get(n, 1) for n in steps]
@@ -3221,7 +3233,7 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
                 refresh_downloads_scan(lambda n, of, i=i: progress(i, len(steps), STEP_TEXT["downloads-scan"], n, of))
             elif name == "password-check":
                 refresh_no_password()
-            elif name == "flatpak" and sources_only and "user" in flatpak_installations():
+            elif name == "flatpak" and (full or daily_only) and "user" in flatpak_installations():
                 update_user_flatpaks()
             elif name in ("signatures", "bumblebee-update", "signatures-and-bumblebee"):
                 notes.extend(refresh_root_updates(name != "bumblebee-update", name != "signatures"))
@@ -3255,7 +3267,7 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
             if name in FEED_FILES and name not in done:
                 save_feed(name, {}, ok=False)
     if sources:
-        save_last_run(not stopped and not [n for n in failed if n in SOURCE_FEEDS], force or full or sources_only)
+        save_last_run(not stopped and not [n for n in failed if n in SOURCE_FEEDS], pressed)
     if run_full and "virus-scan" in done and feed_available("downloads-scan"):
         save_feed("downloads-scan", {"found": [], "files": 0, "byFullScan": True})
     if run_full:
@@ -3267,14 +3279,18 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
     if not done and not failed:
         if run_full:
             return {"ok": True, "action": "", "message": "Checked every setting. Install ClamUI (Detect tab) "
-                    "to add a virus scan to the Full scan." + no_pkexec}
+                    "to add a virus scan to the weekly check." + no_pkexec}
         return {"ok": True, "action": "", "message": "Everything is up to date."}
     refreshed = [FEED_LABELS[n] for n in done if n in SOURCE_FEEDS or n == "signatures"]
     parts = []
     if refreshed:
         parts.append("refreshed " + _and(refreshed))
+    if "downloads-scan" in done:
+        parts.append("scanned what is new in Downloads")
     if "virus-scan" in done:
         parts.append("scanned your home folder")
+    if "firmware" in done:
+        parts.append("checked for firmware updates")
     if "bumblebee" in done:
         parts.append("checked your packages with Bumblebee")
     if "password-check" in done:
@@ -3355,8 +3371,8 @@ def check_bumblebee():
                             "Perplexity's published checksum, and installs it.")
     cache = feed_cache("bumblebee")
     if cache is None:
-        return result(cid, cat, title, "info", "Installed. Its first check runs with the next Full scan.", why,
-                      weight=0, howto="Press Full scan on the Overview, or wait for the weekly one.")
+        return result(cid, cat, title, "info", "Installed. Its first check runs with the next daily check.", why,
+                      weight=0, howto="Press Run daily check on the Overview, or wait for the next one.")
     found = [f for f in cache.get("findings", []) if isinstance(f, dict)][:500] \
         if isinstance(cache.get("findings"), list) else []
     when = feed_when(cache).replace("checked", "scanned")
@@ -3373,7 +3389,7 @@ def check_bumblebee():
         return result(cid, cat, title, "info", "Bumblebee %s is ready to install (you have %s)." % (
             ready, bumblebee_installed_version()), why, "No known-compromised packages (%s)." % when,
             fix=fix("terminal", "update-bumblebee", "Update Bumblebee"), weight=0,
-            howto="Press Update Bumblebee, or Update sources on the Overview, which does it behind the same "
+            howto="Press Update Bumblebee, or Run update check on the Overview, which does it behind the same "
                   "password prompt. Vigil only takes a release that has been out for a week, checked against "
                   "the checksum Perplexity published.")
     return result(cid, cat, title, "pass", "No known-compromised packages (%s)." % when, why, weight=3)
@@ -3489,7 +3505,7 @@ def check_other_schedules():
             kept.append("ClamUI scans %s; Vigil could not read which folders, so it leaves it on." % when)
     if plugin_enabled(BUMBLEBEE_PLUGIN) and bumblebee_ok():
         twice.append("The Bumblebee plugin rescans every 6 hours and keeps its own list; Vigil runs "
-                     "Bumblebee in its Full scan.")
+                     "Bumblebee in its daily check.")
     if _lexists(home_path(*SECURITY_SCAN_WANTS)):
         kept.append("Security Scan runs every 6 hours. It also runs AUR-Malware, which Vigil does not, "
                     "so Vigil leaves it on.")
@@ -4638,13 +4654,13 @@ CHECK_HELP = {
     "aur-packages": ("Keep only the ones you recognise and still use; remove the rest with "
                      "omarchy pkg drop <name>.",
                      ("docs", "arch-aur", "Learn more")),
-    "flatpak-apps": ("Update sources checks your Flatpak apps and updates your own. The Arch Wiki explains Flatpak.",
+    "flatpak-apps": ("The daily check looks for Flatpak updates; Run daily check also installs those for your own apps. The Arch Wiki explains Flatpak.",
                      ("docs", "arch-flatpak", "Learn more")),
-    "firmware": ("The Full scan checks for firmware updates. The Arch Wiki explains fwupd and LVFS.",
+    "firmware": ("The weekly check looks for firmware updates. The Arch Wiki explains fwupd and LVFS.",
                  ("docs", "arch-fwupd", "Learn more")),
     "virus-scan": ("Install ClamUI, which sets up ClamAV; Vigil then scans Downloads every week.",
                    ("terminal", "install-clamui", "Install ClamUI")),
-    "bumblebee": ("Bumblebee runs with the Full scan. Perplexity explains what it checks and how its list "
+    "bumblebee": ("Bumblebee runs with the daily check. Perplexity explains what it checks and how its list "
                   "is kept.", ("docs", "bumblebee", "Learn more")),
     "omarchy-plugins": ("Nothing to fix. Remove plugins you do not use with omarchy plugin remove <id>.",
                         ("terminal", "show-plugins", "List plugins")),
@@ -5343,7 +5359,7 @@ def main(argv):
         emit(set_dismissed(argv[2], argv[1] == "dismiss"))
         return 0
     if len(argv) in (2, 3) and argv[1] == "refresh-feeds" and argv[2:] in (
-            [], ["--force"], ["--sources"], ["--full"], ["--scan"]):
+            [], ["--force"], ["--sources"], ["--full"], ["--scan"], ["--daily"], ["--weekly"]):
         PROGRESS["on"] = True
         flag = argv[2] if len(argv) == 3 else ""
         if not take_run_lock():
@@ -5357,7 +5373,8 @@ def main(argv):
             pass
         save_run_info()
         emit(refresh_due_feeds(force=flag == "--force", sources_only=flag == "--sources", full=flag == "--full",
-                               scan_only=flag == "--scan"))
+                               scan_only=flag == "--scan", daily_only=flag == "--daily",
+                               weekly_only=flag == "--weekly"))
         return 0
     if len(argv) == 2 and argv[1] == "stop":
         emit(stop_run())
@@ -5369,7 +5386,7 @@ def main(argv):
     if len(argv) == 2 and argv[1] == "version":
         emit({"version": VERSION})
         return 0
-    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection> | vigil refresh-feeds [--force|--sources|--full|--scan] | vigil running | vigil stop | vigil version\n")
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection> | vigil refresh-feeds [--force|--sources|--daily|--weekly|--full|--scan] | vigil running | vigil stop | vigil version\n")
     return 2
 
 

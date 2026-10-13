@@ -22,7 +22,7 @@ These hold for every pillar, now and in later phases:
 3. **Virus scans run as you.** ClamAV scans (Vigil's quick scan and ClamUI)
    never run as root: malware scanners have had parser bugs, and running
    them unprivileged limits what a malicious file can do. The one check
-   that needs root, accounts without a password, runs only in a Full scan
+   that needs root, accounts without a password, runs only in a Run all
    you start, and keeps only account names.
 4. **Hand off, don't absorb.** ClamUI keeps quarantine, Black Ops keeps
    telemetry blocking. Vigil reads their results and opens them; it does not
@@ -40,7 +40,7 @@ These hold for every pillar, now and in later phases:
    comes from the tools of the people who maintain it (arch-audit,
    osv-scanner, ClamAV's freshclam, Perplexity's Bumblebee catalogs) and one
    fixed AUR lookup, once a week
-   (the `autoUpdate` setting) or when you press Update sources or Full scan. Nothing the weekly
+   (the `autoUpdate` setting) or when you press a run button. Nothing the weekly
    update fetches is ever run; results are size-capped and validated like any
    other input. The one program Vigil downloads, Bumblebee, is installed only
    when you press Install, at a pinned version, after its checksum matches.
@@ -120,7 +120,7 @@ accepted) cannot be signalled; the panel then says so.
   with its `sudo` prefixes removed; nothing from the report or a file
   reaches it. Steps that would wait for input are not allowed (a test
   checks), and `ufw` runs with `--force` so it never prompts.
-- Update sources updates ClamAV's signatures only when you press it (the
+- Run update check (and Run all) updates ClamAV's signatures only when you press it (the
   weekly run never asks), with one constant root script through pkexec: if
   ClamAV's update service runs, it is woken with `systemctl kill
   --signal=SIGUSR1` (it then checks at once; a second freshclam would fail
@@ -136,7 +136,7 @@ accepted) cannot be signalled; the panel then says so.
   current. Bumblebee is installed and updated by
   one constant root script (`BUMBLEBEE_SCRIPT` in `bin/vigil`, identical
   to `BUMBLEBEE_INSTALL` in `Model.js`; a test checks), used by Install,
-  Update Bumblebee and Update sources. It takes no data from the report:
+  Update Bumblebee, Run update check and Run all. It takes no data from the report:
   it reads Perplexity's release list from the GitHub API itself and picks,
   with `jq`, the newest release that is not a draft or pre-release and has
   been public for 7 days (a hijacked release is usually pulled within
@@ -164,7 +164,7 @@ accepted) cannot be signalled; the panel then says so.
   validated.
 - The password check runs `pkexec /usr/bin/awk -F: '$2 == "" { print $1 }'
   /etc/shadow` from the helper, a constant argv (`NO_PASSWORD_ARGV`), only
-  when you press Full scan, never in the weekly run. pkexec asks for your
+  when you press Run all, never in the background run. pkexec asks for your
   password through Omarchy's polkit agent, the same dialog Omarchy's own
   commands use. The output (account names only) is validated against the
   account-name pattern and written as you, mode 0600, to the state folder;
@@ -221,7 +221,7 @@ accepted) cannot be signalled; the panel then says so.
 
 ## Network
 
-The weekly refresh (and **Update sources** or **Full scan**) is the only network use Vigil starts
+The background checks (and the run buttons) are the only network use Vigil starts
 by itself, and only once the relevant tool is installed:
 
 - `checkupdates --nocolor` (pacman-contrib, which Omarchy ships) syncs a
@@ -230,7 +230,7 @@ by itself, and only once the relevant tool is installed:
   shared `/tmp`, where another account could plant one first) as you and
   lists waiting updates; only `name old -> new` lines matching a
   strict pattern are kept. It installs nothing.
-- In the Full scan, `fwupdmgr refresh --no-unreported-check` (fwupd's
+- In the weekly check, `fwupdmgr refresh --no-unreported-check` (fwupd's
   polkit policy lets a logged-in user refresh firmware metadata without a
   password) and `fwupdmgr get-updates --json --no-unreported-check
   --no-metadata-check`, as you, with stdin closed so nothing can prompt.

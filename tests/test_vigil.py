@@ -1245,7 +1245,7 @@ def test_aur_refresh_failure_is_retried(v):
 
 
 # --------------------------------------------------------------------------
-# Virus scan, Update sources, Full scan and their schedules
+# Virus scan, Run update check, Run all and their schedules
 
 def scan_argv(v):
     return tuple(v._clamscan_argv(v.HOME))
@@ -1376,7 +1376,7 @@ def test_two_timers_sources_and_full_scan(v, monkeypatch):
     ran.clear()
     assert v.refresh_due_feeds()["message"] == "Everything is up to date."
     assert ran == []
-    # Full scan button: everything.
+    # Run all button: everything.
     v.refresh_due_feeds(full=True)
     assert ran == ["arch-audit", "virus-scan"]
 
@@ -1466,7 +1466,7 @@ def test_last_run_list_scans_then_updates_with_times(v):
     # In schedule order: daily check, weekly check, update check.
     assert got == [("downloads-scan", "ClamAV scan of ~/Downloads (daily check)", "never"),
                    ("virus-scan", "ClamAV scan of ~ (weekly check)", "never"),
-                   ("password-check", "Password check (Full scan only)", "never"),
+                   ("password-check", "Password check (Run all only)", "never"),
                    ("signatures", "ClamAV signatures (update check)", "never"),
                    ("arch-audit", "Arch security list (update check)", "never")]
     assert all(len(s["label"]) <= 40 for s in v.source_status())          # the panel's limit
@@ -1516,7 +1516,7 @@ marc:x:1000:1000::/home/marc:/usr/bin/bash
 def test_accounts_clean(v):
     sysfile(v, "/etc/passwd", PASSWD)
     c = v.check_accounts()
-    assert c["status"] == "pass" and "A Full scan also checks" in c["summary"]
+    assert c["status"] == "pass" and "Run all also checks" in c["summary"]
     put(Path(v.HOME, ".local/state/omarchy-vigil/no-password.txt"), "", 0o600)
     assert v.check_accounts()["summary"] == "No extra root accounts, shared IDs or accounts without a password."
 
@@ -1604,7 +1604,7 @@ def test_firewire_only_matters_with_a_port(v):
 
 
 # --------------------------------------------------------------------------
-# Full scan: the whole home folder, Bumblebee, and the next automatic update
+# Run all: the whole home folder, Bumblebee, and the next automatic update
 
 def test_password_check_uses_omarchys_password_dialog(v):
     sysfile(v, "/etc/passwd", PASSWD + "ghost:x:1001:1001::/home/g:/bin/sh\n")
@@ -1651,7 +1651,7 @@ def test_remove_secret_lines(v):
     assert v.run_fix("remove-secret-lines")["message"] == "No lines with keys were found."
 
 
-def test_signatures_update_with_update_sources_only(v):
+def test_signatures_update_with_update_check_and_run_all_only(v):
     v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash", v.ROOT + "/usr/bin/freshclam",
                   v.ROOT + "/usr/bin/clamscan"}
     SIG = tuple(v.root_updates_argv(True, False))
@@ -1664,8 +1664,12 @@ def test_signatures_update_with_update_sources_only(v):
     res = v.refresh_due_feeds(sources_only=True)
     assert calls[0] == SIG and res["message"].startswith("Refreshed the ClamAV virus signatures")
     calls.clear()
-    v.refresh_due_feeds(full=True)                                         # Full scan: not the signatures
-    assert SIG not in calls
+    v.refresh_due_feeds(full=True)                                         # Run all: the same prompt
+    assert SIG in calls
+    calls.clear()
+    v.refresh_due_feeds(daily_only=True)                                   # daily and weekly: never ask
+    v.refresh_due_feeds(weekly_only=True)
+    assert SIG not in calls and tuple(v.NO_PASSWORD_ARGV) not in calls
     calls.clear()
     v.refresh_due_feeds()                                                  # weekly: never asks
     assert SIG not in calls and tuple(v.NO_PASSWORD_ARGV) not in calls
@@ -1812,7 +1816,7 @@ def test_bumblebee_states_and_install(v):
     assert c["status"] == "info" and c["fix"]["action"] == "install-helpers"
     bumblebee_installed(v)
     c = v.check_bumblebee()
-    assert c["status"] == "info" and "next Full scan" in c["summary"]
+    assert c["status"] == "info" and "next daily check" in c["summary"]
     with pytest.raises(v.Refused):
         v.refresh_bumblebee()                                             # no list downloaded yet
 
@@ -1857,7 +1861,8 @@ def test_only_one_run_at_a_time(v, capsys, monkeypatch):
     finally:
         os.close(fd)                          # the other run ends: the kernel drops its lock
     assert v.main(["vigil", "refresh-feeds", "--full"]) == 0
-    assert calls == [{"force": False, "sources_only": False, "full": True, "scan_only": False}]
+    assert calls == [{"force": False, "sources_only": False, "full": True, "scan_only": False, "daily_only": False,
+                      "weekly_only": False}]
     os.close(v.RUN_LOCK["fd"])
     v.RUN_LOCK["fd"] = None
 
@@ -2291,7 +2296,7 @@ def test_firmware_states(v):
     c = v.check_firmware()
     assert c["status"] == "info" and c["fix"]["action"] == "install-helpers"
     v.TRUSTED.add(v.ROOT + "/usr/bin/fwupdmgr")
-    assert v.check_firmware()["summary"] == "Checked in the next Full scan."
+    assert v.check_firmware()["summary"] == "Checked in the next weekly check."
     v.COMMANDS[FWUPD_GET] = (0, FWUPD_JSON)
     v.refresh_firmware()
     c = v.check_firmware()
@@ -2322,11 +2327,14 @@ def test_full_scan_checks_firmware_before_the_virus_scan(v, capsys, monkeypatch)
     v.PROGRESS["on"] = False
 
 
-def test_update_sources_checks_for_waiting_updates(v, capsys):
+def test_daily_check_checks_for_waiting_updates(v, capsys):
     updates_tools(v)
     v.COMMANDS[("/usr/bin/checkupdates", "--nocolor")] = (2, "")
     v.PROGRESS["on"] = True
-    v.refresh_due_feeds(sources_only=True)
+    v.refresh_due_feeds(sources_only=True)                                 # the update check: lists only
+    steps = [json.loads(l)["progress"]["doing"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
+    assert "System update check" not in steps
+    v.refresh_due_feeds(daily_only=True)
     steps = [json.loads(l)["progress"]["doing"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
     assert "System update check" in steps
     v.PROGRESS["on"] = False
@@ -2550,17 +2558,20 @@ def test_flatpak_updates_are_checked_and_shown(v):
         v.refresh_flatpak()
 
 
-def test_update_sources_updates_your_own_flatpak_apps(v, capsys):
+def test_daily_check_and_run_all_update_your_own_flatpak_apps(v, capsys):
     flatpak_apps(v)
     v.COMMANDS[("/usr/bin/flatpak", "update", "--user", "--noninteractive")] = (0, "")
     v.COMMANDS[("/usr/bin/flatpak", "remote-ls", "--user", "--updates", "--columns=application")] = (0, "")
     calls = []
     real = v.run
     v.run = lambda argv, **kw: (calls.append(tuple(argv)), real(argv, **kw))[1]
-    v.refresh_due_feeds(sources_only=True)
+    v.refresh_due_feeds(daily_only=True)
     assert ("/usr/bin/flatpak", "update", "--user", "--noninteractive") in calls
     calls.clear()
-    v.refresh_due_feeds(force=True)                                         # the weekly kind of run: check only
+    v.refresh_due_feeds(full=True)
+    assert ("/usr/bin/flatpak", "update", "--user", "--noninteractive") in calls
+    calls.clear()
+    v.refresh_due_feeds()                                                   # the background run: check only
     assert ("/usr/bin/flatpak", "update", "--user", "--noninteractive") not in calls
 
 
@@ -2673,3 +2684,31 @@ def test_a_full_scan_covers_the_daily_downloads_scan(v, monkeypatch):
     v.refresh_due_feeds(full=True)
     meta = json.loads(Path(v.HOME, ".local/state/omarchy-vigil/downloads-scan.json").read_text())
     assert meta["byFullScan"] is True and v.feed_due("downloads-scan") is False
+
+
+def test_each_button_runs_its_own_schedule(v, monkeypatch):
+    ran = []
+    monkeypatch.setattr(v, "feed_available", lambda n: True)
+    monkeypatch.setattr(v, "bumblebee_ok", lambda: True)
+    monkeypatch.setattr(v, "can_ask_password", lambda: False)
+    monkeypatch.setattr(v, "flatpak_installations", lambda: [])
+    monkeypatch.setattr(v, "exists", lambda p: True)
+    for n in v.SOURCE_FEEDS:
+        monkeypatch.setitem(v.FEED_REFRESH, n, lambda n=n: ran.append(n))
+    for fn, n in (("refresh_bumblebee", "bumblebee"), ("refresh_firmware", "firmware"),
+                  ("refresh_downloads_scan", "downloads-scan"), ("refresh_virus_scan", "virus-scan")):
+        monkeypatch.setattr(v, fn, lambda *a, n=n: ran.append(n))
+    update = ["bumblebee-release", "arch-audit", "osv", "aur", "bumblebee-list"]
+    v.refresh_due_feeds(sources_only=True)
+    assert ran == update
+    ran.clear()
+    v.refresh_due_feeds(daily_only=True)
+    assert ran == ["pending-updates", "flatpak", "bumblebee", "downloads-scan"]
+    ran.clear()
+    v.refresh_due_feeds(weekly_only=True)
+    assert ran == ["firmware", "virus-scan"]
+    ran.clear()
+    # Run all: the update check, the daily check, the weekly check; the home
+    # folder scan covers Downloads, so Downloads is not scanned twice.
+    v.refresh_due_feeds(full=True)
+    assert ran == update + ["pending-updates", "flatpak", "bumblebee", "firmware", "virus-scan"]

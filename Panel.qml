@@ -163,38 +163,44 @@ Panel {
   }
 
   // Runs `bin/vigil refresh-feeds` in the background. With no mode (the
-  // weekly run) the helper refreshes only what is due and retries failures the
-  // next day; "sources" (Update sources) refreshes every database and list;
-  // "full" (Full scan) also scans Downloads for viruses.
+  // background run) the helper runs only what is due and retries failures the
+  // next day. The buttons: "sources" (Run update check), "daily" (Run daily
+  // check), "weekly" (Run weekly check), "full" (Run all); "scan" is the
+  // virus scan of the home folder alone (its row's Scan now button).
+  readonly property var feedFlags: ({ sources: "--sources", daily: "--daily", weekly: "--weekly", full: "--full",
+                                      scan: "--scan" })
+  readonly property var feedTitles: ({ sources: "Run update check", daily: "Run daily check",
+                                       weekly: "Run weekly check", full: "Run all", scan: "Virus scan" })
   function refreshFeeds(mode) {
     if (feedProc.running || runElsewhere) return
     feedBuffer = ""
     feedResult = ""
     scanProgress = null
     feedOverflow = false
-    feedForced = mode === "sources" || mode === "full" || mode === "scan"
-    feedFull = mode === "full"
+    feedForced = feedFlags.hasOwnProperty(mode)
+    feedFull = mode === "full" || mode === "weekly"
     feedMode = mode
     feedProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, "refresh-feeds"]
-      .concat(mode === "sources" ? ["--sources"] : (mode === "full" ? ["--full"] : (mode === "scan" ? ["--scan"] : [])))
+      .concat(feedForced ? [feedFlags[mode]] : [])
     feedProc.running = true
-    // Anything but Update sources may scan the whole home folder, which can take a long time.
+    // The update check takes minutes; anything that scans files can take hours.
     feedDeadline.interval = mode === "sources" ? 3600000 : 4 * 3600000
     feedDeadline.restart()
-    if (mode === "sources") setStatus("Updating sources\u2026 Omarchy may ask for your password first.", false)
-    else if (mode === "full") setStatus("Full scan started. You can close this panel; you get a notification when it is done.", false)
+    if (mode === "sources") setStatus("Update check started. Omarchy may ask for your password first.", false)
+    else if (mode === "full") setStatus("Run all started. Omarchy may ask for your password first; after that you can close this panel.", false)
+    else if (mode === "daily") setStatus("Daily check started.", false)
+    else if (mode === "weekly") setStatus("Weekly check started. You can close this panel; you get a notification when it is done.", false)
     else if (mode === "scan") setStatus("Virus scan started. It runs in the background.", false)
   }
 
-  // Full scan: the background part (sources and the virus scan) plus the
-  // checks that need a password, in one terminal. Asks first on the usual card.
-  // Update sources asks first too: it may ask for your password (ClamAV's
-  // signatures live in a system folder), so it explains itself on the card.
-  function requestUpdate() {
+  // Every run button asks first, on the usual card, which lists what it runs.
+  function requestRun(kind) {
     if (!report || busy || feedProc.running || runElsewhere) return
-    pendingKind = "update-sources"
+    pendingKind = kind
     pendingAction = "all"
   }
+  function requestUpdate() { requestRun("update-sources") }
+  function requestFullScan() { requestRun("full-scan") }
 
   function requestInstallHelpers() {
     if (!report || busy || feedProc.running || runElsewhere) return
@@ -202,11 +208,6 @@ Panel {
     pendingAction = "install-helpers"
   }
 
-  function requestFullScan() {
-    if (!report || busy || feedProc.running || runElsewhere) return
-    pendingKind = "full-scan"
-    pendingAction = "all"
-  }
 
   function notifyNew(count) {
     var n = Math.max(1, Math.min(99, Math.round(Number(count) || 1)))
@@ -266,9 +267,13 @@ Panel {
       return
     }
     if (kind === "full-scan") {
-      // No terminal: the password step uses Omarchy's own password dialog,
+      // No terminal: the password steps use Omarchy's own password dialog,
       // so the panel stays open and shows the progress.
       refreshFeeds("full")
+      return
+    }
+    if (kind === "daily-check" || kind === "weekly-check") {
+      refreshFeeds(kind === "daily-check" ? "daily" : "weekly")
       return
     }
     if (kind === "clean-all") {
@@ -639,16 +644,19 @@ Panel {
       if (root.feedForced) {
         root.setStatus("", false)
         root.actionResult = {
-          title: root.feedMode === "full" ? "Full scan" : (root.feedMode === "scan" ? "Virus scan" : "Update sources"),
+          title: root.feedTitles[root.feedMode] || "Vigil",
           verdict: parsed ? parsed.message : "It did not finish.",
           ok: parsed !== null && parsed.ok,
           output: ""
         }
       }
-      if (root.feedFull)
+      // The long runs (Run all, Run weekly check) also send a notification.
+      if (root.feedFull) {
+        var name = root.feedTitles[root.feedMode]
         Quickshell.execDetached(["/usr/bin/notify-send", "--app-name=Vigil", "--", "Vigil",
-          parsed && parsed.stopped ? "The Full scan was stopped."
-            : (parsed ? "Full scan finished. Open the lighthouse in the bar for the results." : "The Full scan did not finish.")])
+          parsed && parsed.stopped ? name + " was stopped."
+            : (parsed ? name + " finished. Open the lighthouse in the bar for the results." : name + " did not finish.")])
+      }
       root.feedForced = false
       root.feedFull = false
       root.runAudit()
@@ -1034,15 +1042,6 @@ Panel {
               width: parent.width
               topPadding: Style.space(6)
               spacing: Style.space(8)
-              Button {
-                text: feedProc.running && root.feedFull ? "Scanning\u2026" : "Full scan"
-                tooltipText: "Run every check and scan Vigil has, including a virus scan of your home folder"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                bordered: true
-                enabled: !feedProc.running && !root.runElsewhere && !root.busy && root.pending === null
-                onClicked: root.requestFullScan()
-              }
               // When tools Vigil works with are missing, installing them comes first.
               Button {
                 visible: Model.missingLabel(root.report) !== ""
@@ -1055,14 +1054,28 @@ Panel {
                 enabled: !root.busy && !feedProc.running && !root.runElsewhere && root.pending === null
                 onClicked: root.requestInstallHelpers()
               }
-              Button {
-                visible: Model.missingLabel(root.report) === ""
-                text: feedProc.running && !root.feedFull ? "Updating\u2026" : "Update sources"
-                tooltipText: "Download the latest virus signatures and lists Vigil checks against. No scan"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                enabled: !feedProc.running && !root.runElsewhere && !root.busy && root.pending === null
-                onClicked: root.requestUpdate()
+              // One button per schedule line, in the same order, then all of them.
+              Repeater {
+                model: [
+                  { kind: "daily-check", mode: "daily", label: "Run daily check",
+                    tip: "Now: ClamAV scan of ~/Downloads, System update check, Flatpak update check, Bumblebee scan, settings checks" },
+                  { kind: "weekly-check", mode: "weekly", label: "Run weekly check",
+                    tip: "Now: Firmware check and ClamAV scan of ~ (your whole home folder)" },
+                  { kind: "update-sources", mode: "sources", label: "Run update check",
+                    tip: "Now: ClamAV signatures and every list Vigil checks against. No scan" },
+                  { kind: "full-scan", mode: "full", label: "Run all",
+                    tip: "Now: the update, daily and weekly checks, plus the password check" }
+                ]
+                delegate: Button {
+                  required property var modelData
+                  text: feedProc.running && root.feedMode === modelData.mode ? "Running\u2026" : modelData.label
+                  tooltipText: modelData.tip
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  bordered: modelData.mode === "full"
+                  enabled: !feedProc.running && !root.runElsewhere && !root.busy && root.pending === null
+                  onClicked: root.requestRun(modelData.kind)
+                }
               }
             }
             // While an update or scan runs: what it is doing, and how far along.
@@ -1221,7 +1234,7 @@ Panel {
           Text {
             textFormat: Text.PlainText
             width: parent.width
-            text: "R check again · ← → tabs · Enter details · F fix · D reviewed · U update all · Vigil " + (root.report ? root.report.version : "")
+            text: "R run all · ← → tabs · Enter details · F fix · D reviewed · U update check · Vigil " + (root.report ? root.report.version : "")
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

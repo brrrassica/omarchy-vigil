@@ -433,12 +433,24 @@ test("pillar rows count what each pillar shows", () => {
 })
 
 
-test("full scan card: every step, and the one that needs a password", () => {
-  const card = M.confirmation("full-scan", "all", parse(report()))
-  assert.equal(card.title, "Full scan")
-  assert.ok(card.lines.some(l => l.includes("Omarchy asks for your password for this one step")))
-  assert.ok(card.lines.some(l => l.includes("notification")))
-  assert.equal(M.confirmation("full-scan", "all", null), null)
+test("run cards: each lists its own schedule; Run all scans ~ but not ~/Downloads again", () => {
+  const src = id => ({ id, label: "x", date: "", time: "", state: "never", tried: "" })
+  const r = parse(report({ sources: ["downloads-scan", "virus-scan", "firmware", "password-check", "signatures",
+                                     "arch-audit", "pending-updates"].map(src) }))
+  const all = M.confirmation("full-scan", "all", r)
+  assert.equal(all.title, "Run all")
+  const steps = all.lines.filter(l => /^\d+\. /.test(l)).map(l => l.replace(/^\d+\. /, "").split(/[:.]/)[0])
+  assert.deepEqual(steps, ["ClamAV signatures", "Password check", "Arch security list", "System update check",
+                           "Settings checks", "Firmware check", "ClamAV scan of ~"])
+  assert.ok(all.lines.some(l => l.includes("notification")))
+  const daily = M.confirmation("daily-check", "all", r)
+  assert.equal(daily.title, "Run daily check")
+  assert.ok(daily.lines.some(l => l.startsWith("2. ClamAV scan of ~/Downloads")))
+  assert.ok(!daily.lines.some(l => /password\./.test(l) && !/No password/.test(l)))
+  const weekly = M.confirmation("weekly-check", "all", r)
+  assert.deepEqual(weekly.lines.slice(1, 3).map(l => l.split(":")[0]), ["1. Firmware check", "2. ClamAV scan of ~"])
+  for (const k of ["full-scan", "daily-check", "weekly-check", "update-sources"])
+    assert.equal(M.confirmation(k, "all", null), null)
 })
 
 test("every terminal says what it does, plainly, then the technical part", () => {
@@ -526,12 +538,12 @@ test("actions run without a terminal unless the tool asks questions", () => {
   assert.ok(card.lines[card.lines.length - 1].startsWith("Omarchy asks for your password"))
 })
 
-test("update sources card: lists what updates and where the password comes in", () => {
+test("update check card: lists what updates and where the password comes in", () => {
   const r = parse(report({ sources: [
     { id: "signatures", label: "ClamAV virus signatures", date: "", time: "", state: "never", tried: "" },
     { id: "arch-audit", label: "Arch vulnerability database", date: "", time: "", state: "never", tried: "" }] }))
   const card = M.confirmation("update-sources", "all", r)
-  assert.equal(card.title, "Update sources")
+  assert.equal(card.title, "Run update check")
   assert.match(card.lines[1], /^1\. ClamAV signatures\. Omarchy asks for your password/)
   assert.match(card.lines[2], /^2\. Arch security list: known holes/)
   assert.ok(card.lines[card.lines.length - 1].startsWith("Technical: "))
@@ -858,10 +870,10 @@ esac
 test("every Last run row names a schedule line, and the helper lists them in schedule order", () => {
   const helper = readFileSync(path.join(here, "..", "bin", "vigil"), "utf8")
   const body = helper.slice(helper.indexOf("def source_status"), helper.indexOf("def feeds_updated"))
-  const order = [...body.matchAll(/\b(DAILY|WEEKLY|UPDATE|Full scan only)\b/g)].map(m => m[1])
+  const order = [...body.matchAll(/\b(DAILY|WEEKLY|UPDATE|Run all only)\b/g)].map(m => m[1])
   // Scans, then updates, each in schedule order (the password check, which
   // follows no schedule line, ends the scans).
-  assert.equal(order.join(" "), "DAILY DAILY WEEKLY WEEKLY Full scan only DAILY UPDATE UPDATE")
+  assert.equal(order.join(" "), "DAILY DAILY WEEKLY WEEKLY Run all only DAILY UPDATE UPDATE")
   for (const line of M.scheduleLines({ generatedAt: "2026-10-12T09:58:00+0200", lastRun: { at: "", ok: true },
       nextUpdate: "2026-10-19 09:52", nextFullScan: "2026-10-12 21:15", nextDaily: "2026-10-13 07:40" },
       true, new Date(2026, 9, 12, 10, 0), 30)) {
