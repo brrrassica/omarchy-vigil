@@ -131,6 +131,16 @@ def test_helper_network_is_bounded_and_fixed():
                      src, re.M)
 
 
+def test_readme_keeps_every_section():
+    """Every section the README promises is there, once, in order (an edit once dropped six)."""
+    heads = re.findall(r"^#{2,3} (.+)$", (REPO / "README.md").read_text(), re.M)
+    want = ["Install", "Using it", "When Vigil runs what", "Every finding", "Undo", "Settings", "What Vigil checks",
+            "Harden", "Detect", "Supply", "Privacy", "Care", "Accounts, history and old services",
+            "How actions run", "What it costs your computer", "Where the data comes from", "Privacy",
+            "Files Vigil writes", "Removing", "Requirements", "Development", "Credits", "License"]
+    assert heads == want
+
+
 def test_readme_documents_removal_and_files():
     readme = (REPO / "README.md").read_text()
     assert "omarchy plugin remove %s" % PLUGIN_ID in readme

@@ -16,15 +16,14 @@ one panel, five pillars.
 Vigil keeps no threat lists of its own. Everything it checks against comes
 from the people who maintain it (the Arch security team, OSV.dev and the
 OpenSSF, ClamAV, Perplexity's Bumblebee, the AUR itself), and Vigil
-refreshes it once a week by itself. It is tuned for no false alarms: only confirmed problems
-lower the score, and anything that is merely worth knowing is shown as
-information.
+refreshes it by itself, daily or weekly. It is tuned for no false alarms:
+only confirmed problems lower the score, and anything that is merely worth
+knowing is shown as information.
 
 Every finding says, in plain language, what Vigil found and why it matters.
 Most come with a fix. Nothing changes until you press **Run** on a
 confirmation in the panel that says exactly what will happen; anything that
-needs root then asks for your password in Omarchy's own password dialog, and
-the panel shows the result.
+needs root then asks for your password, and the panel shows the result.
 
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
@@ -248,6 +247,142 @@ lower it. A warning you mark as reviewed stops counting.
 
 ### Privacy
 
+| Check | Finding when | Fix |
+|---|---|---|
+| DNS fallback servers | systemd-resolved falls back to Google, Cloudflare or Quad9 | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-fallback.conf` (asks for your password) |
+| Connectivity check | NetworkManager pings a server every few minutes (information) | `/etc/NetworkManager/conf.d/90-omarchy-vigil-connectivity.conf` (asks for your password) |
+| Hardware address on Wi-Fi | Networks see your real MAC address | `/etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf` (asks for your password) |
+| Network announcements | Avahi announces this machine's name | Sets `disable-publishing=yes` in `/etc/avahi/avahi-daemon.conf` (asks for your password). Refuses unless the setting appears exactly once under `[publish]`, keeps the first original as `avahi-daemon.conf.vigil-backup`, and restores the previous file if Avahi does not restart. |
+| Telemetry opt-out variables | `DO_NOT_TRACK` and similar are not set (information) | Writes `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` (no root) |
+| Black Ops | Shows whether [Black Ops](https://github.com/brightwalker25/omarchy-black-ops) is installed; it blocks app telemetry, which Vigil leaves to it | |
+
+### Care
+
+| Row | What it measures | Cleanup |
+|---|---|---|
+| Thumbnail cache | Previews the file manager made of your pictures and videos | Cleared without root |
+| Trash | Files you deleted in the file manager | Emptied without root, directly in its standard folders |
+| Application caches | Files apps keep in `~/.cache` to start faster | **Clear unused** (no root), see below |
+| Package cache | Packages pacman downloaded | `paccache -rk2` and `paccache -ruk0` (asks for your password), see below |
+| Orphaned packages | Packages nothing needs any more | `omarchy-update-orphan-pkgs`, which asks before removing anything |
+| System logs | The system journal | `journalctl --vacuum-time=2weeks` (asks for your password) |
+
+**Application caches.** A file in `~/.cache` counts as unused when no app
+has read or changed it for a week, whether or not that app is open now.
+Apps you use every day touch their caches each time they start, so on a
+busy computer most of `~/.cache` stays "in use", and closing your apps does
+not change that. **Clear unused** appears once more than 1 MB has gone a
+week untouched, such as the cache of an app you stopped using. Caches in use
+are never deleted, since apps would only rebuild them. To see what takes the
+space: `du -sh ~/.cache/* | sort -h`.
+
+**Package cache.** Vigil keeps the two newest versions of each installed
+package, so a bad update can be rolled back, and frees older versions and
+every version of packages you have removed. The row shows how much a dry run
+of `paccache` says can be freed; "all of it kept for rollback" means there
+is nothing to free.
+
+**Clean all** (or `C` on the Care tab) does every cleanup on offer in one go,
+after one confirmation that lists each item and its size: thumbnails, the
+trash and unused caches right away, then the package cache and the journal,
+for which Omarchy asks for your password once. Orphaned packages are left
+out on purpose: removing packages can take away something you use, so that
+stays a separate, reviewed step.
+
+### Accounts, history and old services
+
+Checks a newcomer benefits from that need no extra tools:
+
+| Check | Finding when | Fix |
+|---|---|---|
+| User accounts | Another account has root's powers, accounts share one ID (both from `/etc/passwd`), or an account has no password (from the last Run all, which reads `/etc/shadow` as root after your password and keeps only the account names) | How to fix and the Arch Wiki guide; Vigil does not change accounts itself, since a mistake can lock you out |
+| Shell history | A history file (`~/.bash_history`, `~/.zsh_history`, `~/.histfile`, fish) is a link or not a normal file, a way attackers hide what they typed | Guide (MITRE ATT&CK); mark as reviewed if you did it yourself |
+| Old network services | A telnet, rsh, rlogin, FTP, TFTP, NIS or xinetd service is switched on | **Switch them off**: `systemctl disable --now` on each one that is on (asks for your password) |
+
+Earlier versions ran Lynis for these. Vigil now does them itself: Lynis
+looks for Debian package names that never match on Arch, and most of its
+hundreds of other tests are written for servers.
+
+## How actions run
+
+The panel always says which kind an action is:
+
+1. **No fix**: Vigil explains and leaves it to you.
+2. **Helper actions** run `bin/vigil fix <action>` as you, never as root:
+   making `~/.ssh` and `~/.gnupg` private, the opt-out file, the thumbnail
+   cache, the trash and unused application caches. Each is a fixed action name; nothing from a file or
+   from the report reaches it.
+3. **Script actions** run one of the constant scripts in
+   [`Model.js`](Model.js) without a terminal. The panel first shows what it
+   will do, in plain words and then the exact commands, and waits for
+   **Run**. Scripts that need root run through `pkexec`, so Omarchy's own
+   password dialog asks; cancelling it changes nothing. The panel then shows
+   what the script printed. Only tools that ask you questions as they go
+   still open a terminal: Omarchy's updater, its FIDO2 key
+   and fingerprint setup, passwordless sudo, the docker group, the orphan review, and
+   choosing an SSH passphrase. Packages Vigil installs come straight from
+   the Arch repositories with `pacman --needed --noconfirm`; Bumblebee, the
+   one exception, comes from Perplexity's release, checked against the
+   SHA-256 in Vigil's code.
+4. **Open an app or a guide**: **Open ClamUI** starts ClamUI directly, and
+   **Learn more** opens a page with `xdg-open`, each with a fixed command and
+   no shell. Pages come only from a fixed list in `Model.js` (Arch Wiki,
+   MITRE ATT&CK, Perplexity's Bumblebee, Black Ops); nothing in the report becomes a URL.
+   They change nothing, so they do not ask first.
+5. **Mark as reviewed** and **Show again** only change Vigil's own state
+   file, so they do not ask first either.
+
+Vigil never runs a file from its own folder as root (root only ever runs
+`/usr/bin/bash` with one of the fixed scripts, after your password), never
+adds a sudoers rule, polkit policy, service or timer, and never changes a
+setting on its own.
+
+## What it costs your computer
+
+Vigil runs no service, timer or daemon of its own. While you are logged in:
+
+- **A check every 30 minutes** (the `refreshMinutes` setting), from one
+  monitor's copy only, at lowered priority. It reads files only, and every
+  folder walk has a time and size limit (a few seconds), so even a huge home
+  folder cannot make it slow. Other monitors check only when you open their
+  panel.
+- **The background checks** (the daily check, and the weekly and update
+  checks once a week each) at low priority; the virus scans themselves run
+  at the lowest (`nice -n 19`). A background run starts at most once every
+  six hours, whatever happens to it, so a run that keeps failing can never
+  restart in a loop.
+- **One run at a time**, across monitors and shell restarts.
+- **Every step has a deadline**: the virus scan of your home folder 3 hours,
+  the Downloads scan and Flatpak updates 30 minutes, the other steps
+  between 15 seconds and 10 minutes, and the panel stops anything that runs
+  past its own backstop. A step that fails is retried the next day; a virus
+  scan that runs out of time waits a week instead of repeating hours of
+  work every day.
+- **Nothing polls** except while a scan started elsewhere is running, when
+  the panel asks every 4 seconds for its progress (a file read).
+
+## Where the data comes from
+
+Vigil keeps no threat lists of its own.
+
+| What | Maintained by | How it stays current |
+|---|---|---|
+| Virus signatures | ClamAV (Cisco Talos) | ClamAV's own `clamav-freshclam` service, several times a day |
+| Known vulnerabilities in Arch packages | Arch Linux security team | arch-audit, once a week (and **Run update check**) |
+| Known-malicious npm, Bun and other packages | OSV.dev and the OpenSSF Malicious Packages project | osv-scanner, once a week (and **Run update check**) |
+| AUR package status | the AUR | AUR lookup, once a week (and **Run update check**) |
+| Known-compromised packages, extensions and MCP configs | Perplexity (Bumblebee's `threat_intel` catalogs) | downloaded from Perplexity's repository once a week (and **Run update check**); Bumblebee scans in each daily check |
+| Waiting system and Omarchy updates | Arch Linux and Omarchy package repositories | `checkupdates`, once a day (and **Run daily check**) |
+| Waiting Flatpak updates | Flathub, or whichever Flatpak remotes you added | `flatpak remote-ls --updates`, once a day (and **Run daily check**) |
+| Firmware updates | LVFS (hardware makers publish there) | fwupd, once a week (and **Run weekly check**) |
+
+There is no maintained feed of malicious AUR packages; Arch's own list for
+the 2026 attacks was a one-off document. Vigil covers the AUR through what
+the malware pulls in (OSV), through ClamAV signatures, and through the AUR's
+own package status.
+
+## Privacy
+
 Vigil has no telemetry and no server of its own. Its checks read local files
 and ask `systemctl`, `pacman`, `journalctl` and `crontab` about local state.
 With `autoUpdate` on (the default), the background checks also contact the
@@ -287,6 +422,8 @@ servers), Flatpak and firmware updates, and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/no-password.txt` | the helper, mode 0600 | each Run all: names of accounts with an empty password, usually none |
 | `~/.local/state/omarchy-vigil/full-scan.json` | the helper, mode 0600 | after each weekly check, automatic or not: its date and time, for the countdown |
 | `~/.local/state/omarchy-vigil/bumblebee-catalog.json` | the helper, mode 0600 | in each update check: Perplexity's list of compromised packages, for Bumblebee |
+| `~/.local/state/omarchy-vigil/bumblebee-list.json` | the helper, mode 0600 | in each update check: when Bumblebee's list was last downloaded |
+| `~/.local/state/omarchy-vigil/signatures.json` | the helper, mode 0600 | when Vigil updates ClamAV's signatures: the date and time |
 | `~/.local/state/omarchy-vigil/bumblebee.json` | the helper, mode 0600 | each daily check: the compromised packages Bumblebee found, if any |
 | `~/.local/state/omarchy-vigil/progress.json` | the helper, mode 0600 | during a scan or update: its current step, so a panel that did not start it can show it |
 | `~/.local/state/omarchy-vigil/run.json` | the helper, mode 0600 | during a scan or update: the process IDs and start times of the run and the program it is running, so **Stop** can end it |
