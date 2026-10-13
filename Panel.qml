@@ -72,7 +72,10 @@ Panel {
   readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
   // Every colour comes from the Omarchy theme: text, urgent (to fix), accent
   // (to improve) and muted (secondary text, nothing to do).
-  readonly property color dim: Commons.Color.muted
+  // Secondary text (the key hints, times, descriptions): the theme's text
+  // colour, darkened, as mouse-ctrl does. The theme's own "muted" colour is
+  // close to the background in some themes, which hid this text.
+  readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property color warnColor: Commons.Color.accent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 

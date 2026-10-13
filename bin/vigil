@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta, timezone
 
-VERSION = "0.28.1"
+VERSION = "0.28.2"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
