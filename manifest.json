@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "keasbeexd.vigil",
   "name": "Vigil",
-  "version": "0.27.0",
+  "version": "0.28.0",
   "author": "Marc Ferro @keasbeexd",
   "license": "MIT",
-  "description": "A security suite for Omarchy in five pillars: hardening, malware detection (with ClamUI), supply-chain checks (with Bumblebee), privacy and system care. Plain-language findings and fixes you approve one by one; root changes ask for your password in Omarchy's own dialog. Sends nothing anywhere.",
+  "description": "A security suite for Omarchy in five pillars: hardening, malware detection (with ClamUI), supply-chain checks (with Bumblebee), privacy and system care. Plain-language findings and fixes you approve one by one; root changes ask for your password. No telemetry: it only contacts the sources it checks against.",
   "kinds": [
     "bar-widget"
   ],
@@ -24,7 +24,6 @@
       "malware",
       "antivirus",
       "clamav",
-      "rootkit",
       "supply-chain",
       "privacy",
       "cleaner"
@@ -57,9 +56,9 @@
       {
         "key": "autoUpdate",
         "type": "boolean",
-        "label": "Weekly updates and scans",
+        "label": "Background checks",
         "defaultValue": true,
-        "description": "Once a week each: refresh the lists Vigil checks against (known vulnerabilities from security.archlinux.org via arch-audit; known-malicious npm and Bun packages from OSV.dev via osv-scanner, which receives package names and versions, never files; your AUR packages from aur.archlinux.org), and run the background part of a Full scan (a ClamAV virus scan of your home folder, as you, and a Bumblebee rescan). Each step runs only once its tool is installed. Turn off to run them only with the Update sources and Full scan buttons."
+        "description": "Runs the three schedules by themselves: the daily check (what is new in Downloads, waiting system and Flatpak updates, a Bumblebee scan), the weekly check (firmware, and a ClamAV scan of your home folder, as you) and the weekly update check (known vulnerabilities from security.archlinux.org via arch-audit; known-malicious npm and Bun packages from OSV.dev via osv-scanner, which receives package names and versions, never files; your AUR packages from aur.archlinux.org; Bumblebee's list from Perplexity on GitHub). Each step runs only once its tool is installed. Turn off to run them only with the Run buttons."
       }
     ]
   }

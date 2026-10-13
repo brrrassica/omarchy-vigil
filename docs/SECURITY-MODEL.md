@@ -40,7 +40,7 @@ These hold for every pillar, now and in later phases:
    comes from the tools of the people who maintain it (arch-audit,
    osv-scanner, ClamAV's freshclam, Perplexity's Bumblebee catalogs) and one
    fixed AUR lookup, once a week
-   (the `autoUpdate` setting) or when you press a run button. Nothing the weekly
+   (the `autoUpdate` setting) or when you press a run button. Nothing the background
    update fetches is ever run; results are size-capped and validated like any
    other input. The one program Vigil downloads, Bumblebee, is installed only
    when you press Install, at a pinned version, after its checksum matches.
@@ -121,7 +121,7 @@ accepted) cannot be signalled; the panel then says so.
   reaches it. Steps that would wait for input are not allowed (a test
   checks), and `ufw` runs with `--force` so it never prompts.
 - Run update check (and Run all) updates ClamAV's signatures only when you press it (the
-  weekly run never asks), with one constant root script through pkexec: if
+  background run never asks), with one constant root script through pkexec: if
   ClamAV's update service runs, it is woken with `systemctl kill
   --signal=SIGUSR1` (it then checks at once; a second freshclam would fail
   on the service's log lock), and the script waits up to two minutes for the
@@ -137,22 +137,23 @@ accepted) cannot be signalled; the panel then says so.
   one constant root script (`BUMBLEBEE_SCRIPT` in `bin/vigil`, identical
   to `BUMBLEBEE_INSTALL` in `Model.js`; a test checks), used by Install,
   Update Bumblebee, Run update check and Run all. It takes no data from the report:
-  it reads Perplexity's release list from the GitHub API itself and picks,
-  with `jq`, the newest release that is not a draft or pre-release and has
-  been public for 7 days (a hijacked release is usually pulled within
-  days). The archive and that release's `checksums.txt` are downloaded over
-  HTTPS only, time- and size-limited, into a fresh `mktemp -d`; the
-  archive's SHA-256 must equal Perplexity's published one. This protects
-  against a corrupted or altered download, not against a compromised
-  Perplexity release (their releases are not signed); trusting Perplexity's
-  own release is the same trust as installing Bumblebee by hand. Only the
+  it installs exactly `BUMBLEBEE_VERSION` (0.1.2), and the SHA-256 of
+  each release archive (amd64 and arm64) is written in `bin/vigil`, so the
+  reviewed commit decides which bytes run. Nothing is taken from the
+  network to decide that: no release list, no `checksums.txt`. The archive
+  is downloaded over HTTPS only (`curl -q --proto =https --proto-redir
+  =https`, time-limited) and capped in bytes while it streams (`head -c`
+  of the limit plus one, then a size check, under `pipefail`), into a
+  fresh `mktemp -d`; its SHA-256 must equal the pinned one. Only the
   `bumblebee` member is extracted (`--no-same-owner
   --no-same-permissions`), and only a regular file, not a link, is
   installed as `/usr/local/bin/bumblebee`, owned by root, mode 0755. The
   installed program is never run as root: a byte comparison decides
-  whether anything changed. Whether an update is ready is checked as you
-  (the release list, and `bumblebee version`), and only then does Update
-  sources add the Bumblebee step to its one password prompt.
+  whether anything changed. Whether an update is due is checked as you
+  (`bumblebee version`, compared with the pinned version), and only then
+  does the update check add the Bumblebee step to its one password prompt.
+  A newer Bumblebee arrives only with a Vigil update, which goes through
+  the marketplace review again.
 - Terminal actions are constant strings in `Model.js`. The report only names
   an action id; an id that is not in the table does nothing. Omarchy tools
   are addressed by absolute path, from one of the two trusted directories.

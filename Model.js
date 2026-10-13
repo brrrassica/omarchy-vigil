@@ -10,7 +10,7 @@
 // Must match manifest.json and VERSION in bin/vigil (a test checks). The
 // helper runs from disk every time, but this file stays loaded until the
 // shell restarts, so after an update the two can differ for a while.
-var VERSION = "0.27.0"
+var VERSION = "0.28.0"
 var MAX_REPORT_CHARS = 512 * 1024
 var MAX_CHECKS = 160
 var MAX_STR = 400
@@ -284,12 +284,13 @@ var PACCACHE_RUN = "before=" + PKG_DU + "; sudo /usr/bin/paccache -rk2; sudo /us
 var OLD_SERVICES = ["telnet.socket", "rsh.socket", "rlogin.socket", "ftpd.service", "tftpd.socket",
                     "tftpd.service", "xinetd.service", "ypserv.service", "ypbind.service"]
 
-// Installs or updates Bumblebee, as root: the newest Perplexity release that has
-// been public for 7 days, checked against the SHA-256 Perplexity published with
-// it, installed only as a regular file, and never run as root. The helper runs
+// Installs or updates Bumblebee, as root: the pinned BUMBLEBEE_VERSION, the
+// download capped in bytes and checked against the SHA-256 written in the
+// helper, installed only as a regular file, and never run as root. The helper runs
 // the same script in Run update check. Must equal BUMBLEBEE_SCRIPT in bin/vigil
 // (a test checks).
-var BUMBLEBEE_INSTALL = "a=; case \"$(/usr/bin/uname -m)\" in x86_64) a=amd64 ;; aarch64) a=arm64 ;; esac\nif [ -z \"$a\" ]; then echo 'Bumblebee has no build for this computer.'; exit 0; fi\nt=$(/usr/bin/mktemp -d); trap '/usr/bin/rm -rf \"$t\"' EXIT\n/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 60 --max-filesize 4194304 -o \"$t/releases.json\" 'https://api.github.com/repos/perplexityai/bumblebee/releases?per_page=30'\nv=$(/usr/bin/jq -r --argjson now \"$(/usr/bin/date +%s)\" '[.[] | select(type == \"object\") | select((.draft != true) and (.prerelease != true)) | select((.tag_name | type) == \"string\" and (.tag_name | test(\"^v[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$\"))) | select((.published_at | type) == \"string\" and (.published_at | fromdateiso8601) <= ($now - 604800)) | .tag_name | ltrimstr(\"v\")] | sort_by(split(\".\") | map(tonumber)) | last // \"\"' \"$t/releases.json\")\nif ! [[ $v =~ ^[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$ ]]; then echo 'No Bumblebee release has been out for 7 days yet.'; exit 1; fi\nf=\"bumblebee_${v}_linux_${a}.tar.gz\"; u=\"https://github.com/perplexityai/bumblebee/releases/download/v${v}\"\n/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 180 --max-filesize 67108864 -o \"$t/$f\" \"$u/$f\"\n/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 60 --max-filesize 65536 -o \"$t/checksums.txt\" \"$u/checksums.txt\"\nwant=$(/usr/bin/awk -v f=\"$f\" '$2 == f { print $1 }' \"$t/checksums.txt\")\nhave=$(/usr/bin/sha256sum \"$t/$f\" | /usr/bin/cut -d' ' -f1)\nif ! [[ $want =~ ^[0-9a-f]{64}$ ]] || [ \"$want\" != \"$have\" ]; then echo 'Bumblebee did not match the checksum Perplexity published, so it was not installed.'; exit 1; fi\n/usr/bin/tar --no-same-owner --no-same-permissions -xzf \"$t/$f\" -C \"$t\" bumblebee\nif [ ! -f \"$t/bumblebee\" ] || [ -L \"$t/bumblebee\" ]; then echo 'Bumblebee was not a plain program file, so it was not installed.'; exit 1; fi\nif [ -f /usr/local/bin/bumblebee ] && [ ! -L /usr/local/bin/bumblebee ] && /usr/bin/cmp -s \"$t/bumblebee\" /usr/local/bin/bumblebee; then echo \"Bumblebee $v is already installed.\"; exit 0; fi\n/usr/bin/install -D -o root -g root -m 0755 \"$t/bumblebee\" /usr/local/bin/bumblebee\necho \"Bumblebee $v is installed.\"\n"
+var BUMBLEBEE_VERSION = "0.1.2"
+var BUMBLEBEE_INSTALL = "set -o pipefail\nv=0.1.2\ncase \"$(/usr/bin/uname -m)\" in x86_64) a=amd64; want=53b080cf3ddb692b0c4e5492ef4785b4c54daf1624fcd0fcba3958116a0be8d9 ;; aarch64) a=arm64; want=cb641a1023b12cd7b1411ebef5c7d426f7ecd81770a15a85873c5334a0e6b74d ;; *) echo 'Bumblebee has no build for this computer.'; exit 0 ;; esac\nt=$(/usr/bin/mktemp -d); trap '/usr/bin/rm -rf \"$t\"' EXIT\nf=\"bumblebee_${v}_linux_${a}.tar.gz\"\n/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 180 --max-filesize 67108864 -- \"https://github.com/perplexityai/bumblebee/releases/download/v${v}/$f\" | /usr/bin/head -c 67108865 > \"$t/$f\" || { echo 'Bumblebee could not be downloaded.'; exit 1; }\nif [ \"$(/usr/bin/stat -c %s \"$t/$f\")\" -gt 67108864 ]; then echo 'The Bumblebee download was too large, so it was not installed.'; exit 1; fi\nhave=$(/usr/bin/sha256sum \"$t/$f\" | /usr/bin/cut -d' ' -f1)\nif [ \"$have\" != \"$want\" ]; then echo \"Bumblebee $v did not match the checksum Vigil has for it, so it was not installed.\"; exit 1; fi\n/usr/bin/tar --no-same-owner --no-same-permissions -xzf \"$t/$f\" -C \"$t\" bumblebee\nif [ ! -f \"$t/bumblebee\" ] || [ -L \"$t/bumblebee\" ]; then echo 'Bumblebee was not a plain program file, so it was not installed.'; exit 1; fi\nif [ -f /usr/local/bin/bumblebee ] && [ ! -L /usr/local/bin/bumblebee ] && /usr/bin/cmp -s \"$t/bumblebee\" /usr/local/bin/bumblebee; then echo \"Bumblebee $v is already installed.\"; exit 0; fi\n/usr/bin/install -D -o root -g root -m 0755 \"$t/bumblebee\" /usr/local/bin/bumblebee\necho \"Bumblebee $v is installed.\"\n"
 
 // The scheduled-scan hand-over: one marker per change, so Undo restores
 // exactly those. Must match HANDOVER_DIR and CLAMUI_SETTINGS in bin/vigil.
@@ -479,10 +480,10 @@ var TERMINAL_ACTIONS = {
   },
   "update-bumblebee": {
     title: "Update Bumblebee",
-    what: ["Installs the newest Bumblebee from Perplexity, once it has been out for a week.",
-           "It is installed only if it matches the checksum Perplexity published with it.",
+    what: ["Installs Bumblebee " + BUMBLEBEE_VERSION + " from Perplexity, the version this Vigil was reviewed with.",
+           "It is installed only if it matches the checksum written into Vigil.",
            "Run update check on the Overview does this too, behind the same password prompt.",
-           "Technical: GitHub release list, release archive and checksums.txt over HTTPS, installed as root to /usr/local/bin/bumblebee"],
+           "Technical: release archive over HTTPS, size-capped, SHA-256 checked, installed as root to /usr/local/bin/bumblebee"],
     run: BUMBLEBEE_INSTALL
   },
   "update-firmware": {
@@ -557,8 +558,8 @@ var TERMINAL_ACTIONS = {
            "that keeps virus signatures up to date, arch-audit (known security holes), osv-scanner",
            "(malicious packages), fwupd (firmware updates), ClamUI (virus scans and quarantine) and Bumblebee by Perplexity",
            "(known-compromised packages). Ones you already have are left alone.",
-           "Bumblebee comes from Perplexity on GitHub: the newest release that has been out for a week,",
-           "installed only if it matches the checksum Perplexity published. The rest come from the Arch repositories,",
+           "Bumblebee " + BUMBLEBEE_VERSION + " comes from Perplexity on GitHub, installed only if it matches the checksum",
+           "written into Vigil. The rest come from the Arch repositories,",
            "so the Omarchy update keeps them current.",
            "Technical: pacman -S --needed clamav clamui arch-audit osv-scanner fwupd, enable clamav-freshclam, bumblebee to /usr/local/bin"],
     // What the progress bar says at each "VIGIL-STEP n" line the script prints.
@@ -970,7 +971,7 @@ function validCheck(c) {
 }
 
 var SOURCE_IDS = ["signatures", "virus-scan", "arch-audit", "osv", "aur", "password-check", "bumblebee", "firmware",
-                  "pending-updates", "bumblebee-release", "flatpak", "downloads-scan",
+                  "pending-updates", "flatpak", "downloads-scan",
                   "bumblebee-list"]
 var SOURCE_STATES = ["ok", "stale", "never", "failed"]
 var DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -1210,8 +1211,8 @@ function runLines(report, ids) {
     "arch-audit": "Arch security list: known holes in your packages, from the Arch security team.",
     "osv": "OSV malware list: malicious npm and Bun packages, from OSV.dev.",
     "aur": "AUR package status: whether your AUR packages are still maintained.",
-    "bumblebee-list": "Bumblebee list and Bumblebee release check, from Perplexity; a newer Bumblebee that has"
-      + " been out for a week is installed with the same password prompt as the signatures."
+    "bumblebee-list": "Bumblebee list: known-compromised packages, from Perplexity. An older Bumblebee is"
+      + " updated to " + BUMBLEBEE_VERSION + " with the same password prompt as the signatures."
   }
   var lines = [], n = 1
   for (var i = 0; i < ids.length; i++)
@@ -1571,7 +1572,7 @@ if (typeof module !== "undefined") {
     howTo: howTo, docsUrl: docsUrl, docsCommand: docsCommand, DOCS: DOCS, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
     shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
     relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine, countdown: countdown, scheduleLines: scheduleLines,
-    BUMBLEBEE_INSTALL: BUMBLEBEE_INSTALL,
+    BUMBLEBEE_INSTALL: BUMBLEBEE_INSTALL, BUMBLEBEE_VERSION: BUMBLEBEE_VERSION,
     parseProgress: parseProgress, parseRunning: parseRunning, detectionItem: detectionItem, actionStage: actionStage, actionProgress: actionProgress,
     actionOutputText: actionOutputText, progressText: progressText, lastRunRows: lastRunRows, missingLabel: missingLabel,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,

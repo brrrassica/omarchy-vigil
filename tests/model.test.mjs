@@ -574,19 +574,23 @@ test("missing helpers: a red Install button that names them, and one plan for al
   assert.equal(M.missingLabel(parse(report({ missing: ["bumblebee"] }))), "MISSING Bumblebee. INSTALL")
 })
 
-test("Bumblebee comes from Perplexity's releases on GitHub, checked against Perplexity's checksum", () => {
+test("Bumblebee is the version pinned in Vigil, from Perplexity's release on GitHub", () => {
   const body = M.BUMBLEBEE_INSTALL
-  assert.match(body, /'https:\/\/api\.github\.com\/repos\/perplexityai\/bumblebee\/releases\?per_page=30'/)
+  assert.ok(!body.includes("api.github.com") && !body.includes("checksums.txt"), "nothing from the network picks it")
+  assert.match(body, /^v=\d+\.\d+\.\d+$/m)
   assert.match(body, /https:\/\/github\.com\/perplexityai\/bumblebee\/releases\/download\/v\$\{v\}/)
-  for (const c of body.split("\n").filter(l => l.includes("/usr/bin/curl")))
+  assert.match(body, /a=amd64; want=[0-9a-f]{64} ;; aarch64\) a=arm64; want=[0-9a-f]{64} ;;/)
+  for (const c of body.split("\n").filter(l => l.includes("/usr/bin/curl"))) {
     assert.match(c, /--proto =https --proto-redir =https --max-time \d+ --max-filesize \d+/)
+    assert.match(c, /\| \/usr\/bin\/head -c \d+ > /, "capped while it streams")
+  }
   assert.ok(!/\/usr\/local\/bin\/bumblebee (version|scan)/.test(body), "the installed program is never run as root")
   const install = M.actionPlan("install-helpers", TOOLS, "/home/marc")[0].argv[5]
   assert.ok(install.includes(body), "Install uses the same script")
   assert.equal(M.runMode("update-bumblebee"), "root")
 })
 
-test("the Bumblebee script takes a week-old release, and refuses a bad checksum, a link, and a too-new release", () => {
+test("the Bumblebee script installs the pinned archive, and refuses a bad checksum, a link, an oversized or failed download", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "vigil-bb-"))
   const bin = path.join(dir, "bin"); mkdirSync(bin)
   const arch = execFileSync("/usr/bin/uname", ["-m"], { encoding: "utf8" }).trim() === "aarch64" ? "arm64" : "amd64"
@@ -598,47 +602,39 @@ test("the Bumblebee script takes a week-old release, and refuses a bad checksum,
     execFileSync("/usr/bin/tar", ["-czf", tgz, "-C", src, "bumblebee"])
     return [tgz, execFileSync("/usr/bin/sha256sum", [tgz], { encoding: "utf8" }).split(" ")[0]]
   }
-  const iso = (daysAgo) => new Date(Date.now() - daysAgo * 86400000).toISOString().replace(/\.\d+Z$/, "Z")
-  // A stand-in for curl: the release list, the archive and checksums.txt come from the test folder.
+  // A stand-in for curl: the archive comes from the test folder, on stdout, as curl would send it.
   const curl = path.join(bin, "curl")
-  writeFileSync(curl, `#!/bin/bash
-out=; for ((i=1; i<=$#; i++)); do [ "\${!i}" = -o ] && { j=$((i+1)); out=\${!j}; }; done
-url=\${!#}
-case "$url" in
-  *api.github.com*) cp "${dir}/releases.json" "$out" ;;
-  */checksums.txt) cp "${dir}/sums" "$out" ;;
-  *) cp "${dir}/archive.tgz" "$out" ;;
-esac
-`, { mode: 0o755 })
+  writeFileSync(curl, `#!/bin/bash\n[ -f "${dir}/fail" ] && exit 22\ncat "${dir}/archive.tgz"\n`, { mode: 0o755 })
   const target = path.join(dir, "out", "bumblebee")
-  const run = (archive, sum, releases) => {
-    writeFileSync(path.join(dir, "releases.json"), JSON.stringify(releases))
-    writeFileSync(path.join(dir, "sums"), sum + "  bumblebee_0.1.3_linux_" + arch + ".tar.gz\n")
+  const pinned = /a=amd64; want=([0-9a-f]{64}) ;; aarch64\) a=arm64; want=([0-9a-f]{64})/.exec(M.BUMBLEBEE_INSTALL)
+  const run = (archive, sum, opts) => {
     execFileSync("/usr/bin/cp", [archive, path.join(dir, "archive.tgz")])
-    const body = M.BUMBLEBEE_INSTALL.replaceAll("/usr/bin/curl", curl)
+    if (opts && opts.fail) writeFileSync(path.join(dir, "fail"), ""); else rmSync(path.join(dir, "fail"), { force: true })
+    let body = M.BUMBLEBEE_INSTALL.replaceAll("/usr/bin/curl", curl)
       .replaceAll("/usr/local/bin/bumblebee", target).replace("-o root -g root ", "")
+      .replace(pinned[arch === "amd64" ? 1 : 2], sum)
+    if (opts && opts.small) body = body.replace(/head -c \d+/, "head -c 101").replace(/-gt \d+ \]/, "-gt 100 ]")
     const r = spawnSync("/usr/bin/bash", ["-c", "set -e\n" + body], { encoding: "utf8" })
     return { status: r.status, text: r.stdout + r.stderr }
   }
-  const week = [{ tag_name: "v0.1.3", published_at: iso(8), draft: false, prerelease: false },
-                { tag_name: "v0.1.4", published_at: iso(1), draft: false, prerelease: false }]
   const [good, goodSum] = make("good", false)
-  let r = run(good, goodSum, week)
-  assert.equal(r.status, 0, r.text); assert.match(r.text, /Bumblebee 0\.1\.3 is installed/)
-  assert.equal(readFileSync(target, "utf8"), "#!/bin/sh\necho good\n")           // 0.1.4 is not a week old yet
-  r = run(good, goodSum, week)
+  let r = run(good, goodSum)
+  assert.equal(r.status, 0, r.text); assert.match(r.text, new RegExp("Bumblebee " + M.BUMBLEBEE_VERSION.replaceAll(".", "\\.") + " is installed"))
+  assert.equal(readFileSync(target, "utf8"), "#!/bin/sh\necho good\n")
+  r = run(good, goodSum)
   assert.equal(r.status, 0, r.text); assert.match(r.text, /already installed/)
   const [other] = make("other", false)
-  r = run(other, goodSum, week)                                                   // archive differs from the checksum
+  r = run(other, goodSum)                                                         // archive differs from the pin
   assert.notEqual(r.status, 0); assert.match(r.text, /did not match the checksum/)
   assert.equal(readFileSync(target, "utf8"), "#!/bin/sh\necho good\n")
   const [linked, linkSum] = make("linked", true)
-  r = run(linked, linkSum, week)
+  r = run(linked, linkSum)
   assert.notEqual(r.status, 0); assert.match(r.text, /not a plain program file/)
-  r = run(good, goodSum, [week[1]])
-  assert.notEqual(r.status, 0); assert.match(r.text, /has been out for 7 days yet/)
-  r = run(good, goodSum, { message: "API rate limit exceeded" })
-  assert.notEqual(r.status, 0)
+  r = run(good, goodSum, { small: true })                                         // bigger than the cap
+  assert.notEqual(r.status, 0); assert.match(r.text, /too large/)
+  r = run(good, goodSum, { fail: true })
+  assert.notEqual(r.status, 0); assert.match(r.text, /could not be downloaded/)
+  assert.equal(readFileSync(target, "utf8"), "#!/bin/sh\necho good\n")
   rmSync(dir, { recursive: true, force: true })
 })
 

@@ -111,7 +111,28 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.24 (this release): daily and weekly
+## 0.28 (this release): ready for the marketplace
+
+- [x] Bumblebee is pinned: Vigil installs exactly 0.1.2, checked against
+      the SHA-256 written in its own code, with the download capped in
+      bytes while it streams. The release check and the automatic update
+      to newer releases are gone (a checksum from the same release only
+      binds those bytes to themselves); a newer Bumblebee comes with a
+      Vigil update. Replaces 0.22.
+- [x] README, manifest and security model describe every network contact
+      (checkupdates, Flatpak, fwupd, Perplexity on GitHub) and no longer
+      claim Vigil sends nothing anywhere.
+
+## 0.25 to 0.27: one name per thing, one button per schedule
+
+- [x] Every scan and update has one name, used in the schedule lines, the
+      Last run list, the progress line and the tabs, all in schedule order.
+- [x] Run daily check, Run weekly check, Run update check and Run all
+      replace Full scan and Update sources. Run all does not scan
+      ~/Downloads twice. Each button restarts its own countdown.
+- [x] The scroll bar has its own lane, in the theme's colours.
+
+## 0.24: daily and weekly
 
 - [x] A daily check: what is new in Downloads (virus scan), waiting
       system, Omarchy and Flatpak updates, and Bumblebee over your
@@ -129,7 +150,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 - [x] The bar icon is a lighthouse instead of a shield (so many plugins use
       one); its beams show while a scan or update runs.
 
-## 0.22: Bumblebee stays current
+## 0.22: Bumblebee stays current (replaced in 0.28)
 
 - [x] Bumblebee follows Perplexity's releases: the newest one that has been
       out for a week, checked against Perplexity's published SHA-256. The

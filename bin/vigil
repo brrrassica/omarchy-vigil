@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta, timezone
 
-VERSION = "0.27.0"
+VERSION = "0.28.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1703,11 +1703,10 @@ FEED_FILES = {"arch-audit": "arch-audit.json", "osv": "osv.json", "aur": "aur.js
               "full-scan": "full-scan.json", "signatures": "signatures.json",
               "bumblebee-list": "bumblebee-list.json", "bumblebee": "bumblebee.json",
               "pending-updates": "pending-updates.json", "firmware": "firmware.json", "flatpak": "flatpak.json",
-              "downloads-scan": "downloads-scan.json",
-              "bumblebee-release": "bumblebee-release.json"}
+              "downloads-scan": "downloads-scan.json"}
 # Two weekly timers: the update check, and the weekly check
 # (the virus scan of the home folder and firmware); the daily check daily.
-SOURCE_FEEDS = ("bumblebee-release", "pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee-list")
+SOURCE_FEEDS = ("pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee-list")
 FEED_DAYS = 7
 FEED_RETRY_DAYS = 1
 
@@ -1742,7 +1741,7 @@ def feed_when(cache):
 def feed_available(name):
     if name == "full-scan":
         return True
-    if name in ("bumblebee-list", "bumblebee", "bumblebee-release"):
+    if name in ("bumblebee-list", "bumblebee"):
         return bumblebee_ok() and (name == "bumblebee" or is_trusted_executable(sys_path("/usr/bin/curl")))
     if name == "arch-audit":
         return is_trusted_executable(sys_path("/usr/bin/arch-audit"))
@@ -1964,7 +1963,7 @@ def source_status():
         by = "ClamUI" if ext[0] and _newer(ext, (d, t)) == ext and ext != (d, t) else ""
         d, t = _newer(ext, (d, t))
         add("signatures", ITEM_NAME["signatures"] + UPDATE, d, t, fresh(d, FEED_DAYS), by=by)
-    for name in ("arch-audit", "osv", "aur", "bumblebee-list", "bumblebee-release"):
+    for name in ("arch-audit", "osv", "aur", "bumblebee-list"):
         if feed_available(name):
             feed(name, ITEM_NAME[name] + UPDATE)
     return out
@@ -2846,7 +2845,6 @@ FEED_REFRESH["pending-updates"] = refresh_pending_updates
 FEED_LABELS = {"pending-updates": "the list of waiting updates", "firmware": "the firmware check",
                "downloads-scan": "the scan of new downloads",
                "flatpak": "the Flatpak app check", "flatpak-update": "your Flatpak apps",
-               "bumblebee-release": "the Bumblebee release check",
                "arch-audit": "the Arch vulnerability database", "osv": "the OSV malicious-package database",
                "aur": "your AUR package status", "virus-scan": "the virus scan", "bumblebee": "the Bumblebee scan",
                "bumblebee-list": "the Bumblebee list of compromised packages",
@@ -2882,44 +2880,43 @@ def feed_findings():
 # installed packages, lockfiles, editor and browser extensions and MCP configs
 # against exposure catalogs of known-compromised releases that Perplexity
 # maintains in the same repository (threat_intel/). The Install button puts
-# the release binary, checksum-verified, at BUMBLEBEE_BIN; the update check
+# the pinned release binary, checksum-verified, at BUMBLEBEE_BIN; the update check
 # fetches the current catalogs; the daily check runs it as you, read-only.
 BUMBLEBEE_BIN = "/usr/local/bin/bumblebee"
-BUMBLEBEE_RELEASES_URL = "https://api.github.com/repos/perplexityai/bumblebee/releases?per_page=30"
-RELEASE_AGE_DAYS = 7
+# The one Bumblebee version Vigil installs, with the SHA-256 of each release
+# archive written here, in the reviewed code (from Perplexity's checksums.txt
+# for v0.1.2). A newer Bumblebee comes with a Vigil update, never from the
+# network by itself: a checksum fetched from the same release as the archive
+# only binds those bytes to themselves.
+BUMBLEBEE_VERSION = "0.1.2"
+BUMBLEBEE_SHA256 = {"amd64": "53b080cf3ddb692b0c4e5492ef4785b4c54daf1624fcd0fcba3958116a0be8d9",
+                    "arm64": "cb641a1023b12cd7b1411ebef5c7d426f7ecd81770a15a85873c5334a0e6b74d"}
+BUMBLEBEE_MAX_BYTES = 64 * 1024 * 1024
 _VERSION_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}$")
 
-# Installs or updates Bumblebee, as root (Install, Update Bumblebee, and Update
-# sources when a newer release is ready). It finds the release itself, from
-# GitHub, and never takes a version from the report: the newest one that is
-# not a draft or pre-release and has been public for RELEASE_AGE_DAYS (a
-# hijacked release is usually pulled within days). The archive must match the
-# SHA-256 Perplexity published with it, only a regular file is installed, and
-# the installed program is never run as root (a byte comparison decides
-# whether anything changed). Must equal BUMBLEBEE_INSTALL in Model.js (a test checks).
+# Installs or updates Bumblebee, as root (Install, Update Bumblebee, and the
+# update check when the installed one is older). It never takes anything from
+# the report. The download is capped in bytes while it streams; the archive
+# must match the SHA-256 above; only a regular file is installed; and the
+# installed program is never run as root (a byte comparison decides whether
+# anything changed). Must equal BUMBLEBEE_INSTALL in Model.js (a test checks).
 BUMBLEBEE_SCRIPT = (
-    "a=; case \"$(/usr/bin/uname -m)\" in x86_64) a=amd64 ;; aarch64) a=arm64 ;; esac\n"
-    "if [ -z \"$a\" ]; then echo 'Bumblebee has no build for this computer.'; exit 0; fi\n"
+    "set -o pipefail\n"
+    "v=" + BUMBLEBEE_VERSION + "\n"
+    "case \"$(/usr/bin/uname -m)\" in x86_64) a=amd64; want=" + BUMBLEBEE_SHA256["amd64"] + " ;; "
+    "aarch64) a=arm64; want=" + BUMBLEBEE_SHA256["arm64"] + " ;; "
+    "*) echo 'Bumblebee has no build for this computer.'; exit 0 ;; esac\n"
     "t=$(/usr/bin/mktemp -d); trap '/usr/bin/rm -rf \"$t\"' EXIT\n"
-    "/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 60 --max-filesize 4194304 "
-    "-o \"$t/releases.json\" '" + BUMBLEBEE_RELEASES_URL + "'\n"
-    "v=$(/usr/bin/jq -r --argjson now \"$(/usr/bin/date +%s)\" '[.[] | select(type == \"object\") "
-    "| select((.draft != true) and (.prerelease != true)) "
-    "| select((.tag_name | type) == \"string\" and (.tag_name | test(\"^v[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$\"))) "
-    "| select((.published_at | type) == \"string\" and (.published_at | fromdateiso8601) <= ($now - "
-    + str(RELEASE_AGE_DAYS * 86400) + ")) "
-    "| .tag_name | ltrimstr(\"v\")] | sort_by(split(\".\") | map(tonumber)) | last // \"\"' \"$t/releases.json\")\n"
-    "if ! [[ $v =~ ^[0-9]{1,3}[.][0-9]{1,3}[.][0-9]{1,3}$ ]]; then "
-    "echo 'No Bumblebee release has been out for " + str(RELEASE_AGE_DAYS) + " days yet.'; exit 1; fi\n"
-    "f=\"bumblebee_${v}_linux_${a}.tar.gz\"; u=\"https://github.com/perplexityai/bumblebee/releases/download/v${v}\"\n"
-    "/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 180 --max-filesize 67108864 "
-    "-o \"$t/$f\" \"$u/$f\"\n"
-    "/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 60 --max-filesize 65536 "
-    "-o \"$t/checksums.txt\" \"$u/checksums.txt\"\n"
-    "want=$(/usr/bin/awk -v f=\"$f\" '$2 == f { print $1 }' \"$t/checksums.txt\")\n"
+    "f=\"bumblebee_${v}_linux_${a}.tar.gz\"\n"
+    "/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 180 --max-filesize "
+    + str(BUMBLEBEE_MAX_BYTES) + " -- \"https://github.com/perplexityai/bumblebee/releases/download/v${v}/$f\" "
+    "| /usr/bin/head -c " + str(BUMBLEBEE_MAX_BYTES + 1) + " > \"$t/$f\" "
+    "|| { echo 'Bumblebee could not be downloaded.'; exit 1; }\n"
+    "if [ \"$(/usr/bin/stat -c %s \"$t/$f\")\" -gt " + str(BUMBLEBEE_MAX_BYTES) + " ]; then "
+    "echo 'The Bumblebee download was too large, so it was not installed.'; exit 1; fi\n"
     "have=$(/usr/bin/sha256sum \"$t/$f\" | /usr/bin/cut -d' ' -f1)\n"
-    "if ! [[ $want =~ ^[0-9a-f]{64}$ ]] || [ \"$want\" != \"$have\" ]; then "
-    "echo 'Bumblebee did not match the checksum Perplexity published, so it was not installed.'; exit 1; fi\n"
+    "if [ \"$have\" != \"$want\" ]; then "
+    "echo \"Bumblebee $v did not match the checksum Vigil has for it, so it was not installed.\"; exit 1; fi\n"
     "/usr/bin/tar --no-same-owner --no-same-permissions -xzf \"$t/$f\" -C \"$t\" bumblebee\n"
     "if [ ! -f \"$t/bumblebee\" ] || [ -L \"$t/bumblebee\" ]; then "
     "echo 'Bumblebee was not a plain program file, so it was not installed.'; exit 1; fi\n"
@@ -2927,35 +2924,6 @@ BUMBLEBEE_SCRIPT = (
     "&& /usr/bin/cmp -s \"$t/bumblebee\" /usr/local/bin/bumblebee; then echo \"Bumblebee $v is already installed.\"; exit 0; fi\n"
     "/usr/bin/install -D -o root -g root -m 0755 \"$t/bumblebee\" /usr/local/bin/bumblebee\n"
     "echo \"Bumblebee $v is installed.\"\n")
-
-
-def bumblebee_releases_ready(text, now=None):
-    """The newest Bumblebee release that is public, not a pre-release, and at
-    least RELEASE_AGE_DAYS old (same rule as BUMBLEBEE_SCRIPT), or "", or None
-    for an answer that is not a release list."""
-    try:
-        data = json.loads(text)
-    except ValueError:
-        return None
-    if not isinstance(data, list):
-        return None
-    cutoff = (now if now is not None else time.time()) - RELEASE_AGE_DAYS * 86400
-    best = None
-    for r in data[:100]:
-        if not isinstance(r, dict) or r.get("draft") is True or r.get("prerelease") is True:
-            continue
-        tag, pub = r.get("tag_name"), r.get("published_at")
-        if not isinstance(tag, str) or not tag.startswith("v") or not _VERSION_RE.match(tag[1:]):
-            continue
-        try:
-            when = datetime.strptime(pub, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
-        except (TypeError, ValueError):
-            continue
-        if when > cutoff:
-            continue
-        ver = tuple(int(x) for x in tag[1:].split("."))
-        best = ver if best is None or ver > best else best
-    return ".".join(map(str, best)) if best else ""
 
 
 def bumblebee_installed_version():
@@ -2971,30 +2939,15 @@ def _vtuple(v):
     return tuple(int(x) for x in v.split(".")) if isinstance(v, str) and _VERSION_RE.match(v) else None
 
 
-def refresh_bumblebee_release():
-    rc, body = run(["/usr/bin/curl", "-q", "-sS", "--fail", "--proto", "=https", "--proto-redir", "=https",
-                    "--max-time", "30", "--max-filesize", "4194304", "--", BUMBLEBEE_RELEASES_URL],
-                   timeout=45, limit=4 * 1024 * 1024)
-    ready = bumblebee_releases_ready(body or "") if rc == 0 else None
-    if ready is None:
-        save_feed("bumblebee-release", {}, ok=False)
-        raise Refused("GitHub did not answer")
-    save_feed("bumblebee-release", {"ready": ready})
-    return "Bumblebee %s is the newest release." % ready if ready else "No Bumblebee release is ready yet."
-
-
-FEED_REFRESH["bumblebee-release"] = refresh_bumblebee_release
 FEED_REFRESH["flatpak"] = refresh_flatpak
 
 
 def bumblebee_update_ready():
-    """The newer release to update to, from the last check, or ""."""
-    cache = feed_cache("bumblebee-release") if feed_available("bumblebee-release") else None
-    ready = cache.get("ready") if cache else None
+    """BUMBLEBEE_VERSION when the installed Bumblebee is older, or ""."""
     have = bumblebee_installed_version()
-    if not _vtuple(ready) or not have or _vtuple(ready) <= _vtuple(have):
+    if not have or _vtuple(have) >= _vtuple(BUMBLEBEE_VERSION):
         return ""
-    return ready
+    return BUMBLEBEE_VERSION
 BUMBLEBEE_CATALOG_URL = "https://codeload.github.com/perplexityai/bumblebee/tar.gz/refs/heads/main"
 BUMBLEBEE_CATALOG = "bumblebee-catalog.json"
 _CATALOG_MEMBER = re.compile(r"^[A-Za-z0-9._-]{1,100}/threat_intel/[A-Za-z0-9._-]{1,100}\.json$")
@@ -3145,8 +3098,7 @@ ITEM_NAME = {"downloads-scan": "ClamAV scan of ~/Downloads", "virus-scan": "Clam
              "bumblebee": "Bumblebee scan", "firmware": "Firmware check", "password-check": "Password check",
              "signatures": "ClamAV signatures", "pending-updates": "System update check",
              "flatpak": "Flatpak update check", "arch-audit": "Arch security list",
-             "osv": "OSV malware list", "aur": "AUR package status", "bumblebee-list": "Bumblebee list",
-             "bumblebee-release": "Bumblebee release check"}
+             "osv": "OSV malware list", "aur": "AUR package status", "bumblebee-list": "Bumblebee list"}
 ASKS = " (Omarchy asks for your password)"
 # Which schedule line runs each Last run row.
 DAILY, WEEKLY, UPDATE = " (daily check)", " (weekly check)", " (update check)"
@@ -3178,12 +3130,11 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
     daily = [n for n in SOURCE_FEEDS if n in DAILY_FEEDS and feed_available(n) and (pressed or feed_due(n))] \
         if want_daily else []
     # Steps that ask for your password come first, while you are at the screen,
-    # and only when you press a button: never in the background run. The
-    # Bumblebee release check comes before them, so the one password step for
-    # the update check can include a Bumblebee update when a newer release is ready.
-    early = [n for n in update if n == "bumblebee-release"] if pressed else []
-    update = [n for n in update if n not in early]
-    # The password step: decided when it is reached (see the loop), after the release check.
+    # and only when you press a button: never in the background run. The one
+    # password step of the update check includes Bumblebee when the installed
+    # one is older than the version Vigil pins.
+    early = []
+    # The password step: what it includes is decided when it is reached (see the loop).
     root_step = "root-updates" if (full or sources_only) and can_ask_password() \
         and (can_update_signatures() or bumblebee_ok()) else ""
     steps = early + ([root_step] if root_step else []) \
@@ -3215,7 +3166,7 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
         if STOP["on"]:
             break
         if name == "root-updates":
-            # The release check has run by now: include Bumblebee only when a newer release is ready.
+            # Include Bumblebee only when the installed one is older than the pinned version.
             sig, bee = can_update_signatures(), bool(bumblebee_update_ready())
             name = steps[i - 1] = ("signatures-and-bumblebee" if sig and bee else "signatures" if sig
                                    else "bumblebee-update" if bee else "")
@@ -3367,8 +3318,8 @@ def check_bumblebee():
     if not bumblebee_ok():
         return result(cid, cat, title, "info", "Not installed.", why,
                       fix=fix("terminal", "install-helpers", "Install"), weight=0,
-                      howto="Press Install: Vigil downloads Bumblebee from Perplexity, checks it against "
-                            "Perplexity's published checksum, and installs it.")
+                      howto="Press Install: Vigil downloads Bumblebee " + BUMBLEBEE_VERSION + " from Perplexity, checks "
+                            "it against the checksum written in Vigil's code, and installs it.")
     cache = feed_cache("bumblebee")
     if cache is None:
         return result(cid, cat, title, "info", "Installed. Its first check runs with the next daily check.", why,
@@ -3390,8 +3341,8 @@ def check_bumblebee():
             ready, bumblebee_installed_version()), why, "No known-compromised packages (%s)." % when,
             fix=fix("terminal", "update-bumblebee", "Update Bumblebee"), weight=0,
             howto="Press Update Bumblebee, or Run update check on the Overview, which does it behind the same "
-                  "password prompt. Vigil only takes a release that has been out for a week, checked against "
-                  "the checksum Perplexity published.")
+                  "password prompt. Vigil installs the version it was reviewed with, checked against the checksum "
+                  "written in its code; newer Bumblebee versions come with Vigil updates.")
     return result(cid, cat, title, "pass", "No known-compromised packages (%s)." % when, why, weight=3)
 
 

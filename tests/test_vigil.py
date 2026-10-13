@@ -2451,21 +2451,7 @@ def test_checkupdates_keeps_its_databases_in_the_private_state_folder(v):
 
 
 # --------------------------------------------------------------------------
-# Keeping Bumblebee up to date
-
-def release(tag, days_ago, **kw):
-    when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - days_ago * 86400))
-    return dict({"tag_name": tag, "published_at": when, "draft": False, "prerelease": False}, **kw)
-
-
-def test_only_a_release_out_for_a_week_counts(v):
-    rel = json.dumps([release("v0.2.0", 2), release("v0.1.10", 9), release("v0.1.9", 30),
-                      release("v0.3.0", 40, prerelease=True), release("v0.4.0", 40, draft=True),
-                      release("v9.9.9-rc1", 40), {"tag_name": 5}, "junk"])
-    assert v.bumblebee_releases_ready(rel) == "0.1.10"                     # 0.2.0 is too new; 10 > 9 numerically
-    assert v.bumblebee_releases_ready("[]") == ""
-    assert v.bumblebee_releases_ready('{"message": "rate limited"}') is None
-
+# Bumblebee: the version pinned in the reviewed code
 
 def bee_installed(v, version="0.1.2"):
     v.TRUSTED |= {v.ROOT + "/usr/local/bin/bumblebee", v.ROOT + "/usr/bin/curl"}
@@ -2473,30 +2459,36 @@ def bee_installed(v, version="0.1.2"):
     v.save_feed("bumblebee", {"findings": [], "status": "complete"})
 
 
-def releases_answer(v, body):
-    v.COMMANDS[("/usr/bin/curl", "-q", "-sS", "--fail", "--proto", "=https", "--proto-redir", "=https",
-                "--max-time", "30", "--max-filesize", "4194304", "--", v.BUMBLEBEE_RELEASES_URL)] = (0, body)
-
-
-def test_the_bumblebee_row_offers_a_ready_update(v):
-    bee_installed(v)
-    releases_answer(v, json.dumps([release("v0.1.2", 100)]))
-    v.refresh_bumblebee_release()
+def test_the_bumblebee_row_offers_the_pinned_version_only_when_older(v):
+    bee_installed(v, v.BUMBLEBEE_VERSION)
     assert v.check_bumblebee()["status"] == "pass"
-    releases_answer(v, json.dumps([release("v0.1.3", 8), release("v0.1.2", 100)]))
-    v.refresh_bumblebee_release()
+    bee_installed(v, "0.1.1")
     c = v.check_bumblebee()
     assert c["status"] == "info" and c["fix"]["action"] == "update-bumblebee"
-    assert c["summary"] == "Bumblebee 0.1.3 is ready to install (you have 0.1.2)."
-    bee_installed(v, "0.1.3")
+    assert c["summary"] == "Bumblebee %s is ready to install (you have 0.1.1)." % v.BUMBLEBEE_VERSION
+    bee_installed(v, "9.0.0")                                                 # newer than the pin: left alone
     assert v.check_bumblebee()["status"] == "pass"
 
 
-def test_update_sources_updates_bumblebee_behind_the_same_password(v):
-    bee_installed(v)
+def test_bumblebee_is_pinned_in_the_reviewed_code(v):
+    s = v.BUMBLEBEE_SCRIPT
+    assert re.fullmatch(r"\d+\.\d+\.\d+", v.BUMBLEBEE_VERSION)
+    for arch, sha in v.BUMBLEBEE_SHA256.items():
+        assert re.fullmatch(r"[0-9a-f]{64}", sha) and ("a=%s; want=%s" % (arch, sha)) in s
+    # Nothing from the network decides what is installed: no release list, no checksums.txt.
+    assert "api.github.com" not in s and "checksums.txt" not in s and "jq" not in s
+    assert "v=" + v.BUMBLEBEE_VERSION + "\n" in s
+    # The download is capped in bytes while it streams, not only by Content-Length.
+    assert s.startswith("set -o pipefail\n")
+    assert "| /usr/bin/head -c %d > " % (v.BUMBLEBEE_MAX_BYTES + 1) in s
+    assert "-gt %d ]" % v.BUMBLEBEE_MAX_BYTES in s
+    assert "/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 180 --max-filesize" in s
+
+
+def test_update_check_updates_bumblebee_behind_the_same_password(v):
+    bee_installed(v, "0.1.1")
     v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash", v.ROOT + "/usr/bin/freshclam",
                   v.ROOT + "/usr/bin/clamscan"}
-    releases_answer(v, json.dumps([release("v0.1.3", 8)]))
     both = tuple(v.root_updates_argv(True, True))
     v.COMMANDS[both] = (0, "VIGIL-SIG 0\nVIGIL-BEE 0\n")
     calls = []
@@ -2665,7 +2657,7 @@ def test_the_daily_run_is_light_and_the_weekly_items_stay_weekly(v, capsys, monk
                         lambda cb: (ran.append("downloads"), v.save_feed("downloads-scan", {"found": []})))
     monkeypatch.setattr(v, "refresh_virus_scan", lambda cb: ran.append("home-scan"))
     # Everything weekly done today; the daily items due.
-    for n in ("full-scan", "virus-scan", "arch-audit", "osv", "aur", "bumblebee-list", "bumblebee-release"):
+    for n in ("full-scan", "virus-scan", "arch-audit", "osv", "aur", "bumblebee-list"):
         v.save_feed(n, {})
     two_days = time.strftime("%Y-%m-%d", time.localtime(time.time() - 2 * 86400))
     put(Path(v.HOME, ".local/state/omarchy-vigil/bumblebee.json"),
@@ -2698,7 +2690,7 @@ def test_each_button_runs_its_own_schedule(v, monkeypatch):
     for fn, n in (("refresh_bumblebee", "bumblebee"), ("refresh_firmware", "firmware"),
                   ("refresh_downloads_scan", "downloads-scan"), ("refresh_virus_scan", "virus-scan")):
         monkeypatch.setattr(v, fn, lambda *a, n=n: ran.append(n))
-    update = ["bumblebee-release", "arch-audit", "osv", "aur", "bumblebee-list"]
+    update = ["arch-audit", "osv", "aur", "bumblebee-list"]
     v.refresh_due_feeds(sources_only=True)
     assert ran == update
     ran.clear()
