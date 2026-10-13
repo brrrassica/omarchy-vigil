@@ -10,7 +10,7 @@
 // Must match manifest.json and VERSION in bin/vigil (a test checks). The
 // helper runs from disk every time, but this file stays loaded until the
 // shell restarts, so after an update the two can differ for a while.
-var VERSION = "0.25.0"
+var VERSION = "0.26.0"
 var MAX_REPORT_CHARS = 512 * 1024
 var MAX_CHECKS = 160
 var MAX_STR = 400
@@ -1087,14 +1087,14 @@ function scheduleLines(report, autoUpdate, now, refreshMinutes) {
   var checked = localDate(report.generatedAt)
   var nextCheck = checked ? new Date(checked.getTime() + (refreshMinutes || 30) * 60000) : null
   var out = []
+  // What each one runs is in the Last run list, where every row names its
+  // schedule ("daily check", "weekly check", "update check").
   var d = countdown(report.nextDaily, now, nextCheck)
-  if (d !== "") out.push("Next daily check: " + d + " (ClamAV scan of ~/Downloads, System update check, "
-                         + "Flatpak update check, Bumblebee scan)")
+  if (d !== "") out.push("Next daily check: " + d)
   var f = countdown(report.nextFullScan, now, nextCheck)
-  if (f !== "") out.push("Next weekly check: " + f + " (ClamAV scan of ~, Firmware check)")
+  if (f !== "") out.push("Next weekly check: " + f)
   var u = countdown(report.nextUpdate, now, nextCheck)
-  if (u !== "") out.push("Next update check: " + u + " (Arch security list, OSV malicious-package list, "
-                         + "AUR package status, Bumblebee list, Bumblebee release check)")
+  if (u !== "") out.push("Next update check: " + u)
   if (report.lastRun && report.lastRun.at !== "" && !report.lastRun.ok)
     out.push("The last update could not reach every source; Vigil tries again tomorrow.")
   return out
@@ -1202,7 +1202,7 @@ function updateConfirmation(report) {
   if (has("pending-updates")) lines.push((n++) + ". System update check: waiting system and Omarchy updates (nothing is installed).")
   if (has("flatpak")) lines.push((n++) + ". Flatpak update check, and the updates for your own Flatpak apps (no password).")
   if (has("arch-audit")) lines.push((n++) + ". Arch security list: known holes in your packages, from the Arch security team.")
-  if (has("osv")) lines.push((n++) + ". OSV malicious-package list: malicious npm and Bun packages, from OSV.dev.")
+  if (has("osv")) lines.push((n++) + ". OSV malware list: malicious npm and Bun packages, from OSV.dev.")
   if (has("aur")) lines.push((n++) + ". AUR package status: whether your AUR packages are still maintained.")
   if (has("bumblebee-list")) lines.push((n++) + ". Bumblebee list and Bumblebee release check, from Perplexity; a newer"
     + " Bumblebee that has been out for a week is installed with the same password prompt.")
@@ -1219,7 +1219,7 @@ function fullScanConfirmation(report) {
   return { title: "Full scan", lines: [
     "Runs every check and scan Vigil has, in this order:",
     "1. Password check: every account has a password. Omarchy asks for your password for this one step.",
-    "2. System update check, Flatpak update check, Arch security list, OSV malicious-package list,",
+    "2. System update check, Flatpak update check, Arch security list, OSV malware list,",
     "   AUR package status, Bumblebee list and Bumblebee release check.",
     "3. Bumblebee scan, if Bumblebee is installed.",
     "4. Firmware check, if fwupd is installed.",
@@ -1392,15 +1392,26 @@ function withSettings(report, autoUpdate) {
   return out
 }
 
+// The schedule each tab row belongs to: 1 daily check, 2 weekly check,
+// 3 update check, 4 automatic (ClamAV signatures). Every other row is a
+// settings check (0), which runs with every check.
+var CHECK_SCHEDULE = { "virus-scan": 1, "updates": 1, "flatpak-apps": 1, "bumblebee": 1, "firmware": 2,
+                       "scanner-arch-audit": 3, "malicious-packages": 3, "aur-status": 3,
+                       "scanner-clamav": 4 }
+
 function checksFor(report, category) {
   if (!report) return []
   var out = []
   for (var i = 0; i < report.checks.length; i++)
     if (report.checks[i].category === category) out.push(report.checks[i])
-  // Reviewed warnings sort after the information rows, just above "pass".
+  // Grouped like the Last run list: settings checks (every check) first, then
+  // the daily check, weekly check, update check and ClamAV's own updates.
+  // Within a group, worst first; reviewed warnings sort after the
+  // information rows, just above "pass".
+  function group(c) { return CHECK_SCHEDULE.hasOwnProperty(c.id) ? CHECK_SCHEDULE[c.id] : 0 }
   function rank(c) { return c.dismissed ? STATUSES.indexOf("info") + 0.5 : STATUSES.indexOf(c.status) }
   out.sort(function(a, b) {
-    var d = rank(a) - rank(b)
+    var d = group(a) - group(b) || rank(a) - rank(b)
     return d !== 0 ? d : b.weight - a.weight
   })
   return out

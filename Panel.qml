@@ -751,33 +751,43 @@ Panel {
         else if (t >= "1" && t <= "6") root.selectTab(root.tabs[Number(t) - 1])
       }
 
+      // The content stops 22 units short of the right edge, so the scroll bar
+      // sits in its own lane and never covers a button or text. The lane stays
+      // when nothing scrolls, so the content width never jumps.
       Flickable {
         id: panelFlick
         anchors.fill: parent
+        anchors.rightMargin: Style.space(22)
         contentWidth: width
         contentHeight: column.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
+        // A thin bar with square ends in a faint shade of the theme's text
+        // colour; brighter on hover and while dragging, gone when all fits.
         ScrollBar.vertical: ScrollBar {
           id: vbar
-          policy: ScrollBar.AsNeeded
-          width: Style.space(6)
+          parent: panelFlick.parent
+          anchors.top: parent.top
+          anchors.right: parent.right
+          anchors.bottom: parent.bottom
+          width: Style.space(3)
+          padding: 0
+          policy: ScrollBar.AlwaysOn
+          visible: panelFlick.contentHeight > panelFlick.height
           background: Item {}
           contentItem: Rectangle {
-            implicitWidth: Style.space(4)
-            radius: width / 2
+            implicitWidth: Style.space(3)
+            radius: 0
             color: root.foreground
-            opacity: vbar.pressed ? 0.55 : (vbar.hovered ? 0.4 : 0.25)
+            opacity: vbar.pressed ? 0.6 : (vbar.hovered ? 0.45 : 0.25)
           }
         }
 
         Column {
           id: column
-          // A fixed gutter for the scroll bar, so it never sits on top of text
-          // (and the layout does not reflow when the bar appears).
-          width: panelFlick.width - Style.space(22)
+          width: panelFlick.width
           spacing: Style.space(12)
 
           PanelHero {

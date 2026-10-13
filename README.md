@@ -29,7 +29,7 @@ the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.25.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.26.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -127,10 +127,13 @@ is already due. Each button resets its own countdown. Results of the buttons
 stay on a card in the panel until you close it. Turning off `autoUpdate` leaves both to the
 buttons.
 
-Below the pillars, **Last run** lists when each scan last ran (the settings
-checks, the virus scan, Bumblebee, the password check) and when each source
-last updated (virus signatures, known vulnerabilities, malicious packages,
-AUR status), with the time. Anything that failed or is out of date is red.
+Below the pillars, **Last run** lists when each scan last ran and when each
+source last updated, with the time, scans first and then updates. Each row
+names the schedule that runs it (daily check, weekly check, update check),
+in that order, so the three "Next … check" lines above it need no list of
+their own. The rows in each tab follow the same order: settings checks
+first, then the rows of the daily, weekly and update checks. Anything that
+failed or is out of date is red.
 Work done outside Vigil counts too: the virus signatures line includes
 ClamAV's own update service and updates made in ClamUI, the virus scan line
 includes scans you ran in ClamUI (marked "by ClamUI"). The vulnerability, malicious-package and

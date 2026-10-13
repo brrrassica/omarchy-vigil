@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta, timezone
 
-VERSION = "0.25.0"
+VERSION = "0.26.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1905,7 +1905,7 @@ def _newer(a, b):
 
 def source_status():
     """When each scan last ran and each source last updated, for the Overview.
-    Scans first (virus scan, Bumblebee, the password check), then updates."""
+    Scans first, then updates; each in schedule order."""
     out = []
 
     def add(sid, label, date_, time_, state, tried="", by=""):
@@ -1929,22 +1929,27 @@ def source_status():
             state = fresh(at, FEED_INTERVAL.get(name, FEED_DAYS) + FEED_RETRY_DAYS)
         add(name, label, at, tm if at else "", state, tried if state == "failed" else "")
 
+    # Each group in the order of the schedule lines: daily check, weekly check,
+    # update check, then what runs on its own schedule.
+    if feed_available("downloads-scan"):
+        feed("downloads-scan", ITEM_NAME["downloads-scan"] + DAILY)
+    if feed_available("bumblebee"):
+        feed("bumblebee", ITEM_NAME["bumblebee"] + DAILY)
     if feed_available("virus-scan"):
-        feed("virus-scan", ITEM_NAME["virus-scan"] + " (weekly)")
+        feed("virus-scan", ITEM_NAME["virus-scan"] + WEEKLY)
         ext = clamui_last("scan")                       # a scan you ran in ClamUI counts too
         mine = out[-1]
         if ext[0] and _newer(ext, (mine["date"], mine["time"])) == ext and ext != (mine["date"], mine["time"]):
             out[-1] = dict(mine, date=ext[0], time=ext[1], state=fresh(ext[0], FEED_DAYS + FEED_RETRY_DAYS),
                            tried="", by="ClamUI")
-    if feed_available("downloads-scan"):
-        feed("downloads-scan", ITEM_NAME["downloads-scan"] + " (daily)")
-    if feed_available("bumblebee"):
-        feed("bumblebee", ITEM_NAME["bumblebee"] + " (daily)")
     if feed_available("firmware"):
-        feed("firmware", ITEM_NAME["firmware"] + " (weekly)")
+        feed("firmware", ITEM_NAME["firmware"] + WEEKLY)
     d, _ = no_password_scan()
     _, t = _mtime_stamp([home_path(*STATE_DIR, NO_PASSWORD_NAME)]) if d else ("", "")
     add("password-check", ITEM_NAME["password-check"] + " (Full scan only)", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
+    for name in ("pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee-list", "bumblebee-release"):
+        if feed_available(name):
+            feed(name, ITEM_NAME[name] + (DAILY if name in DAILY_FEEDS else UPDATE))
     if is_trusted_executable(sys_path("/usr/bin/clamscan")):
         # Whoever updated them: ClamAV's own service (freshclam.dat changes on
         # every check, even when nothing new came out), Vigil, or ClamUI.
@@ -1959,11 +1964,6 @@ def source_status():
         by = "ClamUI" if ext[0] and _newer(ext, (d, t)) == ext and ext != (d, t) else ""
         d, t = _newer(ext, (d, t))
         add("signatures", ITEM_NAME["signatures"] + " (automatic)", d, t, fresh(d, FEED_DAYS), by=by)
-    for name, label in ((n, ITEM_NAME[n] + (" (daily)" if n in DAILY_FEEDS else " (weekly)"))
-                        for n in ("pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee-list",
-                                  "bumblebee-release")):
-        if feed_available(name):
-            feed(name, label)
     return out
 
 
@@ -2105,7 +2105,7 @@ def refresh_osv():
 
 @check
 def check_osv():
-    cid, cat, title = "malicious-packages", "supply", "OSV malicious-package list (npm, Bun)"
+    cid, cat, title = "malicious-packages", "supply", "OSV malware list (npm, Bun packages)"
     why = ("Attackers publish poisoned npm and Bun packages that steal passwords and keys; the "
            "2026 Atomic Arch attack pulled one into AUR builds. Vigil asks OSV.dev about the "
            "packages in your AUR build folders and global npm and Bun installs, sending names and "
@@ -3142,9 +3142,11 @@ ITEM_NAME = {"downloads-scan": "ClamAV scan of ~/Downloads", "virus-scan": "Clam
              "bumblebee": "Bumblebee scan", "firmware": "Firmware check", "password-check": "Password check",
              "signatures": "ClamAV signatures", "pending-updates": "System update check",
              "flatpak": "Flatpak update check", "arch-audit": "Arch security list",
-             "osv": "OSV malicious-package list", "aur": "AUR package status", "bumblebee-list": "Bumblebee list",
+             "osv": "OSV malware list", "aur": "AUR package status", "bumblebee-list": "Bumblebee list",
              "bumblebee-release": "Bumblebee release check"}
 ASKS = " (Omarchy asks for your password)"
+# Which schedule line runs each Last run row.
+DAILY, WEEKLY, UPDATE = " (daily check)", " (weekly check)", " (update check)"
 STEP_TEXT = dict(ITEM_NAME, **{
     "flatpak-update": "Flatpak app updates",
     "password-check": ITEM_NAME["password-check"] + ASKS,

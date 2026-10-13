@@ -456,12 +456,12 @@ test("schedule lines: countdowns with the time, in local time", () => {
   const r = { generatedAt: "2026-10-12T09:58:00+0200", lastRun: { at: "2026-10-12 09:52", ok: true },
               nextUpdate: "2026-10-19 09:52", nextFullScan: "2026-10-12 21:15", nextDaily: "2026-10-13 07:40" }
   assert.deepEqual(M.scheduleLines(r, true, now, 30), [
-    "Next daily check: tomorrow at 07:40 (ClamAV scan of ~/Downloads, System update check, Flatpak update check, Bumblebee scan)",
-    "Next weekly check: today at 21:15 (ClamAV scan of ~, Firmware check)",
-    "Next update check: in 7 days (Arch security list, OSV malicious-package list, AUR package status, Bumblebee list, Bumblebee release check)"])
+    "Next daily check: tomorrow at 07:40",
+    "Next weekly check: today at 21:15",
+    "Next update check: in 7 days"])
   // Already due: it runs at the next background check, 30 minutes after the last one.
   assert.equal(M.scheduleLines(Object.assign({}, r, { nextDaily: "now" }), true, now, 30)[0],
-    "Next daily check: today at 10:28 (ClamAV scan of ~/Downloads, System update check, Flatpak update check, Bumblebee scan)")
+    "Next daily check: today at 10:28")
   assert.equal(M.scheduleLines(Object.assign({}, r, { nextDaily: "" }), true, now, 30).length, 2)  // nothing daily set up
   assert.equal(M.countdown("2026-10-13 08:05", now, null), "tomorrow at 08:05")
   assert.equal(M.countdown("2026-10-12", now, null), "today at 10:00")       // older helper: date only
@@ -855,13 +855,25 @@ esac
 })
 
 
-test("every name in the schedule lines is a row in the Last run list", () => {
+test("every Last run row names a schedule line, and the helper lists them in schedule order", () => {
   const helper = readFileSync(path.join(here, "..", "bin", "vigil"), "utf8")
-  const names = [...helper.matchAll(/"[a-z-]+": "([^"]+)"/g)].map(m => m[1])
-  const r = { generatedAt: "2026-10-12T09:58:00+0200", lastRun: { at: "", ok: true },
-              nextUpdate: "2026-10-19 09:52", nextFullScan: "2026-10-12 21:15", nextDaily: "2026-10-13 07:40" }
-  for (const line of M.scheduleLines(r, true, new Date(2026, 9, 12, 10, 0), 30)) {
-    const inside = /\((.*)\)$/.exec(line)[1]
-    for (const item of inside.split(", ")) assert.ok(names.includes(item), item + " is not an ITEM_NAME in bin/vigil")
+  const body = helper.slice(helper.indexOf("def source_status"), helper.indexOf("def feeds_updated"))
+  const order = [...body.matchAll(/\b(DAILY|WEEKLY|UPDATE|automatic|Full scan only)\b/g)].map(m => m[1])
+  // Scans, then updates, each in schedule order (password check and ClamAV
+  // signatures last, as they follow no schedule line).
+  assert.equal(order.join(" "), "DAILY DAILY WEEKLY WEEKLY Full scan only DAILY UPDATE automatic")
+  for (const line of M.scheduleLines({ generatedAt: "2026-10-12T09:58:00+0200", lastRun: { at: "", ok: true },
+      nextUpdate: "2026-10-19 09:52", nextFullScan: "2026-10-12 21:15", nextDaily: "2026-10-13 07:40" },
+      true, new Date(2026, 9, 12, 10, 0), 30)) {
+    const name = /^Next (\w+ check):/.exec(line)[1]
+    assert.ok(helper.includes('" (' + name + ')"'), name + " is not a Last run suffix")
   }
+})
+
+test("tab rows: settings checks, then daily, weekly and update check rows, worst first in each", () => {
+  const c = (id, status, weight) => ({ id, category: "detect", status, weight: weight || 1, dismissed: false })
+  const r = { checks: [c("scanner-clamav", "pass"), c("firmware", "warn"), c("virus-scan", "pass"),
+                       c("aur-status", "fail"), c("screen-lock", "pass"), c("firewall", "fail")] }
+  assert.deepEqual(M.checksFor(r, "detect").map(x => x.id),
+    ["firewall", "screen-lock", "virus-scan", "firmware", "aur-status", "scanner-clamav"])
 })
