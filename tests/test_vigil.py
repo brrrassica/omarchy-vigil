@@ -2712,3 +2712,41 @@ def test_each_button_runs_its_own_schedule(v, monkeypatch):
     # folder scan covers Downloads, so Downloads is not scanned twice.
     v.refresh_due_feeds(full=True)
     assert ran == update + ["pending-updates", "flatpak", "bumblebee", "firmware", "virus-scan"]
+
+
+def test_each_button_restarts_its_own_countdown(v, monkeypatch):
+    from datetime import datetime, timedelta
+    monkeypatch.setattr(v, "feed_available", lambda n: True)
+    monkeypatch.setattr(v, "bumblebee_ok", lambda: True)
+    monkeypatch.setattr(v, "can_ask_password", lambda: False)
+    monkeypatch.setattr(v, "flatpak_installations", lambda: [])
+    monkeypatch.setattr(v, "exists", lambda p: True)
+    for n in v.SOURCE_FEEDS:
+        monkeypatch.setitem(v.FEED_REFRESH, n, lambda n=n: v.save_feed(n, {}))
+    for fn, n in (("refresh_bumblebee", "bumblebee"), ("refresh_firmware", "firmware"),
+                  ("refresh_downloads_scan", "downloads-scan"), ("refresh_virus_scan", "virus-scan")):
+        monkeypatch.setattr(v, fn, lambda *a, n=n: v.save_feed(n, {}))
+
+    def at(s):
+        return datetime.strptime(s, "%Y-%m-%d %H:%M")
+
+    def near(s, days):
+        return abs(at(s) - (datetime.now() + timedelta(days=days))) < timedelta(minutes=2)
+
+    assert v.next_daily() == v.next_full_scan() == v.next_update() == "now"     # never ran
+    v.refresh_due_feeds(daily_only=True)
+    assert near(v.next_daily(), 1) and v.next_full_scan() == v.next_update() == "now"
+    v.refresh_due_feeds(weekly_only=True)
+    assert near(v.next_full_scan(), 7) and v.next_update() == "now"
+    v.refresh_due_feeds(sources_only=True)
+    assert near(v.next_update(), 7)
+    # Run all restarts all three, the daily one included, though it does not
+    # scan Downloads on its own (the scan of ~ covered it).
+    for name in v.FEED_FILES:                                               # start over: nothing ran yet
+        try:
+            os.remove(v.home_path(*v.STATE_DIR, v.FEED_FILES[name]))
+        except OSError:
+            pass
+    assert v.next_daily() == "now"
+    v.refresh_due_feeds(full=True)
+    assert near(v.next_daily(), 1) and near(v.next_full_scan(), 7) and near(v.next_update(), 7)
