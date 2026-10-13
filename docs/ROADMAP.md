@@ -111,7 +111,20 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.28.1 (this release): file names stay out of process lists
+## 0.28.3 (this release): SSH key names stay out of process lists
+
+- [x] Add a passphrase hands each SSH key to grep and ssh-keygen by
+      descriptor (stdin, `/proc/self/fd/3`) instead of by path, so the
+      key file names are not in `/proc/<pid>/cmdline` while ssh-keygen
+      waits for the passphrase.
+
+## 0.28.2: readable hints on every theme
+
+- [x] Secondary text (the key hints, times, descriptions) uses the theme's
+      text colour darkened, as mouse-ctrl does, instead of the theme's
+      muted colour, which some themes set close to the background.
+
+## 0.28.1: file names stay out of process lists
 
 - [x] The scan that double-checks a virus detection hands clamscan its
       file paths in a private list file, like the Downloads scan, instead

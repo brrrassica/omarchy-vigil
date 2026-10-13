@@ -10,7 +10,7 @@
 // Must match manifest.json and VERSION in bin/vigil (a test checks). The
 // helper runs from disk every time, but this file stays loaded until the
 // shell restarts, so after an update the two can differ for a while.
-var VERSION = "0.28.1"
+var VERSION = "0.28.3"
 var MAX_REPORT_CHARS = 512 * 1024
 var MAX_CHECKS = 160
 var MAX_STR = 400
@@ -707,11 +707,15 @@ var TERMINAL_ACTIONS = {
     what: ["Protects each SSH key that has no passphrase, so a stolen copy is useless; it asks you for the new one.",
            "Servers that trust the key keep working.",
            "Technical: ssh-keygen -p for each private key in ~/.ssh without a passphrase"],
+    // Key file names never go into a program's arguments, which every account
+    // can read in /proc/<pid>/cmdline (ssh-keygen -p waits there for the
+    // passphrase): each key is opened by the shell on descriptor 3, grep reads
+    // it from stdin, and ssh-keygen gets /proc/self/fd/3, which names no file.
     run: "found=0; for k in \"$HOME\"/.ssh/*; do "
       + "[ -f \"$k\" ] && [ ! -L \"$k\" ] || continue; "
-      + "/usr/bin/grep -q 'PRIVATE KEY' \"$k\" 2>/dev/null || continue; "
-      + "if /usr/bin/ssh-keygen -y -P '' -f \"$k\" >/dev/null 2>&1; then found=1; "
-      + "echo \"Passphrase for $k\"; /usr/bin/ssh-keygen -p -f \"$k\"; fi; done; "
+      + "/usr/bin/grep -q 'PRIVATE KEY' < \"$k\" 2>/dev/null || continue; "
+      + "if /usr/bin/ssh-keygen -y -P '' -f /proc/self/fd/3 3< \"$k\" >/dev/null 2>&1; then found=1; "
+      + "echo \"Passphrase for $k\"; /usr/bin/ssh-keygen -p -f /proc/self/fd/3 3< \"$k\"; fi; done; "
       + "[ \"$found\" = 1 ] || echo 'Every key already has a passphrase.'"
   },
   "screen-lock-default": {
