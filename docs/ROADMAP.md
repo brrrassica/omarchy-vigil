@@ -111,7 +111,14 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.28.2 (this release): readable hints on every theme
+## 0.28.3 (this release): SSH key names stay out of process lists
+
+- [x] Add a passphrase hands each SSH key to grep and ssh-keygen by
+      descriptor (stdin, `/proc/self/fd/3`) instead of by path, so the
+      key file names are not in `/proc/<pid>/cmdline` while ssh-keygen
+      waits for the passphrase.
+
+## 0.28.2: readable hints on every theme
 
 - [x] Secondary text (the key hints, times, descriptions) uses the theme's
       text colour darkened, as mouse-ctrl does, instead of the theme's

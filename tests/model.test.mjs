@@ -885,3 +885,28 @@ test("tab rows: settings checks, then daily, weekly and update check rows, worst
   assert.deepEqual(M.checksFor(r, "detect").map(x => x.id),
     ["firewall", "screen-lock", "virus-scan", "firmware", "aur-status", "scanner-clamav"])  // update check: worst first
 })
+
+test("Add a passphrase never puts SSH key file names in a program's arguments", () => {
+  // /proc/<pid>/cmdline is readable by every account; ssh-keygen -p sits there
+  // waiting for the passphrase. Stand-ins record their arguments and read the
+  // key through descriptor 3, which is how the real ssh-keygen opens it.
+  const home = mkdtempSync(path.join(tmpdir(), "vigil-ssh-"))
+  const ssh = path.join(home, ".ssh"); mkdirSync(ssh, { mode: 0o700 })
+  writeFileSync(path.join(ssh, "id_work_secret_project"), "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n", { mode: 0o600 })
+  writeFileSync(path.join(ssh, "known_hosts"), "github.com ssh-ed25519 AAAA\n")
+  const log = path.join(home, "argv.log")
+  const bin = path.join(home, "bin"); mkdirSync(bin)
+  const keygen = path.join(bin, "ssh-keygen"), grep = path.join(bin, "grep")
+  writeFileSync(keygen, `#!/bin/bash\necho "ssh-keygen $*" >> "${log}"\nhead -c 40 /proc/self/fd/3 >> "${log}"\necho >> "${log}"\nexit 0\n`, { mode: 0o755 })
+  writeFileSync(grep, `#!/bin/bash\necho "grep $*" >> "${log}"\nexec /usr/bin/grep "$@"\n`, { mode: 0o755 })
+  const body = M.TERMINAL_ACTIONS["ssh-passphrase"].run
+    .replaceAll("/usr/bin/ssh-keygen", keygen).replaceAll("/usr/bin/grep", grep)
+  const r = spawnSync("/usr/bin/bash", ["-c", body], { encoding: "utf8", env: { HOME: home, PATH: "/usr/bin:/bin" } })
+  assert.equal(r.status, 0, r.stderr)
+  const seen = readFileSync(log, "utf8")
+  assert.ok(!seen.includes("id_work_secret_project") && !seen.includes(".ssh"), seen)
+  assert.match(seen, /^ssh-keygen -y -P {2}-f \/proc\/self\/fd\/3\n-----BEGIN OPENSSH PRIVATE KEY-----/m)   // the key itself, by descriptor
+  assert.match(seen, /^ssh-keygen -p -f \/proc\/self\/fd\/3$/m)
+  assert.equal((seen.match(/^ssh-keygen -p /gm) || []).length, 1)                                        // known_hosts is not a key
+  rmSync(home, { recursive: true, force: true })
+})

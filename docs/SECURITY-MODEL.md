@@ -158,7 +158,11 @@ accepted) cannot be signalled; the panel then says so.
   an action id; an id that is not in the table does nothing. Omarchy tools
   are addressed by absolute path, from one of the two trusted directories.
   Each script prints what it will do and waits for Enter before running.
-  `tests/model.test.mjs` runs `bash -n` on every script.
+  `tests/model.test.mjs` runs `bash -n` on every script. Scripts never put
+  private file names into a program's arguments, which every account can
+  read in `/proc/<pid>/cmdline`: **Add a passphrase** opens each SSH key on
+  descriptor 3, `grep` reads it from stdin, and `ssh-keygen` is given
+  `/proc/self/fd/3` (a test runs the script and checks the arguments).
 - **Learn more** opens a page with `xdg-open` (root-owned, in `/usr/bin`) as
   a two-element argv, no shell. The URL is a constant from the `DOCS` table
   in `Model.js`, chosen by id; any other id is dropped when the report is
