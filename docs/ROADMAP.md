@@ -111,7 +111,13 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.28 (this release): ready for the marketplace
+## 0.28.1 (this release): file names stay out of process lists
+
+- [x] The scan that double-checks a virus detection hands clamscan its
+      file paths in a private list file, like the Downloads scan, instead
+      of as arguments other accounts could read in `/proc/<pid>/cmdline`.
+
+## 0.28: ready for the marketplace
 
 - [x] Bumblebee is pinned: Vigil installs exactly 0.1.2, checked against
       the SHA-256 written in its own code, with the download capped in

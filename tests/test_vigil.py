@@ -58,6 +58,14 @@ def v(tmp_path, monkeypatch):
     def fake_run(argv, timeout=8, limit=0, on_line=None, raw=False, env=None):
         envs.append(env)
         key = tuple(argv)
+        # The confirming rescan passes its paths in a private list file; the
+        # tests describe it by those paths, as if they were arguments.
+        conf = "--file-list=" + os.path.join(mod.HOME, *mod.STATE_DIR, mod.CONFIRM_LIST)
+        if key and key[-1] == conf:
+            with open(conf[len("--file-list="):], encoding="utf-8", errors="surrogateescape") as fh:
+                listed = fh.read().splitlines()
+            mod.CONFIRM_SEEN.append((tuple(argv), listed, os.stat(conf[len("--file-list="):]).st_mode & 0o777))
+            key = key[:-1] + ("--",) + tuple(listed)
         if key not in commands:
             return None, b"" if raw else ""
         rc, out = commands[key]
@@ -67,6 +75,7 @@ def v(tmp_path, monkeypatch):
 
     envs = []
     mod.ENVS = envs
+    mod.CONFIRM_SEEN = []
     monkeypatch.setattr(mod, "run", fake_run)
     trusted = set()
     mod.TRUSTED = trusted
@@ -2742,3 +2751,17 @@ def test_each_button_restarts_its_own_countdown(v, monkeypatch):
     assert v.next_daily() == "now"
     v.refresh_due_feeds(full=True)
     assert near(v.next_daily(), 1) and near(v.next_full_scan(), 7) and near(v.next_update(), 7)
+
+
+def test_the_confirming_rescan_keeps_file_names_out_of_its_arguments(v):
+    """/proc/<pid>/cmdline is readable by every account, so the paths of detected
+    files go to clamscan in a private 0600 list, which is removed afterwards."""
+    secret = Path(v.HOME, "Documents", "tax-2026", "bank statement.pdf.exe")
+    put(secret, "x")
+    found = [{"file": str(secret), "signature": "Win.Test.EICAR_HDB-1"}]
+    v.COMMANDS[confirm_argv([str(secret)])] = (1, "%s: Win.Test.EICAR_HDB-1 FOUND\n" % secret)
+    assert v.confirm_detections(found) == found
+    (argv, listed, mode), = v.CONFIRM_SEEN
+    assert not any(str(secret) in a or "tax-2026" in a for a in argv)
+    assert listed == [str(secret)] and mode == 0o600
+    assert not Path(v.HOME, *v.STATE_DIR, v.CONFIRM_LIST).exists()
