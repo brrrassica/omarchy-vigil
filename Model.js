@@ -10,7 +10,7 @@
 // Must match manifest.json and VERSION in bin/vigil (a test checks). The
 // helper runs from disk every time, but this file stays loaded until the
 // shell restarts, so after an update the two can differ for a while.
-var VERSION = "0.28.3"
+var VERSION = "0.29.0"
 var MAX_REPORT_CHARS = 512 * 1024
 var MAX_CHECKS = 160
 var MAX_STR = 400
@@ -49,9 +49,10 @@ function inList(v, list) {
 // Actions
 //
 // Helper actions run `bin/vigil fix <id>` as the logged-in user; they never
-// need root. Terminal actions open a visible Omarchy terminal running one of
-// the constant scripts below, so every privileged step is shown, asks for the
-// password through sudo, and can be cancelled with Ctrl+C before it starts.
+// need root. Every other action is one of the constant scripts below: shown in
+// full on the confirmation card, then run as you, as root through pkexec
+// (Omarchy's password dialog asks; cancelling it changes nothing), or, for
+// tools that ask questions as they go, in a visible terminal.
 // No value from the report, a file or the network is ever put into a script:
 // the report only names an action id, and an unknown id does nothing.
 
@@ -95,9 +96,9 @@ var HELPER_INFO = {
                    what: ["Runs osv-scanner on your AUR build folders and global npm and Bun installs.",
                           "It sends package names and versions (never your files) to OSV.dev, run by Google.",
                           "Vigil also does this once a week by itself."] },
-  "virus-scan-now": { title: "Scan Downloads for viruses now",
-                      what: ["Runs ClamAV on ~/Downloads as you, in the background. Nothing is deleted.",
-                             "Large folders can take a few minutes. Vigil also does this once a week."] },
+  "virus-scan-now": { title: "Scan your home folder for viruses now",
+                      what: ["Runs ClamAV on your whole home folder as you, in the background. Nothing is deleted.",
+                             "It can take a while. Vigil also does this in each weekly check."] },
   "aur-refresh": { title: "Check your AUR packages now",
                    what: ["Asks aur.archlinux.org about the AUR packages you have installed, the same lookup",
                           "yay and paru make on every update. Vigil also does this once a week by itself."] }
@@ -127,8 +128,59 @@ function howTo(check) {
     + (check.fix.kind === "terminal" ? " It shows what it will do and asks before changing anything." : "")
 }
 
-// Title and lines for the confirmation card of any runnable action.
-function confirmation(kind, id, report) {
+// The confirmation card of any runnable action: its title, what it does in
+// plain words, and the exact commands it starts ({ who, text } each), so every
+// root step is on the card in full before you press Run. home is your home
+// folder, which the root scripts get as HOME.
+function confirmation(kind, id, report, home) {
+  var card = confirmationText(kind, id, report)
+  if (!card) return null
+  var tools = report && report.tools ? report.tools : {}
+  card.commands = kind === "terminal" ? actionCommands(id, tools, home)
+    : kind === "clean-all" && cleanAllPlan(report).system ? actionCommands("clean-system", tools, home)
+    : kind === "update-sources" || kind === "full-scan" ? runCommands(kind, report)
+    : []
+  return card
+}
+
+// The argv of one step and the script it runs, for the card: the program and
+// its options on the first line, then the script exactly as it is passed.
+function commandText(argv) {
+  return argv.slice(0, -1).join(" ") + "\n" + argv[argv.length - 1]
+}
+
+function actionCommands(id, tools, home) {
+  if (runMode(id) === "terminal") {
+    var body = actionBody(terminalAction(id), tools)
+    return body === "" ? [] : [{ who: "In a terminal, as you, after you press Enter there:", text: body }]
+  }
+  var steps = actionPlan(id, tools, home)
+  var out = []
+  for (var i = 0; i < steps.length; i++)
+    out.push({ who: steps[i].asRoot ? "As root, through pkexec (Omarchy asks for your password):"
+                                    : (i > 0 ? "Then, as you:" : "As you, no password:"),
+               text: commandText(steps[i].argv) })
+  return out
+}
+
+// The run cards' root steps, exactly as the helper starts them: the ClamAV
+// signatures and a Bumblebee update behind one password prompt (each only when
+// it applies), and in Run all the password check. The rest runs as you.
+function runCommands(kind, report) {
+  if (!report || toolDir(report.tools, "pkexec") === "") return []
+  var signatures = report.sources.some(function(s) { return s.id === "signatures" })
+  var bumblebee = report.checks.some(function(c) { return c.id === "bumblebee" && c.fix.action === "update-bumblebee" })
+  var out = []
+  if (signatures || bumblebee)
+    out.push({ who: "As root, through pkexec (Omarchy asks for your password):",
+               text: commandText([PKEXEC, BASH, "-c", rootUpdatesScript(signatures, bumblebee)]) })
+  if (kind === "full-scan")
+    out.push({ who: "As root, through pkexec, for the password check (only account names are kept):",
+               text: commandText([PKEXEC, BASH, "-c", NO_PASSWORD_STEP]) })
+  return out
+}
+
+function confirmationText(kind, id, report) {
   if (kind === "clean-all") return cleanAllConfirmation(report)
   if (kind === "ignore") return ignoreConfirmation(id, report)
   if (kind === "update-sources") return updateConfirmation(report)
@@ -248,7 +300,22 @@ function actionBody(a, tools) {
     var sdir = toolDir(tools, a.source)
     return sdir === "" ? "" : "source " + sdir + "/" + a.source + " && " + a.run
   }
-  return a.run
+  return usesSh(a, tools) + a.run
+}
+
+// Omarchy commands a script calls (its `uses`), resolved like every other
+// Omarchy tool to a root-owned file in /usr/bin or /usr/share/omarchy/bin and
+// set at the top as shell variables, so the script names them by absolute path
+// (omarchy-plugin-disable becomes $omarchy_plugin_disable). One that is not
+// found is left empty, and the script skips that step.
+function usesSh(a, tools) {
+  var out = ""
+  var names = a.uses || []
+  for (var i = 0; i < names.length; i++) {
+    var dir = toolDir(tools, names[i])
+    out += names[i].replace(/-/g, "_") + "=" + (dir === "" ? "" : dir + "/" + names[i]) + "\n"
+  }
+  return out
 }
 
 function stripSudo(script) {
@@ -292,11 +359,50 @@ var OLD_SERVICES = ["telnet.socket", "rsh.socket", "rlogin.socket", "ftpd.servic
 var BUMBLEBEE_VERSION = "0.1.2"
 var BUMBLEBEE_INSTALL = "set -o pipefail\nv=0.1.2\ncase \"$(/usr/bin/uname -m)\" in x86_64) a=amd64; want=53b080cf3ddb692b0c4e5492ef4785b4c54daf1624fcd0fcba3958116a0be8d9 ;; aarch64) a=arm64; want=cb641a1023b12cd7b1411ebef5c7d426f7ecd81770a15a85873c5334a0e6b74d ;; *) echo 'Bumblebee has no build for this computer.'; exit 0 ;; esac\nt=$(/usr/bin/mktemp -d); trap '/usr/bin/rm -rf \"$t\"' EXIT\nf=\"bumblebee_${v}_linux_${a}.tar.gz\"\n/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 180 --max-filesize 67108864 -- \"https://github.com/perplexityai/bumblebee/releases/download/v${v}/$f\" | /usr/bin/head -c 67108865 > \"$t/$f\" || { echo 'Bumblebee could not be downloaded.'; exit 1; }\nif [ \"$(/usr/bin/stat -c %s \"$t/$f\")\" -gt 67108864 ]; then echo 'The Bumblebee download was too large, so it was not installed.'; exit 1; fi\nhave=$(/usr/bin/sha256sum \"$t/$f\" | /usr/bin/cut -d' ' -f1)\nif [ \"$have\" != \"$want\" ]; then echo \"Bumblebee $v did not match the checksum Vigil has for it, so it was not installed.\"; exit 1; fi\n/usr/bin/tar --no-same-owner --no-same-permissions -xzf \"$t/$f\" -C \"$t\" bumblebee\nif [ ! -f \"$t/bumblebee\" ] || [ -L \"$t/bumblebee\" ]; then echo 'Bumblebee was not a plain program file, so it was not installed.'; exit 1; fi\nif [ -f /usr/local/bin/bumblebee ] && [ ! -L /usr/local/bin/bumblebee ] && /usr/bin/cmp -s \"$t/bumblebee\" /usr/local/bin/bumblebee; then echo \"Bumblebee $v is already installed.\"; exit 0; fi\n/usr/bin/install -D -o root -g root -m 0755 \"$t/bumblebee\" /usr/local/bin/bumblebee\necho \"Bumblebee $v is installed.\"\n"
 
+// The helper's other root steps, so the run cards can show them exactly as the
+// helper runs them. Must equal SIGNATURES_SCRIPT and ROOT_STEP in bin/vigil, and
+// rootUpdatesScript must build what root_updates_argv does (a test checks).
+var SIGNATURES_SCRIPT = "if /usr/bin/systemctl is-active --quiet clamav-freshclam.service; then start=$(/usr/bin/date +%s); /usr/bin/systemctl kill --signal=SIGUSR1 --kill-whom=main clamav-freshclam.service || exit 4; for i in $(/usr/bin/seq 120); do if /usr/bin/journalctl -u clamav-freshclam.service --since \"@$start\" -o cat --no-pager 2>/dev/null | /usr/bin/grep -qE 'daily\\.c[lv]d (database is up-to-date|updated)'; then exit 0; fi; [ \"$(/usr/bin/stat -c %Y /var/lib/clamav/freshclam.dat 2>/dev/null || echo 0)\" -gt \"$start\" ] && exit 0; /usr/bin/sleep 1; done; exit 3; else /usr/bin/freshclam >/dev/null 2>&1; rc=$?; [ \"$rc\" -le 1 ] || exit 5; fi"
+var NO_PASSWORD_STEP = "/usr/bin/awk -F: '$2 == \"\" { print $1 }' /etc/shadow"
+
+function rootUpdatesScript(signatures, bumblebee) {
+  var parts = []
+  if (signatures) parts.push("( " + SIGNATURES_SCRIPT + " ) >/dev/null 2>&1; echo \"VIGIL-SIG $?\"")
+  if (bumblebee) parts.push("( set -e\n" + BUMBLEBEE_INSTALL + ") >/dev/null 2>&1; echo \"VIGIL-BEE $?\"")
+  return parts.join("\n")
+}
+
+// The user-level scripts that keep notes in ~/.local/state/omarchy-vigil walk
+// there one folder at a time, as the helper does: a link, or anything that is
+// not a folder of yours, is refused, never followed or repaired. With create,
+// a missing folder is made, mode 0700. The last folder is left in $s.
+function stateDirSh(extra, create) {
+  return "s=\"$HOME\"\n"
+    + "for p in .local state omarchy-vigil" + (extra ? " " + extra : "") + "; do\n"
+    + "  s=\"$s/$p\"\n"
+    + (create ? "  [ -e \"$s\" ] || [ -L \"$s\" ] || /usr/bin/mkdir -m 0700 -- \"$s\"\n" : "")
+    + "  if [ -L \"$s\" ] || { [ -e \"$s\" ] && { [ ! -d \"$s\" ] || [ ! -O \"$s\" ]; }; }; then\n"
+    + "    echo \"Refused: $s is a link or not a folder of yours, so nothing was changed.\"; exit 1\n"
+    + "  fi\n"
+    + "done\n"
+}
+
 // The scheduled-scan hand-over: one marker per change, so Undo restores
 // exactly those. Must match HANDOVER_DIR and CLAMUI_SETTINGS in bin/vigil.
-var HANDOVER_DIR_SH = "s=\"$HOME/.local/state/omarchy-vigil/handed-over\"; /usr/bin/mkdir -p -m 0700 -- \"$s\"\n"
+// A marker is a fresh file renamed into place, so a link planted at its name
+// is replaced, never written through; Undo counts only regular files.
+var MARK_SH = "mark() { t=$(/usr/bin/mktemp -p \"$s\" \".$1.XXXXXX\") && /usr/bin/mv -f -T -- \"$t\" \"$s/$1\"; }\n"
+var MARKED_SH = "marked() { [ -f \"$s/$1\" ] && [ ! -L \"$s/$1\" ]; }\n"
 var CLAMUI_SETTINGS_SH = "  case $k in native) f=\"$HOME/.config/clamui/settings.json\" ;;\n"
   + "    *) f=\"$HOME/.var/app/io.github.linx_systems.ClamUI/config/clamui/settings.json\" ;; esac\n"
+// Changes one setting in ClamUI's settings.json, keeping everything else: jq
+// writes a fresh file beside it, which takes the original's mode and is renamed
+// over it. Callers check first that the file is a regular file, not a link.
+var CLAMUI_EDIT_SH = "edit() {\n"
+  + "  t=$(/usr/bin/mktemp \"$1.vigil-XXXXXX\") || return 1\n"
+  + "  if /usr/bin/jq \"$2\" \"$1\" > \"$t\" && /usr/bin/chmod --reference=\"$1\" \"$t\" && /usr/bin/mv -f -T -- \"$t\" \"$1\"; then return 0; fi\n"
+  + "  /usr/bin/rm -f -- \"$t\"; return 1\n"
+  + "}\n"
 
 var TERMINAL_ACTIONS = {
   "firewall-on": {
@@ -446,7 +552,17 @@ var TERMINAL_ACTIONS = {
     what: ["Saved Wi-Fi networks without a password stop joining by themselves. They stay saved,",
            "and you can still join one by hand when you mean to. NetworkManager may ask for your password.",
            "Technical: nmcli connection modify <network> connection.autoconnect no, for open and WEP networks only"],
-    run: "s=\"$HOME/.local/state/omarchy-vigil\"; /usr/bin/mkdir -p -m 0700 -- \"$s\"; m=\"$s/wifi-autojoin-off\"; n=0\n"
+    // The list of changed networks is never written through a link: it is
+    // rebuilt in a fresh file (earlier entries kept) and renamed into place on
+    // the way out, also when a step fails, so Undo still knows every change.
+    run: stateDirSh("", true)
+      + "m=\"$s/wifi-autojoin-off\"\n"
+      + "if [ -L \"$m\" ] || { [ -e \"$m\" ] && [ ! -f \"$m\" ]; }; then "
+      + "echo 'Refused: the list of networks Vigil changed is a link or not a plain file, so nothing was changed.'; exit 1; fi\n"
+      + "w=$(/usr/bin/mktemp -p \"$s\" .wifi-autojoin-off.XXXXXX)\n"
+      + "trap 'if [ -s \"$w\" ]; then /usr/bin/mv -f -T -- \"$w\" \"$m\"; else /usr/bin/rm -f -- \"$w\"; fi' EXIT\n"
+      + "if [ -f \"$m\" ]; then /usr/bin/cat < \"$m\" > \"$w\"; fi\n"
+      + "n=0\n"
       + "while IFS= read -r line; do\n"
       + "  u=${line%%:*}; rest=${line#*:}; t=${rest%%:*}; a=${rest#*:}\n"
       + "  [[ $u =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || continue\n"
@@ -454,7 +570,7 @@ var TERMINAL_ACTIONS = {
       + "  k=$(/usr/bin/nmcli -g 802-11-wireless-security.key-mgmt connection show \"$u\" 2>/dev/null) || continue\n"
       + "  if [ -z \"$k\" ] || [ \"$k\" = none ]; then\n"
       + "    /usr/bin/nmcli connection modify \"$u\" connection.autoconnect no\n"
-      + "    echo \"$u\" >> \"$m\"; n=$((n+1))\n"
+      + "    echo \"$u\" >> \"$w\"; n=$((n+1))\n"
       + "  fi\n"
       + "done < <(/usr/bin/nmcli -t -f UUID,TYPE,AUTOCONNECT connection show)\n"
       + "echo \"Stopped auto-joining $n open network(s). They stay saved.\""
@@ -463,7 +579,8 @@ var TERMINAL_ACTIONS = {
     title: "Let those Wi-Fi networks join by themselves again",
     what: ["The open networks Vigil stopped from joining by themselves join by themselves again.",
            "Technical: nmcli connection modify <network> connection.autoconnect yes, for the networks Vigil recorded"],
-    run: "m=\"$HOME/.local/state/omarchy-vigil/wifi-autojoin-off\"\n"
+    run: stateDirSh("", false)
+      + "m=\"$s/wifi-autojoin-off\"\n"
       + "if [ ! -f \"$m\" ] || [ -L \"$m\" ]; then echo 'Nothing to undo.'; exit 0; fi\n"
       + "while IFS= read -r u; do\n"
       + "  [[ $u =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || continue\n"
@@ -625,72 +742,79 @@ var TERMINAL_ACTIONS = {
   },
   "hand-over-schedules": {
     title: "Let Vigil run the scheduled scans",
-    what: ["Turns off the other schedules that repeat what Vigil already runs every week:",
+    what: ["Turns off the other schedules that repeat what Vigil already runs:",
            "the scheduled scan in ClamUI (its own setting is switched off too, so ClamUI shows it as off),",
            "and the Bumblebee plugin, which Vigil replaces. Your scans still run, once, on the Vigil schedule.",
+           "ClamUI is left alone if any of its schedules also covers folders outside your home folder.",
            "Undo turns back on exactly what this turned off. No password needed.",
-           "Technical: systemctl --user disable --now clamui-scheduled-scan.timer, scheduled_scans_enabled false in ClamUI settings.json, omarchy plugin disable io.github.duketopceo.bumblebee"],
+           "Technical: systemctl --user disable --now clamui-scheduled-scan.timer, scheduled_scans_enabled false in ClamUI settings.json, omarchy-plugin-disable io.github.duketopceo.bumblebee"],
+    uses: ["omarchy-plugin-disable"],
     // The script checks again what the helper checked, so it never turns off a
     // ClamUI scan that covers more than your home folder, or a Bumblebee plugin
-    // when Vigil has no Bumblebee of its own.
-    run: HANDOVER_DIR_SH
+    // when Vigil has no Bumblebee of its own. Both ClamUI installs (Arch and
+    // Flatpak) share one timer, so a single schedule that reaches outside your
+    // home folder, or a settings file that cannot be checked, keeps all of
+    // ClamUI as it is.
+    run: stateDirSh("handed-over", true) + MARK_SH + CLAMUI_EDIT_SH
       + "home_only='.scheduled_scans_enabled == true and (.schedule_targets | type == \"array\" and length > 0 and "
       + "all(.[]; type == \"string\" and (. == $h or startswith($h + \"/\") or . == \"~\" or startswith(\"~/\")) "
       + "and (contains(\"/../\") | not) and (endswith(\"/..\") | not)))'\n"
-      + "ok=''\n"
+      + "ok=''; other=''\n"
       + "for k in native flatpak; do\n"
       + CLAMUI_SETTINGS_SH
-      + "  if [ -f \"$f\" ] && [ ! -L \"$f\" ] && /usr/bin/jq -e --arg h \"$HOME\" \"$home_only\" \"$f\" >/dev/null 2>&1; then\n"
-      + "    ok=\"$ok $k\"\n"
+      + "  if [ -L \"$f\" ] || { [ -e \"$f\" ] && [ ! -f \"$f\" ]; }; then other=1\n"
+      + "  elif [ -f \"$f\" ]; then\n"
+      + "    if /usr/bin/jq -e --arg h \"$HOME\" \"$home_only\" \"$f\" >/dev/null 2>&1; then ok=\"$ok $k\"\n"
+      + "    elif ! /usr/bin/jq -e '.scheduled_scans_enabled != true' \"$f\" >/dev/null 2>&1; then other=1; fi\n"
       + "  fi\n"
       + "done\n"
+      + "if [ -n \"$other\" ]; then ok=''; "
+      + "echo 'ClamUI: left as it is, since a schedule also covers folders outside your home folder or could not be checked.'; fi\n"
       + "w=\"$HOME/.config/systemd/user/timers.target.wants/clamui-scheduled-scan.timer\"\n"
       + "if [ -n \"$ok\" ] && { [ -e \"$w\" ] || [ -L \"$w\" ]; }; then\n"
       + "  /usr/bin/systemctl --user disable --now clamui-scheduled-scan.timer\n"
-      + "  : > \"$s/clamui-timer\"; echo 'ClamUI scheduled scan: off.'\n"
+      + "  mark clamui-timer; echo 'ClamUI scheduled scan: off.'\n"
       + "fi\n"
       + "for k in $ok; do\n"
       + CLAMUI_SETTINGS_SH
-      + "  t=$(/usr/bin/mktemp \"$f.vigil-XXXXXX\")\n"
-      + "  /usr/bin/jq '.scheduled_scans_enabled = false' \"$f\" > \"$t\"\n"
-      + "  /usr/bin/chmod --reference=\"$f\" \"$t\"; /usr/bin/mv -f -- \"$t\" \"$f\"\n"
-      + "  : > \"$s/clamui-setting-$k\"; echo 'ClamUI setting Scheduled scans: off.'\n"
+      + "  edit \"$f\" '.scheduled_scans_enabled = false'\n"
+      + "  mark \"clamui-setting-$k\"; echo 'ClamUI setting Scheduled scans: off.'\n"
       + "done\n"
       + "p=io.github.duketopceo.bumblebee; c=\"$HOME/.config/omarchy/shell.json\"\n"
-      + "if [ -x /usr/local/bin/bumblebee ] && [ ! -L /usr/local/bin/bumblebee ] "
+      + "if [ -n \"$omarchy_plugin_disable\" ] && [ -x /usr/local/bin/bumblebee ] && [ ! -L /usr/local/bin/bumblebee ] "
       + "&& [ -d \"$HOME/.config/omarchy/plugins/$p\" ] && [ -f \"$c\" ] && /usr/bin/jq -e --arg id \"$p\" "
       + "'((.disabledPlugins // []) | index($id) | not) and (tostring | contains(\"\\\"\" + $id + \"\\\"\"))' \"$c\" >/dev/null 2>&1; then\n"
-      + "  omarchy-plugin-disable \"$p\"\n"
-      + "  : > \"$s/bumblebee-plugin\"; echo 'Bumblebee plugin: off. Vigil runs Bumblebee in its daily check.'\n"
+      + "  \"$omarchy_plugin_disable\" \"$p\"\n"
+      + "  mark bumblebee-plugin; echo 'Bumblebee plugin: off. Vigil runs Bumblebee in its daily check.'\n"
       + "fi\n"
-      + "echo 'Done. Vigil runs these on its own weekly schedule now.'"
+      + "echo 'Done. Vigil runs these on its own schedule now.'"
   },
   "undo-schedules": {
     title: "Turn the other scheduled scans back on",
     what: ["Turns back on what Let Vigil run them turned off, and nothing else:",
            "the scheduled scan in ClamUI and its setting, and the Bumblebee plugin.",
-           "Technical: systemctl --user enable --now clamui-scheduled-scan.timer, scheduled_scans_enabled true, omarchy plugin enable io.github.duketopceo.bumblebee"],
-    run: HANDOVER_DIR_SH
-      + "if [ -e \"$s/clamui-timer\" ]; then\n"
+           "Technical: systemctl --user enable --now clamui-scheduled-scan.timer, scheduled_scans_enabled true, omarchy-plugin-enable io.github.duketopceo.bumblebee"],
+    uses: ["omarchy-plugin-enable"],
+    run: stateDirSh("handed-over", false) + MARKED_SH + CLAMUI_EDIT_SH
+      + "if marked clamui-timer; then\n"
       + "  if [ -f \"$HOME/.config/systemd/user/clamui-scheduled-scan.timer\" ]; then\n"
       + "    /usr/bin/systemctl --user enable --now clamui-scheduled-scan.timer; echo 'ClamUI scheduled scan: on.'\n"
       + "  fi\n"
       + "  /usr/bin/rm -f -- \"$s/clamui-timer\"\n"
       + "fi\n"
       + "for k in native flatpak; do\n"
-      + "  [ -e \"$s/clamui-setting-$k\" ] || continue\n"
+      + "  marked \"clamui-setting-$k\" || continue\n"
       + CLAMUI_SETTINGS_SH
       + "  if [ -f \"$f\" ] && [ ! -L \"$f\" ] && /usr/bin/jq -e 'type == \"object\"' \"$f\" >/dev/null 2>&1; then\n"
-      + "    t=$(/usr/bin/mktemp \"$f.vigil-XXXXXX\")\n"
-      + "    /usr/bin/jq '.scheduled_scans_enabled = true' \"$f\" > \"$t\"\n"
-      + "    /usr/bin/chmod --reference=\"$f\" \"$t\"; /usr/bin/mv -f -- \"$t\" \"$f\"\n"
-      + "    echo 'ClamUI setting Scheduled scans: on.'\n"
+      + "    edit \"$f\" '.scheduled_scans_enabled = true'; echo 'ClamUI setting Scheduled scans: on.'\n"
       + "  fi\n"
       + "  /usr/bin/rm -f -- \"$s/clamui-setting-$k\"\n"
       + "done\n"
-      + "if [ -e \"$s/bumblebee-plugin\" ]; then\n"
-      + "  omarchy-plugin-enable io.github.duketopceo.bumblebee; echo 'Bumblebee plugin: on.'\n"
-      + "  /usr/bin/rm -f -- \"$s/bumblebee-plugin\"\n"
+      + "if marked bumblebee-plugin; then\n"
+      + "  if [ -n \"$omarchy_plugin_enable\" ]; then\n"
+      + "    \"$omarchy_plugin_enable\" io.github.duketopceo.bumblebee; echo 'Bumblebee plugin: on.'\n"
+      + "    /usr/bin/rm -f -- \"$s/bumblebee-plugin\"\n"
+      + "  else echo 'The Omarchy plugin command was not found, so the Bumblebee plugin stays off for now.'; fi\n"
       + "fi\n"
       + "/usr/bin/rmdir -- \"$s\" 2>/dev/null || true"
   },
@@ -711,11 +835,13 @@ var TERMINAL_ACTIONS = {
     // can read in /proc/<pid>/cmdline (ssh-keygen -p waits there for the
     // passphrase): each key is opened by the shell on descriptor 3, grep reads
     // it from stdin, and ssh-keygen gets /proc/self/fd/3, which names no file.
+    // The name shown in the terminal goes through printf %q, so control
+    // characters in it are printed as $'\E...' escapes, never sent to the terminal.
     run: "found=0; for k in \"$HOME\"/.ssh/*; do "
       + "[ -f \"$k\" ] && [ ! -L \"$k\" ] || continue; "
       + "/usr/bin/grep -q 'PRIVATE KEY' < \"$k\" 2>/dev/null || continue; "
       + "if /usr/bin/ssh-keygen -y -P '' -f /proc/self/fd/3 3< \"$k\" >/dev/null 2>&1; then found=1; "
-      + "echo \"Passphrase for $k\"; /usr/bin/ssh-keygen -p -f /proc/self/fd/3 3< \"$k\"; fi; done; "
+      + "printf 'Passphrase for ~/.ssh/%q\\n' \"${k##*/}\"; /usr/bin/ssh-keygen -p -f /proc/self/fd/3 3< \"$k\"; fi; done; "
       + "[ \"$found\" = 1 ] || echo 'Every key already has a passphrase.'"
   },
   "screen-lock-default": {
@@ -1577,6 +1703,7 @@ if (typeof module !== "undefined") {
     shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
     relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine, countdown: countdown, scheduleLines: scheduleLines,
     BUMBLEBEE_INSTALL: BUMBLEBEE_INSTALL, BUMBLEBEE_VERSION: BUMBLEBEE_VERSION,
+    SIGNATURES_SCRIPT: SIGNATURES_SCRIPT, NO_PASSWORD_STEP: NO_PASSWORD_STEP, rootUpdatesScript: rootUpdatesScript,
     parseProgress: parseProgress, parseRunning: parseRunning, detectionItem: detectionItem, actionStage: actionStage, actionProgress: actionProgress,
     actionOutputText: actionOutputText, progressText: progressText, lastRunRows: lastRunRows, missingLabel: missingLabel,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,

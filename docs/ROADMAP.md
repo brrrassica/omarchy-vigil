@@ -111,7 +111,36 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.28.3 (this release): SSH key names stay out of process lists
+## 0.29.0 (this release): the design rules, checked against the code
+
+- [x] Every confirmation card shows the exact commands Run starts, below
+      the Run and Cancel buttons: each root step in full (the pkexec argv,
+      then the script as it is passed), the scripts that run as you, and
+      the command a terminal runs. The run cards show the helper's root
+      steps the same way: the ClamAV signatures and Bumblebee update, and
+      in Run all the password check. A test checks they are the very
+      scripts the helper starts.
+- [x] Let Vigil run them leaves ClamUI alone when any ClamUI schedule,
+      Arch or Flatpak (they share one timer), covers folders outside your
+      home folder or cannot be checked.
+- [x] The hand-over, Stop auto-joining and their Undos refuse a link, or
+      a folder that is not yours, anywhere from `~/.local` to their own
+      folder; markers and the list of changed networks are fresh files
+      renamed into place, so a link planted at their names is replaced,
+      never written through. Stop auto-joining keeps its list even when a
+      step fails, so Undo still knows every network it changed.
+- [x] Omarchy's plugin commands are named by absolute path, from the same
+      trusted lookup as Omarchy's other commands.
+- [x] Add a passphrase prints key names with `printf %q`, so a name
+      cannot send control codes to the terminal.
+- [x] Removing the plugin stops a scan or update that is running within
+      seconds: the helper looks for its own file every five seconds.
+- [x] The design rules, the README and the helper's own description say
+      what the code does: the daily and weekly network checks are listed,
+      every button that installs Bumblebee is named, and the FireWire
+      setting is in the list of files Vigil writes.
+
+## 0.28.3: SSH key names stay out of process lists
 
 - [x] Add a passphrase hands each SSH key to grep and ssh-keygen by
       descriptor (stdin, `/proc/self/fd/3`) instead of by path, so the

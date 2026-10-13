@@ -10,44 +10,67 @@ mechanical ones.
 These hold for every pillar, now and in later phases:
 
 1. **No root from the plugin.** Root steps are constant scripts from
-   `Model.js` (or two constant argvs in the helper), shown in full on a
-   confirmation in the panel, then run through `pkexec`, so Omarchy's own
-   polkit dialog asks for your password each time. Tools that ask questions
-   as they go are Omarchy's own commands in a visible terminal. No root
-   helper, sudoers rule, polkit policy, service or timer, ever.
+   `Model.js`, or the helper's two constant pkexec commands (the ClamAV
+   signatures and Bumblebee update, and the password check). Each is shown
+   in full on a confirmation in the panel, then run through `pkexec`, so
+   Omarchy's own polkit dialog asks for your password each time. Tools that
+   ask questions as they go run in a visible terminal: Omarchy's own
+   commands, and `ssh-keygen` when you add a passphrase to an SSH key. No
+   root helper, sudoers rule, polkit policy, service or timer, ever.
 2. **Everything Vigil reads is untrusted**, including its own helper's output,
    other tools' result files and file names (a file name is chosen by whoever
    created the file). It is size-capped, validated and shown as plain text,
-   never put into a command or a notification.
-3. **Virus scans run as you.** ClamAV scans (Vigil's quick scan and ClamUI)
+   and never put into a notification or a program's arguments. Two kinds of
+   value reach a program only after a strict check, and only as data: a
+   Wi-Fi network's ID, which must be a UUID before `nmcli` is given it, and
+   the files a virus scan is handed (new downloads, and detections it
+   double-checks), which go to ClamAV in a private list file
+   (`--file-list`), one per line, never with a line break in a name.
+3. **Virus scans run as you.** ClamAV scans (Vigil's scans and ClamUI)
    never run as root: malware scanners have had parser bugs, and running
-   them unprivileged limits what a malicious file can do. The one check
-   that needs root, accounts without a password, runs only in a Run all
-   you start, and keeps only account names.
+   them unprivileged limits what a malicious file can do. What needs root
+   runs only from a button you press: the password check (accounts without
+   a password) only in Run all, keeping only account names; Show listeners
+   (`ss -tulpn`, read-only) on its own button; and the ClamAV signature
+   update (freshclam, which downloads signatures and scans nothing) in Run
+   update check and Run all.
 4. **Hand off, don't absorb.** ClamUI keeps quarantine, Black Ops keeps
    telemetry blocking. Vigil reads their results and opens them; it does not
    run their code or write their files, with one exception you confirm:
    **Let Vigil run them** switches off a duplicate scheduled scan the way
    you would in that app (ClamUI's user timer and its one
-   `scheduled_scans_enabled` setting, `omarchy plugin disable` for the
-   Bumblebee plugin), leaves a marker per change, and its Undo reverses
-   only what the markers name. The script checks again itself: it touches
-   ClamUI only when every scheduled folder is inside your home folder, and
-   the plugin only when Vigil's own Bumblebee is installed. Perplexity's Bumblebee is a
+   `scheduled_scans_enabled` setting, Omarchy's `omarchy-plugin-disable`
+   for the Bumblebee plugin), leaves a marker per change, and its Undo
+   reverses only what the markers name. The script checks again itself: it
+   touches ClamUI only when every scheduled folder of every ClamUI install
+   is inside your home folder, and the plugin only when Vigil's own
+   Bumblebee is installed; it refuses a link anywhere on the way to its
+   markers, and never writes through one. Perplexity's Bumblebee is a
    standalone program Vigil installs from Perplexity's own release and runs
    as you, read-only.
 5. **Maintained sources, never executed.** Vigil keeps no threat lists. Data
-   comes from the tools of the people who maintain it (arch-audit,
-   osv-scanner, ClamAV's freshclam, Perplexity's Bumblebee catalogs) and one
-   fixed AUR lookup, once a week
-   (the `autoUpdate` setting) or when you press a run button. Nothing the background
-   update fetches is ever run; results are size-capped and validated like any
-   other input. The one program Vigil downloads, Bumblebee, is installed only
-   when you press Install, at a pinned version, after its checksum matches.
-6. **Nothing automatic.** Every change is confirmed; notifications carry
-   counts only; IPC methods take no parameters.
-7. **Removal leaves nothing running.** No units, cron jobs or daemons;
-   leftover files are listed in the README.
+   comes from the tools of the people who maintain it: every day,
+   `checkupdates` (your Arch and Omarchy mirrors) and `flatpak remote-ls`
+   (your Flatpak remotes) for waiting updates; every week, fwupd's refresh
+   from LVFS, arch-audit, osv-scanner, Perplexity's Bumblebee catalogs and
+   one fixed AUR lookup; ClamAV's own freshclam service keeps the virus
+   signatures. All of it on those schedules (the `autoUpdate` setting) or
+   when you press a run button. Nothing the background checks fetch is ever
+   run; results are size-capped and validated like any other input. The one
+   program Vigil downloads, Bumblebee, is installed only from a button you
+   press (Install, Update Bumblebee, or Run update check and Run all when
+   the installed one is older), never by a background check, at the
+   version pinned in Vigil's code, after its checksum matches.
+6. **Nothing automatic.** Every change to your system is confirmed. Marking
+   a finding as reviewed, or a virus detection as a false positive, changes
+   only Vigil's own notes and is undone with one click, so it does not ask.
+   Notifications carry counts only; IPC methods take no parameters.
+7. **Removal leaves nothing running.** Vigil has no units, cron jobs or
+   daemons of its own, and a scan or update under way stops within seconds
+   of the plugin folder being removed. Services Vigil switched on for you
+   (ClamAV's `clamav-freshclam`, the `ufw` firewall) belong to their
+   packages and keep protecting you; the README says how to turn them off,
+   and lists every file Vigil leaves behind.
 
 ## What runs where
 
@@ -55,7 +78,7 @@ These hold for every pillar, now and in later phases:
 |---|---|---|
 | `Panel.qml` + `Model.js` | you, inside `omarchy-shell` | Draws the lighthouse and panel, starts the helper, validates its output, launches confirmed actions. |
 | `bin/vigil` | you, as a child process | Reads local settings and returns one JSON report; performs the six helper actions. |
-| Script actions | root through `pkexec` (Omarchy's password dialog), or you | Constant scripts from `Model.js`, shown on a confirmation first; what they print is shown in the panel. |
+| Script actions | root through `pkexec` (Omarchy's password dialog), or you | Constant scripts from `Model.js`, shown in full on a confirmation first; what they print is shown in the panel. |
 | Terminal actions | you, in a visible terminal | Omarchy's own interactive commands, and choosing an SSH passphrase. |
 | App actions | you | Open ClamUI with a fixed argv: `/usr/bin/clamui`, or `/usr/bin/flatpak run io.github.linx_systems.ClamUI`. |
 
@@ -85,6 +108,11 @@ you with the recorded start time, so a reused PID is never hit, and the
 program by its process group. TERM first, KILL after 15 seconds if the
 lock is still held. A step running as root (a password prompt that was
 accepted) cannot be signalled; the panel then says so.
+
+Removing the plugin stops a run too, even when no panel is left to press
+Stop: while it holds the lock, the helper looks every five seconds whether
+its own file still exists (`plugin_removed`). Once it is gone, it stops the
+program it is running, process group and all, and starts no further step.
 
 ## Input is untrusted
 
@@ -120,6 +148,15 @@ accepted) cannot be signalled; the panel then says so.
   with its `sudo` prefixes removed; nothing from the report or a file
   reaches it. Steps that would wait for input are not allowed (a test
   checks), and `ufw` runs with `--force` so it never prompts.
+- The confirmation card shows, below Run and Cancel, the exact commands
+  Run starts: for each step the program with its options (for a root step
+  `/usr/bin/pkexec /usr/bin/env HOME=<your home> /usr/bin/bash -c`), then
+  the script exactly as it is passed, unabridged; for a terminal action, the
+  command the terminal runs. The run cards show the helper's root steps the
+  same way: the ClamAV signatures and Bumblebee update (each only when it
+  applies) and, in Run all, the password check. `Model.js` keeps copies of
+  those two helper scripts, and a test checks they are identical to what the
+  helper starts; another checks every card against the plan that runs.
 - Run update check (and Run all) updates ClamAV's signatures only when you press it (the
   background run never asks), with one constant root script through pkexec: if
   ClamAV's update service runs, it is woken with `systemctl kill
@@ -156,13 +193,21 @@ accepted) cannot be signalled; the panel then says so.
   the marketplace review again.
 - Terminal actions are constant strings in `Model.js`. The report only names
   an action id; an id that is not in the table does nothing. Omarchy tools
-  are addressed by absolute path, from one of the two trusted directories.
+  are addressed by absolute path, from one of the two trusted directories,
+  found by the helper (a root-owned file, not writable by anyone else). A
+  script that calls Omarchy's plugin commands gets them the same way, as
+  variables set at its top (`omarchy_plugin_disable=/usr/share/omarchy/bin/...`,
+  empty and skipped when not found). The one exception is the **Restart
+  shell** button, a constant `omarchy-restart-shell` found through the fixed
+  PATH `/usr/share/omarchy/bin:/usr/bin:/bin`, all root-owned.
   Each script prints what it will do and waits for Enter before running.
   `tests/model.test.mjs` runs `bash -n` on every script. Scripts never put
   private file names into a program's arguments, which every account can
   read in `/proc/<pid>/cmdline`: **Add a passphrase** opens each SSH key on
   descriptor 3, `grep` reads it from stdin, and `ssh-keygen` is given
-  `/proc/self/fd/3` (a test runs the script and checks the arguments).
+  `/proc/self/fd/3` (a test runs the script and checks the arguments). The
+  key's name it shows goes through `printf %q`, so control characters in a
+  file name are printed as `$'\E...'` escapes, never sent to the terminal.
 - **Learn more** opens a page with `xdg-open` (root-owned, in `/usr/bin`) as
   a two-element argv, no shell. The URL is a constant from the `DOCS` table
   in `Model.js`, chosen by id; any other id is dropped when the report is
@@ -318,9 +363,21 @@ say where they connect before they run.
   as absolute paths or `~/` that normalise under it), and `shell.json` (2 MiB
   cap) for whether the Bumblebee plugin is switched on. The hand-over and
   its Undo are constant user-level scripts in `Model.js`, run without a
-  password; ClamUI's settings are edited with `jq` into a temporary file in
-  the same folder, given the original's mode and moved over it, and only a
-  regular file (not a link) is edited.
+  password. Both ClamUI installs (Arch and Flatpak) share one timer, so the
+  hand-over leaves all of ClamUI as it is when any settings file has a
+  schedule that reaches outside your home folder, cannot be parsed, or is a
+  link. ClamUI's settings are edited with `jq` into a fresh temporary file
+  in the same folder, given the original's mode and renamed over it
+  (`mv -T`), and only a regular file (not a link) is edited; a failed edit
+  removes the temporary.
+- The user-level scripts that keep notes in Vigil's state folder (the
+  hand-over, Stop auto-joining and their Undos) walk from your home folder
+  one component at a time, `~/.local`, `state`, `omarchy-vigil` and below,
+  and refuse, without changing anything, a component that is a link or not
+  a folder of yours; the helper refuses the same with its `O_NOFOLLOW` walk.
+  Markers and the list of changed networks are written as fresh files
+  (`mktemp`) renamed into place, so a link planted at their names is
+  replaced, never written through, and Undo counts only regular files.
 - **False positive** on a virus detection is keyed to one detection (an id
   from the real path and signature name, recorded at scan time only for
   plain absolute paths inside your home folder) and to that file's SHA-256,
@@ -337,7 +394,10 @@ say where they connect before they run.
   left to the weekly scan, which reports them.
 - Open Wi-Fi: `nmcli` as you, read-only, for saved networks (UUIDs checked
   against a strict pattern). Stop auto-joining and its Undo are constant
-  user-level scripts; Undo only touches the UUIDs the first one recorded.
+  user-level scripts; Undo only touches the UUIDs Stop auto-joining
+  recorded, each checked against the same pattern. The list is rebuilt in a
+  fresh file and renamed into place on the way out, also when a step fails,
+  so every network already changed stays recorded.
 - For the Last run list Vigil reads ClamUI's log index
   (`clamui/logs/log_index.json` in its data folder, Flatpak or not) with
   the no-follow reader and a 2 MiB cap, and keeps only the newest
