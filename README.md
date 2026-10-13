@@ -1,4 +1,4 @@
-# Vigil
+# Vigil - Security Suite
 
 ![Vigil: A security suite right in your Omarchy Bar.](preview.png)
 
