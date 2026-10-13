@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta, timezone
 
-VERSION = "0.28.0"
+VERSION = "0.28.1"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -2379,20 +2379,38 @@ def refresh_downloads_scan(on_progress=None):
     return "Scanned %d new download%s." % (len(files), "" if len(files) == 1 else "s")
 
 
+CONFIRM_LIST = "confirm-scan.list"
+
+
 def confirm_detections(found):
-    """Scan each detected file again, by itself, with its exact path as the argument.
-    clamscan prints file names as they are, so a name with a line break in it can
-    print a fake "...: X FOUND" line for another file (a scare, say, about your SSH
-    key). Only what the second scan confirms is kept. Lines without a real path
-    (a name too odd to keep) stay as shown. If the second scan cannot run, all stay."""
+    """Scan each detected file again, by its exact path. clamscan prints file
+    names as they are, so a name with a line break in it can print a fake
+    "...: X FOUND" line for another file (a scare, say, about your SSH key).
+    Only what the second scan confirms is kept. Lines without a real path (a
+    name too odd to keep) stay as shown. If the second scan cannot run, all stay.
+    The paths go to clamscan in a private file (0600, in Vigil's 0700 state
+    folder), never as arguments: /proc/<pid>/cmdline is readable by every
+    account on the machine, and file names and locations are private."""
     files = [f for f in found if isinstance(f.get("file"), str)]
     rest = [f for f in found if not isinstance(f.get("file"), str)]
-    real = [f for f in files if _stat_key(f["file"]) is not None][:500]
+    # One path per line in the list, so a name with a line break cannot be listed
+    # (parse_clamscan never yields one; this keeps it that way).
+    real = [f for f in files if "\n" not in f["file"] and "\r" not in f["file"]
+            and _stat_key(f["file"]) is not None][:500]
     if not real:
         return rest
-    argv = ["/usr/bin/nice", "-n", "19", "/usr/bin/clamscan", "--no-summary", "--stdout",
-            "--follow-file-symlinks=0", "--"] + [f["file"] for f in real]
-    rc, out = run(argv, timeout=1800, limit=4 * 1024 * 1024, on_line=lambda line: line.endswith(" FOUND"))
+    dirfd = _state_dir()
+    try:
+        write_atomic(dirfd, CONFIRM_LIST,
+                     ("\n".join(f["file"] for f in real) + "\n").encode("utf-8", "surrogateescape"))
+    finally:
+        os.close(dirfd)
+    try:
+        rc, out = run(["/usr/bin/nice", "-n", "19", "/usr/bin/clamscan", "--no-summary", "--stdout",
+                       "--follow-file-symlinks=0", "--file-list=" + home_path(*STATE_DIR, CONFIRM_LIST)],
+                      timeout=1800, limit=4 * 1024 * 1024, on_line=lambda line: line.endswith(" FOUND"))
+    finally:
+        _remove_state_file(CONFIRM_LIST)
     if rc not in (0, 1):
         return real + rest
     lines = set(out.splitlines())
@@ -4365,6 +4383,21 @@ def dismissible(c):
 
 def _state_dir():
     return _open_home_dir(list(STATE_DIR), create=True)
+
+
+def _remove_state_file(name):
+    """Delete one of Vigil's own files from the state folder, relative to the
+    held folder; a link of that name is removed, never followed."""
+    try:
+        dirfd = _state_dir()
+    except (OSError, Refused):
+        return
+    try:
+        os.unlink(name, dir_fd=dirfd)
+    except OSError:
+        pass
+    finally:
+        os.close(dirfd)
 
 
 def _read_state(dirfd):

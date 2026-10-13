@@ -279,8 +279,11 @@ by itself, and only once the relevant tool is installed:
   notification. clamscan prints names as they are, so a name with a line
   break could print a fake `...: X FOUND` line for another file (your SSH
   key, say). Every detection is therefore confirmed by a second scan of
-  that file alone, with its exact path as the argument; only confirmed
-  detections are kept. File names with a line break or other control
+  exactly those files; only confirmed detections are kept. File paths never
+  go into a program's arguments, since `/proc/<pid>/cmdline` is readable by
+  every account on the machine: both the Downloads scan and the confirming
+  scan hand clamscan a `--file-list` in Vigil's state folder (0600 inside
+  0700), and the confirming list is deleted when that scan ends. File names with a line break or other control
   character are reported as a warning in their own right.
 - Results are parsed with byte caps and strict patterns, and only names,
   severities, IDs and counts are kept. A failed refresh keeps the last good

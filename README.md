@@ -28,7 +28,7 @@ needs root then asks for your password, and the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.28.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.28.1.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -432,6 +432,7 @@ servers), Flatpak and firmware updates, and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/pending-updates.json` | the helper, mode 0600 | each daily check: how many updates are waiting, and the Omarchy version if one is |
 | `~/.local/state/omarchy-vigil/firmware.json` | the helper, mode 0600 | each weekly check: device names and firmware versions with an update waiting |
 | `~/.local/state/omarchy-vigil/downloads-scan.json`, `downloads-scan.list` | the helper, mode 0600 | each daily check: the new files in Downloads it scanned, and any it found infected |
+| `~/.local/state/omarchy-vigil/confirm-scan.list` | the helper, mode 0600 | only while a scan double-checks what it found: the paths of those files, deleted when it is done |
 | `~/.local/state/omarchy-vigil/flatpak.json` | the helper, mode 0600 | each daily check: Flatpak apps with updates waiting |
 | `~/.local/state/omarchy-vigil/wifi-autojoin-off` | the Stop auto-joining action | the networks it changed, so Undo puts back exactly those |
 | `~/.local/state/omarchy-vigil/checkup-db/` | `checkupdates`, as you | each daily check: its private copy of the package databases (a few MB) |
