@@ -718,7 +718,8 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(440))
+    // 440 for the content plus the 22-unit scroll bar lane.
+    contentWidth: panel.fittedContentWidth(Style.space(462))
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(640))
 
     PanelKeyCatcher {

@@ -10,7 +10,7 @@
 // Must match manifest.json and VERSION in bin/vigil (a test checks). The
 // helper runs from disk every time, but this file stays loaded until the
 // shell restarts, so after an update the two can differ for a while.
-var VERSION = "0.26.0"
+var VERSION = "0.26.1"
 var MAX_REPORT_CHARS = 512 * 1024
 var MAX_CHECKS = 160
 var MAX_STR = 400
@@ -1036,7 +1036,7 @@ var SCAN_SOURCES = ["virus-scan", "downloads-scan", "bumblebee", "firmware", "pa
 function lastRunRows(report, now) {
   if (!report) return []
   var rows = [{ label: "Scans", value: "", heading: true, problem: false },
-              { label: "Settings checks (every tab)", heading: false, problem: false,
+              { label: "Settings checks (daily check)", heading: false, problem: false,
                 value: "ran " + relativeDay(report.generatedAt, now) + " at " + report.generatedAt.substring(11, 16) }]
   var add = function(scan) {
     for (var i = 0; i < report.sources.length; i++) {
@@ -1393,11 +1393,11 @@ function withSettings(report, autoUpdate) {
 }
 
 // The schedule each tab row belongs to: 1 daily check, 2 weekly check,
-// 3 update check, 4 automatic (ClamAV signatures). Every other row is a
-// settings check (0), which runs with every check.
+// 3 update check. Every other row is a settings check (0), which runs
+// with every check, the daily one included.
 var CHECK_SCHEDULE = { "virus-scan": 1, "updates": 1, "flatpak-apps": 1, "bumblebee": 1, "firmware": 2,
                        "scanner-arch-audit": 3, "malicious-packages": 3, "aur-status": 3,
-                       "scanner-clamav": 4 }
+                       "scanner-clamav": 3 }
 
 function checksFor(report, category) {
   if (!report) return []

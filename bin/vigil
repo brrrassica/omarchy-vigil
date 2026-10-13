@@ -46,7 +46,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta, timezone
 
-VERSION = "0.26.0"
+VERSION = "0.26.1"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -1930,7 +1930,7 @@ def source_status():
         add(name, label, at, tm if at else "", state, tried if state == "failed" else "")
 
     # Each group in the order of the schedule lines: daily check, weekly check,
-    # update check, then what runs on its own schedule.
+    # update check.
     if feed_available("downloads-scan"):
         feed("downloads-scan", ITEM_NAME["downloads-scan"] + DAILY)
     if feed_available("bumblebee"):
@@ -1947,9 +1947,9 @@ def source_status():
     d, _ = no_password_scan()
     _, t = _mtime_stamp([home_path(*STATE_DIR, NO_PASSWORD_NAME)]) if d else ("", "")
     add("password-check", ITEM_NAME["password-check"] + " (Full scan only)", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
-    for name in ("pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee-list", "bumblebee-release"):
+    for name in ("pending-updates", "flatpak"):
         if feed_available(name):
-            feed(name, ITEM_NAME[name] + (DAILY if name in DAILY_FEEDS else UPDATE))
+            feed(name, ITEM_NAME[name] + DAILY)
     if is_trusted_executable(sys_path("/usr/bin/clamscan")):
         # Whoever updated them: ClamAV's own service (freshclam.dat changes on
         # every check, even when nothing new came out), Vigil, or ClamUI.
@@ -1963,7 +1963,10 @@ def source_status():
         ext = clamui_last("update")
         by = "ClamUI" if ext[0] and _newer(ext, (d, t)) == ext and ext != (d, t) else ""
         d, t = _newer(ext, (d, t))
-        add("signatures", ITEM_NAME["signatures"] + " (automatic)", d, t, fresh(d, FEED_DAYS), by=by)
+        add("signatures", ITEM_NAME["signatures"] + UPDATE, d, t, fresh(d, FEED_DAYS), by=by)
+    for name in ("arch-audit", "osv", "aur", "bumblebee-list", "bumblebee-release"):
+        if feed_available(name):
+            feed(name, ITEM_NAME[name] + UPDATE)
     return out
 
 

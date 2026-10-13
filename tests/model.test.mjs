@@ -491,7 +491,7 @@ test("last run: scans first, then updates, with times", () => {
     { id: "password-check", label: "Password check (Full scan button only)", date: "", time: "", state: "never", tried: "" }] }))
   const rows = M.lastRunRows(r, new Date(2026, 9, 12, 10, 5))
   assert.deepEqual(rows.map(x => [x.label, x.value]), [
-    ["Scans", ""], ["Settings checks (every tab)", "ran today at 10:02"],
+    ["Scans", ""], ["Settings checks (daily check)", "ran today at 10:02"],
     ["Virus scan (home folder)", "ran yesterday at 22:10"], ["Password check (Full scan button only)", "not run yet"],
     ["Updates", ""], ["ClamAV virus signatures", "updated today at 08:00"]])
 })
@@ -858,10 +858,10 @@ esac
 test("every Last run row names a schedule line, and the helper lists them in schedule order", () => {
   const helper = readFileSync(path.join(here, "..", "bin", "vigil"), "utf8")
   const body = helper.slice(helper.indexOf("def source_status"), helper.indexOf("def feeds_updated"))
-  const order = [...body.matchAll(/\b(DAILY|WEEKLY|UPDATE|automatic|Full scan only)\b/g)].map(m => m[1])
-  // Scans, then updates, each in schedule order (password check and ClamAV
-  // signatures last, as they follow no schedule line).
-  assert.equal(order.join(" "), "DAILY DAILY WEEKLY WEEKLY Full scan only DAILY UPDATE automatic")
+  const order = [...body.matchAll(/\b(DAILY|WEEKLY|UPDATE|Full scan only)\b/g)].map(m => m[1])
+  // Scans, then updates, each in schedule order (the password check, which
+  // follows no schedule line, ends the scans).
+  assert.equal(order.join(" "), "DAILY DAILY WEEKLY WEEKLY Full scan only DAILY UPDATE UPDATE")
   for (const line of M.scheduleLines({ generatedAt: "2026-10-12T09:58:00+0200", lastRun: { at: "", ok: true },
       nextUpdate: "2026-10-19 09:52", nextFullScan: "2026-10-12 21:15", nextDaily: "2026-10-13 07:40" },
       true, new Date(2026, 9, 12, 10, 0), 30)) {
@@ -875,5 +875,5 @@ test("tab rows: settings checks, then daily, weekly and update check rows, worst
   const r = { checks: [c("scanner-clamav", "pass"), c("firmware", "warn"), c("virus-scan", "pass"),
                        c("aur-status", "fail"), c("screen-lock", "pass"), c("firewall", "fail")] }
   assert.deepEqual(M.checksFor(r, "detect").map(x => x.id),
-    ["firewall", "screen-lock", "virus-scan", "firmware", "aur-status", "scanner-clamav"])
+    ["firewall", "screen-lock", "virus-scan", "firmware", "aur-status", "scanner-clamav"])  // update check: worst first
 })

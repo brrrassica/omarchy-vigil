@@ -1463,12 +1463,12 @@ def test_last_run_list_scans_then_updates_with_times(v):
     assert [s["id"] for s in v.source_status()] == ["password-check"]       # always offered
     v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan", v.ROOT + "/usr/bin/arch-audit"}
     got = [(s["id"], s["label"], s["state"]) for s in v.source_status()]
-    # In schedule order: daily check, weekly check, update check, automatic.
+    # In schedule order: daily check, weekly check, update check.
     assert got == [("downloads-scan", "ClamAV scan of ~/Downloads (daily check)", "never"),
                    ("virus-scan", "ClamAV scan of ~ (weekly check)", "never"),
                    ("password-check", "Password check (Full scan only)", "never"),
-                   ("arch-audit", "Arch security list (update check)", "never"),
-                   ("signatures", "ClamAV signatures (automatic)", "never")]
+                   ("signatures", "ClamAV signatures (update check)", "never"),
+                   ("arch-audit", "Arch security list (update check)", "never")]
     assert all(len(s["label"]) <= 40 for s in v.source_status())          # the panel's limit
     v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
     v.run_fix("arch-audit-refresh")
