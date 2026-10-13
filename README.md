@@ -1,6 +1,6 @@
 # Vigil
 
-<p align="center"><img src="docs/lighthouse.svg" alt="Vigil lighthouse" width="140"></p>
+![Vigil: A security suite right in your Omarchy Bar.](preview.png)
 
 A security suite for [Omarchy](https://omarchy.org): one lighthouse in the bar,
 one panel, five pillars.
