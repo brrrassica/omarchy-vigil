@@ -336,8 +336,11 @@ test("the Last run list is validated and worded plainly", () => {
   assert.equal(M.sourceLine({ state: "ok", date: "2026-10-11", note: "" }, now), "ran yesterday")
   assert.equal(M.sourceLine({ state: "failed", date: "2026-10-03", tried: "2026-10-12" }, now), "last run failed; last good Oct 3")
   assert.equal(M.sourceLine({ state: "never", date: "" }, now), "not run yet")
-  assert.equal(M.sourceLine({ state: "ok", date: "2026-10-12", time: "09:40", note: "with signatures from Oct 9" }, now),
-    "ran today at 09:40, with signatures from Oct 9")
+  // The list it used goes on a line of its own, so the time never wraps.
+  const used = { state: "ok", date: "2026-10-12", time: "09:40", note: "with signatures from Oct 9" }
+  assert.equal(M.sourceLine(used, now), "ran today at 09:40")
+  assert.equal(M.sourceNote(used), "with signatures from Oct 9")
+  assert.equal(M.sourceNote(Object.assign({}, used, { state: "failed" })), "")
 })
 
 // ---------------------------------------------------------------------------
@@ -522,13 +525,15 @@ test("last run: each run's scans under its name, with times", () => {
       note: "with signatures from Oct 11", old: false },
     { id: "password-check", label: "Password scan", run: "all", date: "", time: "", state: "never", tried: "" }] }))
   const rows = M.lastRunRows(r, new Date(2026, 9, 12, 10, 5))
-  assert.deepEqual(rows.map(x => [x.label, x.value]), [
-    ["Your settings and files", "read today at 10:02"],
-    ["Daily check", ""], ["Bumblebee scan", "ran today at 08:00, with the list from Oct 9"],
-    ["Weekly check", ""], ["Virus scan of ~", "ran yesterday at 22:10, with signatures from Oct 11"],
-    ["Run all only", ""], ["Password scan", "not run yet"]])
-  // Every scan says which list it used; only one over two days old is red.
-  assert.deepEqual(rows.filter(x => x.problem).map(x => x.label), ["Bumblebee scan"])
+  assert.deepEqual(rows.map(x => [x.label, x.value, x.note]), [
+    ["Your settings and files", "read today at 10:02", ""],
+    ["Daily check", "", ""], ["Bumblebee scan", "ran today at 08:00", "with the list from Oct 9"],
+    ["Weekly check", "", ""], ["Virus scan of ~", "ran yesterday at 22:10", "with signatures from Oct 11"],
+    ["Run all only", "", ""], ["Password scan", "not run yet", ""]])
+  // Every scan says which list it used; only a list over two days old is red,
+  // and only its note, not the time.
+  assert.deepEqual(rows.filter(x => x.noteOld).map(x => x.label), ["Bumblebee scan"])
+  assert.deepEqual(rows.filter(x => x.problem).map(x => x.label), [])
   assert.equal(parse(report({ sources: [{ id: "bumblebee", label: "x", run: "daily", date: "", state: "never", tried: "",
     old: "yes" }] })), null)
 })

@@ -1612,6 +1612,14 @@ def test_old_services_list_matches_the_switch_off_script(v):
     assert tuple(re.findall(r'"([a-z.-]+)"', m.group(1))) == v.OLD_SERVICES
 
 
+def test_result_messages_are_never_cut_short(v):
+    # The panel shows a result message whole: both sides allow the same length,
+    # and a long check result fits in it.
+    m = re.search(r"var MAX_MESSAGE = (\d+)", (REPO / "Model.js").read_text())
+    assert int(m.group(1)) == v.MESSAGE_MAX
+    assert "…" not in v.clean("x" * 1500, v.MESSAGE_MAX)
+
+
 def test_restart_needed(v, monkeypatch):
     monkeypatch.setattr(v, "_running_kernel", lambda: "6.18.44-arch1-1")
     assert v.check_restart()["status"] == "na"

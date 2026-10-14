@@ -15,6 +15,7 @@ var MAX_REPORT_CHARS = 512 * 1024
 var MAX_CHECKS = 160
 var MAX_STR = 400
 var MAX_DETAIL = 4000
+var MAX_MESSAGE = 2000   // must equal MESSAGE_MAX in bin/vigil (a test checks)
 
 var CATEGORIES = ["harden", "detect", "supply", "privacy", "care"]
 var STATUSES = ["fail", "warn", "unknown", "info", "pass", "na"]
@@ -1196,27 +1197,36 @@ function sourceLine(src, now) {
   if (src.state === "failed")
     return "last run failed" + (src.date !== "" ? "; last good " + relativeDay(src.date, now) : "")
   var when = relativeDay(src.date, now) + (src.time ? " at " + src.time : "") + (src.by ? " (by " + src.by + ")" : "")
-    + (src.note ? ", " + src.note : "")
   return src.state === "stale" ? "out of date (" + when + ")" : "ran " + when
+}
+
+// The list a scan used ("with signatures from Oct 9"), shown on its own line
+// under when it ran; "" when it has none or did not run.
+function sourceNote(src) {
+  return src.state === "never" || src.state === "failed" ? "" : src.note
 }
 
 var RUN_HEADINGS = { daily: "Daily check", weekly: "Weekly check", all: "Run all only" }
 
 // The Overview's LAST RUN list: when your settings and files were last read,
 // then each run's scans and lookups under its name, in the order it runs them.
-// Each scan says which list it used; it is red (the theme's red) only when
-// that list was over two days old when it ran.
+// Each scan says which list it used, on a second line (note); the note is
+// red (the theme's red) only when that list was over two days old when it
+// ran (noteOld). The time is red when the run failed or is out of date.
 function lastRunRows(report, now) {
   if (!report) return []
-  var rows = [{ label: "Your settings and files", heading: false, problem: false,
+  var rows = [{ label: "Your settings and files", heading: false, problem: false, note: "", noteOld: false,
                 value: "read " + relativeDay(report.generatedAt, now) + " at " + report.generatedAt.substring(11, 16) }]
   for (var r = 0; r < SOURCE_RUNS.length; r++) {
     var group = report.sources.filter(function(src) { return src.run === SOURCE_RUNS[r] })
     if (group.length === 0) continue
-    rows.push({ label: RUN_HEADINGS[SOURCE_RUNS[r]], value: "", heading: true, problem: false })
-    for (var i = 0; i < group.length; i++)
+    rows.push({ label: RUN_HEADINGS[SOURCE_RUNS[r]], value: "", heading: true, problem: false, note: "", noteOld: false })
+    for (var i = 0; i < group.length; i++) {
+      var note = sourceNote(group[i])
       rows.push({ label: group[i].label, value: sourceLine(group[i], now), heading: false,
-                  problem: group[i].state === "failed" || group[i].state === "stale" || group[i].old })
+                  problem: group[i].state === "failed" || group[i].state === "stale",
+                  note: note, noteOld: note !== "" && group[i].old })
+    }
   }
   return rows
 }
@@ -1596,11 +1606,12 @@ function parseReport(text) {
 }
 
 function parseFixResult(text) {
-  if (typeof text !== "string" || text.length === 0 || text.length > 4096) return null
+  if (typeof text !== "string" || text.length === 0 || text.length > 16384) return null
   var d
   try { d = JSON.parse(text) } catch (e) { return null }
-  if (!d || typeof d !== "object" || typeof d.ok !== "boolean" || !isString(d.message, 400)) return null
-  return { ok: d.ok, message: plain(d.message, 240), stopped: d.stopped === true }
+  if (!d || typeof d !== "object" || typeof d.ok !== "boolean" || !isString(d.message, MAX_MESSAGE)) return null
+  // Shown whole: the helper caps a message at MESSAGE_MAX, the same length.
+  return { ok: d.ok, message: plain(d.message, MAX_MESSAGE), stopped: d.stopped === true }
 }
 
 // ---------------------------------------------------------------------------
@@ -1858,7 +1869,7 @@ if (typeof module !== "undefined") {
     CARE_SEPARATE_HEADING: CARE_SEPARATE_HEADING, CARE_SEPARATE_NOTE: CARE_SEPARATE_NOTE, CARE_TAB_NOTE: CARE_TAB_NOTE, CARE_RUN_LINE: CARE_RUN_LINE, tabIntro: tabIntro, cleanAllPlan: cleanAllPlan,
     howTo: howTo, docsUrl: docsUrl, docsCommand: docsCommand, DOCS: DOCS, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
     shortDate: shortDate, VIGIL_MARK: VIGIL_MARK,
-    relativeDay: relativeDay, sourceLine: sourceLine, countdown: countdown, 
+    relativeDay: relativeDay, sourceLine: sourceLine, sourceNote: sourceNote, MAX_MESSAGE: MAX_MESSAGE, countdown: countdown, 
     BUMBLEBEE_INSTALL: BUMBLEBEE_INSTALL, BUMBLEBEE_VERSION: BUMBLEBEE_VERSION,
     SIGNATURES_SCRIPT: SIGNATURES_SCRIPT, NO_PASSWORD_STEP: NO_PASSWORD_STEP,
     SOURCE_IDS: SOURCE_IDS, DAILY_IDS: DAILY_IDS, WEEKLY_IDS: WEEKLY_IDS, cardShowsSignatures: cardShowsSignatures,

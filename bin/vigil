@@ -101,6 +101,7 @@ PACMAN_LOG_TAIL = 2 * 1024 * 1024
 CMD_MAX = 256 * 1024
 CMD_TIMEOUT = 8
 STR_MAX = 240
+MESSAGE_MAX = 2000                # a result message: shown whole, never cut short
 DETAIL_MAX = 1200
 LIST_MAX = 40
 WALK_MAX_ENTRIES = 200000
@@ -3356,7 +3357,7 @@ def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False
         else " Nothing on this machine needs attention."
     if stopped:
         msg = "Stopped." + (" Done before that: %s." % _and(parts) if parts else "")
-    return {"ok": not failed or stopped, "stopped": stopped, "action": "", "message": clean(msg.strip())}
+    return {"ok": not failed or stopped, "stopped": stopped, "action": "", "message": clean(msg.strip(), MESSAGE_MAX)}
 
 
 CLAMUI_APP_ID = "io.github.linx_systems.ClamUI"
@@ -4837,7 +4838,7 @@ def trash_leftovers(ids):
     if moved:
         msg += " To put %s back, open the trash in your file manager and choose Restore." % (
             "it" if len(moved) == 1 else "one")
-    return {"ok": bool(moved) or not problems, "action": "", "message": clean(msg)}
+    return {"ok": bool(moved) or not problems, "action": "", "message": clean(msg, MESSAGE_MAX)}
 
 
 _UNITS = {"B": 1, "KiB": 1024, "MiB": 1024 ** 2, "GiB": 1024 ** 3, "TiB": 1024 ** 4}
@@ -5749,7 +5750,7 @@ def run_fix(action):
         return {"ok": False, "action": "", "message": "Unknown action."}
     try:
         msg = fn()
-        return {"ok": True, "action": action, "message": clean(msg)}
+        return {"ok": True, "action": action, "message": clean(msg, MESSAGE_MAX)}
     except FileNotFoundError:
         return {"ok": False, "action": action, "message": "Nothing to change."}
     except Refused as e:

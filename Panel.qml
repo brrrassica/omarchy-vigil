@@ -22,7 +22,7 @@ Panel {
   manageIpc: false
 
   readonly property int maxReportChars: 512 * 1024
-  readonly property int maxFixChars: 4096
+  readonly property int maxFixChars: 16384
   readonly property string helperPath: localPath(Qt.resolvedUrl("bin/vigil"))
   readonly property var helperEnv: ({
     "HOME": Quickshell.env("HOME") || "/",
@@ -124,7 +124,7 @@ Panel {
   }
 
   function setStatus(text, isError) {
-    statusMessage = Model.plain(text, 240)
+    statusMessage = Model.plain(text, Model.MAX_MESSAGE)
     statusIsError = isError === true
   }
 
@@ -1272,6 +1272,7 @@ Panel {
                 required property var modelData
                 width: column.width
                 implicitHeight: Math.max(runLabel.implicitHeight, runValue.implicitHeight)
+                // The time, then the list the scan used on a line of its own.
                 Text {
                   id: runLabel
                   textFormat: Text.PlainText
@@ -1284,18 +1285,33 @@ Panel {
                   font.bold: modelData.heading === true
                   wrapMode: Text.WordWrap
                 }
-                Text {
+                Column {
                   id: runValue
-                  textFormat: Text.PlainText
                   anchors.right: parent.right
                   width: parent.width * 0.5
-                  horizontalAlignment: Text.AlignRight
-                  text: modelData.value
-                  color: modelData.problem ? root.urgent : root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.bold: modelData.problem === true
-                  wrapMode: Text.WordWrap
+                  Text {
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    horizontalAlignment: Text.AlignRight
+                    text: modelData.value
+                    color: modelData.problem ? root.urgent : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: modelData.problem === true
+                    wrapMode: Text.WordWrap
+                  }
+                  Text {
+                    textFormat: Text.PlainText
+                    visible: modelData.note !== ""
+                    width: parent.width
+                    horizontalAlignment: Text.AlignRight
+                    text: modelData.note
+                    color: modelData.noteOld ? root.urgent : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: modelData.noteOld === true
+                    wrapMode: Text.WordWrap
+                  }
                 }
               }
             }
