@@ -685,6 +685,11 @@ omarchy plugin validate .
 The QML cannot be checked outside Omarchy: it imports `qs.Commons` and
 `qs.Ui`, which come from the running shell.
 
+The same tests run on every push to `master` and every pull request, in a
+locked-down GitHub Actions job (no token permissions, no third-party
+actions, dependencies pinned by hash). Found a security problem? See
+[SECURITY.md](SECURITY.md) and report it privately.
+
 ## Credits
 
 Vigil is new code, but it stands on the work of the projects it brings

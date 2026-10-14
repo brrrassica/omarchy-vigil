@@ -583,6 +583,21 @@ one ID (`keasbeexd.vigil`) everywhere, versions in the manifest and
 helper kept equal, MIT licence, and a Removing section in the README that
 names every file Vigil can leave behind.
 
+The repository itself is guarded too, since Omarchy installs and updates
+plugins straight from the default branch:
+
+- Every push to `master` and every pull request runs the tests
+  (`.github/workflows/tests.yml`) with a token that has no permissions, no
+  third-party actions (the code is fetched with plain git), only the
+  `pull_request` event (never `pull_request_target`), and only pytest and
+  its dependencies installed, pinned by SHA-256.
+- `SECURITY.md` asks for vulnerabilities to be reported privately, through
+  GitHub's private vulnerability reporting. `CODEOWNERS` names the owner
+  for every file.
+- The repository's settings (branch protection on `master`, secret scanning
+  and push protection, private vulnerability reporting, Actions limits) are
+  the owner's to keep; they are not in the code.
+
 ## Known limits
 
 - Checks read configuration, not live kernel or firewall state that only
