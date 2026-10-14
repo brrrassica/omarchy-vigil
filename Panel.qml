@@ -7,7 +7,8 @@ import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
-// Vigil: a lighthouse in the bar and a panel with five tabs.
+// Vigil: a lighthouse in the bar and a panel with six tabs: the Overview and
+// the five pillars.
 //
 // All the checking is done by bin/vigil, run as an argv array with a cleared
 // environment. Its stdout is read in raw chunks with a hard size limit and
@@ -193,10 +194,11 @@ Panel {
   // background run) the helper runs only what is due and retries failures the
   // next day. The buttons: "daily" (Daily check), "weekly" (Weekly check),
   // "full" (Run all); "scan" is the virus scan of the home folder alone (its
-  // row's Scan now button). Every scan gets its list right before it runs.
+  // row's Scan now button). Each scan gets its list right before it runs;
+  // ClamAV's own service keeps the virus signatures current.
   readonly property var feedFlags: ({ daily: "--daily", weekly: "--weekly", full: "--full", scan: "--scan" })
-  readonly property var feedTitles: ({ daily: "Run daily check", weekly: "Run weekly check", full: "Run all",
-                                       scan: "Virus scan" })
+  readonly property var feedTitles: ({ daily: "Daily check", weekly: "Weekly check", full: "Run all",
+                                       scan: "Virus scan of ~" })
   // withSignatures (Run all only): the card you confirmed showed the virus
   // signatures update (they were over two days old), so the helper may run
   // it. Without it, the helper never asks for that password.
@@ -326,7 +328,7 @@ Panel {
     }
     if (kind === "clean-all") {
       var plan = Model.cleanAllPlan(report)
-      if (plan.system) startAction("clean-system")
+      if (plan.system !== "") startAction(plan.system)
       if (plan.user) runHelper(["fix", "clean-user"])
       return
     }
@@ -400,7 +402,7 @@ Panel {
     if (fixProc.running || args.length < 2) return
     if (["fix", "dismiss", "undismiss", "ignore", "unignore", "keep", "unkeep", "trash"].indexOf(args[0]) === -1) return
     var hashed = ["ignore", "unignore", "keep", "unkeep", "trash"].indexOf(args[0]) !== -1
-    if (args.length !== 2 && (!hashed || args.length > 151)) return
+    if (args.length !== 2 && (!hashed || args.length > Model.MAX_PICK + 1)) return
     for (var i = 1; i < args.length; i++) {
       if (!/^[a-z0-9-]{1,40}$/.test(args[i])) return
       if (hashed && !/^[0-9a-f]{16}$/.test(args[i])) return
@@ -457,7 +459,7 @@ Panel {
 
   function requestRemoveIds(check, ids) {
     var spec = Model.pickSpec(check)
-    if (!report || busy || !spec || ids.length === 0 || ids.length > 150) return
+    if (!report || busy || !spec || ids.length === 0 || ids.length > Model.MAX_PICK) return
     if (spec.card !== "trash" && spec.card !== "ignore"
         && Model.confirmation(spec.card, ids.join(","), report, homeDir) === null) {
       setStatus(spec.card === "remove-plugins" ? "This needs Omarchy's omarchy-plugin-remove, which was not found."
@@ -469,7 +471,7 @@ Panel {
   }
 
   function keepIds(ids) {
-    if (!report || busy || ids.length === 0 || ids.length > 150) return
+    if (!report || busy || ids.length === 0 || ids.length > Model.MAX_PICK) return
     runHelper(["keep"].concat(ids))
     picked = ({})
   }
@@ -745,7 +747,7 @@ Panel {
       root.feedResult = ""
       root.scanProgress = null
       // Only the buttons report back, on the result card, which stays until
-      // you close it; the weekly background run stays quiet.
+      // you close it; the background runs stay quiet.
       if (root.feedForced) {
         root.setStatus("", false)
         root.actionResult = {
@@ -755,7 +757,7 @@ Panel {
           output: ""
         }
       }
-      // The long runs (Run all, Run weekly check) also send a notification.
+      // The long runs (Run all, the weekly check) also send a notification.
       if (root.feedFull) {
         var name = root.feedTitles[root.feedMode]
         Quickshell.execDetached(["/usr/bin/notify-send", "--app-name=Vigil", "--", "Vigil",
@@ -1228,12 +1230,12 @@ Panel {
               RunCell {
                 id: runDaily; kind: "daily-check"; mode: "daily"; label: "Daily check"
                 caption: runStrip.captions.daily; width: naturalWidth + runStrip.spare
-                tip: "Now: update lookups, then the Arch security, OSV, AUR and Bumblebee scans and a virus scan of ~/Downloads, each with its newest list"
+                tip: "Now: the system and Flatpak update lookups (installing updates for your own Flatpak apps), the Arch security, OSV and Bumblebee scans, the AUR status lookup and a virus scan of ~/Downloads"
               }
               RunCell {
                 id: runWeekly; kind: "weekly-check"; mode: "weekly"; label: "Weekly check"
                 caption: runStrip.captions.weekly; width: naturalWidth + runStrip.spare
-                tip: "Now: firmware lookup, then a virus scan of ~ (your whole home folder) with current signatures"
+                tip: "Now: firmware lookup, then a virus scan of ~ (your whole home folder) with the signatures ClamAV has"
               }
               RunCell {
                 id: runAll; kind: "full-scan"; mode: "full"; label: "Run all"; primary: true
@@ -1270,7 +1272,7 @@ Panel {
               }
               Button {
                 text: stopProc.running || root.stopRequested ? "Stopping\u2026" : "Stop"
-                tooltipText: "Stop this scan or update. What already finished is kept; the rest runs next time"
+                tooltipText: "Stop this run. What already finished is kept; the rest runs next time"
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 bordered: true
@@ -1305,7 +1307,7 @@ Panel {
               wrapMode: Text.WordWrap
             }
 
-            // When every check and scan last ran, and when each source last updated.
+            // When your settings and files were last read, and when each scan and lookup last ran.
             SectionHeading { visible: root.report !== null; text: "LAST RUN" }
             Repeater {
               model: root.report ? Model.lastRunRows(root.report, new Date()) : []
@@ -1414,7 +1416,7 @@ Panel {
             id: rowsRepeater
             model: root.visibleChecks
             // A row, and at the start of each group a heading: which check
-            // brings the rows in (settings, daily, weekly, update), and on the
+            // brings the rows in (always current, daily, weekly), and on the
             // Care tab what Clean all covers and what it leaves alone.
             delegate: Column {
               id: rowSlot
@@ -1758,7 +1760,7 @@ Panel {
             height: Style.space(14)
             text: "\uf023"
             tooltipText: itemRow.modelData.ignored ? "Marked as a false positive. Click to count it again"
-                                                   : "Kept. Click to stop keeping it and count it again"
+                                                   : "Kept. Click to count it again"
             horizontalPadding: 0
             verticalPadding: 0
             fontSize: Style.font.caption

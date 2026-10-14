@@ -1159,7 +1159,7 @@ def test_feed_due_and_retry(v):
     v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
     assert v.feed_due("arch-audit") is True
     res = v.refresh_due_feeds()                           # fake run fails: (None, "")
-    assert res["ok"] is False and "tries again tomorrow" in res["message"]
+    assert res["ok"] is False and "runs again with the next check" in res["message"]
     assert v.feed_due("arch-audit") is False              # tried today, waits a day
     p = Path(v.HOME, ".local/state/omarchy-vigil/arch-audit.json")
     meta = json.loads(p.read_text())
@@ -1256,7 +1256,7 @@ def test_aur_refresh_failure_is_retried(v):
 
 
 # --------------------------------------------------------------------------
-# Virus scan, Run list update, Run all and their schedules
+# Virus scan, the daily and weekly checks, Run all and their schedules
 
 def scan_argv(v):
     return tuple(v._clamscan_argv(v.HOME))
@@ -1408,7 +1408,7 @@ def test_two_timers_daily_and_weekly(v, monkeypatch):
 
 
 def test_report_says_when_something_is_due(v):
-    assert v.audit(peek=True)["feedsDue"] is True                         # the first full scan
+    assert v.audit(peek=True)["feedsDue"] is True                         # the first run
     v.refresh_due_feeds()
     assert v.audit(peek=True)["feedsDue"] is False
     v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
@@ -1451,7 +1451,7 @@ def test_due_to_the_minute(v):
 
 def test_full_scan_with_nothing_installed_still_checks(v):
     res = v.refresh_due_feeds(full=True)
-    assert res["ok"] and res["message"].startswith("Checked every setting.")
+    assert res["ok"] and res["message"].startswith("Nothing to run yet")
 
 
 def test_full_scan_message_separates_what_ran_from_findings(v):
@@ -2997,7 +2997,7 @@ def test_leftovers_lists_only_what_nothing_claims(v):
                         "~/.local/share/org.example.Gone", "~/.local/state/goneapp", "~/.oldtool",
                         "~/.var/app/com.spotify.Client"]
     assert all(i["kind"] == "leftover" and i["kept"] is False and len(i["id"]) == 16 for i in c["items"])
-    assert c["summary"].startswith("9 left behind by apps that are gone (")
+    assert c["summary"].startswith("9 items left behind by apps that are gone (")
     assert c["fix"] == {"kind": "docs", "action": "arch-xdg", "label": "Learn more"}
     assert "restore it from the trash" in c["howto"]
     row = next(x for x in v.audit(peek=True)["checks"] if x["id"] == "leftovers")
@@ -3009,12 +3009,12 @@ def test_leftovers_says_so_when_nothing_is_left(v):
     assert c["status"] == "pass" and c["summary"] == "Nothing left behind." and c["items"] == []
 
 
-def test_keep_and_stop_keeping_change_only_vigils_notes(v):
+def test_keep_and_unkeep_change_only_vigils_notes(v):
     leftover_home(v)
     item = next(i for i in v.check_leftovers()["items"] if i["text"].startswith("~/.oldtool \u00b7"))
     assert v.set_kept(item["id"], True)["ok"] is True
     c = v.check_leftovers()
-    assert c["summary"].startswith("8 left behind") and c["summary"].endswith(" 1 kept.")
+    assert c["summary"].startswith("8 items left behind") and c["summary"].endswith(" 1 kept.")
     assert next(i for i in c["items"] if i["id"] == item["id"])["kept"] is True
     assert ".oldtool" not in c["detail"]
     assert Path(v.HOME, ".oldtool/data").exists()
@@ -3022,7 +3022,7 @@ def test_keep_and_stop_keeping_change_only_vigils_notes(v):
     assert refused["ok"] is False and "is kept (click its lock first)" in refused["message"]
     assert Path(v.HOME, ".oldtool/data").exists()
     assert v.set_kept(item["id"], False)["message"] == "Counting it again."
-    assert v.check_leftovers()["summary"].startswith("9 left behind")
+    assert v.check_leftovers()["summary"].startswith("9 items left behind")
     assert v.set_kept("0" * 16, True)["ok"] is False                           # not on the list
 
 
@@ -3123,7 +3123,7 @@ def test_system_logs_are_tidy_under_500_mb(v):
         assert (c["fix"]["action"] == "clean-journal") == (status == "info"), size   # no cleanup, not in Clean all
 
 
-def test_keep_and_stop_keeping_take_several_at_once(v, capsys):
+def test_keep_and_unkeep_take_several_at_once(v, capsys):
     leftover_home(v)
     ids = [i["id"] for i in v.check_leftovers()["items"]][:3]
     assert v.set_kept(ids, True)["message"] == ("Kept 3 items. They stay where they are, locked at the bottom of "
@@ -3260,7 +3260,7 @@ def test_false_positive_takes_several(v):
 def test_main_takes_several_ids_for_false_positives(v, capsys):
     assert v.main(["vigil", "ignore", "0" * 16, "1" * 16]) == 0
     assert v.main(["vigil", "ignore", "0" * 16, "0" * 16]) == 2                # duplicates: refused
-    assert v.main(["vigil", "ignore"] + ["%016x" % n for n in range(151)]) == 2  # too many
+    assert v.main(["vigil", "ignore"] + ["%016x" % n for n in range(v.PICK_MAX + 1)]) == 2  # too many
 
 
 def _model_js_string(name):
@@ -3483,3 +3483,26 @@ def test_theme_colours_come_only_from_exact_lines(v):
     homefile(v, ".local/state/omarchy/current/theme/colors.toml",
              'red = "#f38ba8"\nbright_yellow = "#000000"\nyellow = "#f9e2af"\ngreen = "#a6e3a1; x"\n')
     assert v.theme_colors() == {"yellow": "#f9e2af", "green": ""}
+
+
+def test_a_whole_list_fits_in_one_keep_or_remove(v):
+    # Remove all and Keep all send every item of a list at once; the panel
+    # and the helper take as many ids as a list can show.
+    assert v.PICK_MAX == v.ITEMS_MAX
+    assert "var MAX_PICK = %d" % v.PICK_MAX in (REPO / "Model.js").read_text()
+
+
+def test_the_aur_summary_keeps_its_capitals(v):
+    v.TRUSTED |= {v.ROOT + "/usr/bin/pacman", v.ROOT + "/usr/bin/curl"}
+    v.save_feed("aur", {"checked": 1, "gone": ["old-thing"], "official": [], "orphans": []})
+    assert v.check_aur_status()["summary"].startswith("1 no longer in the AUR (")
+
+
+def test_a_review_made_before_any_full_check_still_holds(v):
+    # The first thing ever done can be Mark as reviewed: its fingerprint must
+    # use the install's key, not a throwaway one.
+    c = next(c for c in v.audit(peek=True)["checks"] if c["dismissible"])
+    v._ID_KEY.clear()
+    assert v.set_dismissed(c["id"], True)["ok"] is True
+    v._ID_KEY.clear()
+    assert next(x for x in v.audit()["checks"] if x["id"] == c["id"])["dismissed"] is True

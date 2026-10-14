@@ -366,7 +366,7 @@ function careReport(extra = {}) {
 test("clean all covers the offered cleanups and never orphans", () => {
   const plan = M.cleanAllPlan(careReport())
   assert.equal(plan.user, true)
-  assert.equal(plan.system, true)
+  assert.equal(plan.system, "clean-system")                     // both root rows: one step, one password
   assert.deepEqual(plan.items, ["Thumbnail cache: 12.0 MB", "Package cache: 3.1 GB", "System logs: Logs take up 400M"])
   const card = M.confirmation("clean-all", "care", careReport())
   assert.equal(card.title, "Clean all")
@@ -377,7 +377,7 @@ test("clean all covers the offered cleanups and never orphans", () => {
 test("clean all without a terminal launcher keeps only the no-root part", () => {
   const plan = M.cleanAllPlan(careReport({ tools: {} }))
   assert.equal(plan.user, true)
-  assert.equal(plan.system, false)
+  assert.equal(plan.system, "")
   assert.deepEqual(plan.items, ["Thumbnail cache: 12.0 MB"])
   assert.ok(!M.confirmation("clean-all", "care", careReport({ tools: {} })).lines.some(l => l.includes("asks for your password")))
 })
@@ -490,7 +490,7 @@ test("every terminal says what it does, plainly, then the technical part", () =>
     assert.ok(!a.what[0].startsWith("Technical:") && !a.what[0].startsWith("Runs:"), id)
     assert.ok(a.what[a.what.length - 1].startsWith("Technical: "), id)
     const script = M.terminalScript(id, TOOLS)
-    if (script) assert.match(script, /'(You will be asked for your password\.|No password needed\.)'/, id)
+    if (script) assert.match(script, /'(You will be asked for your password\.|No password needed\.|Omarchy asks for your password when a step needs it\.)'/, id)
   }
 })
 
@@ -782,7 +782,7 @@ test("hand-over turns off exactly the duplicate schedules, and Undo turns exactl
   rmSync(dir, { recursive: true, force: true })
 })
 
-test("with the Vigil weekly scan off, other schedules are not offered for hand-over", () => {
+test("with Vigil's background checks off, other schedules are not offered for hand-over", () => {
   const r = parse(report({ checks: [check({ id: "other-schedules", category: "detect", status: "info", weight: 0,
     fix: { kind: "terminal", action: "hand-over-schedules", label: "Let Vigil run them" } })] }))
   assert.equal(M.withSettings(r, true).checks[0].status, "info")
@@ -1295,13 +1295,14 @@ test("run cards show the helper's root steps exactly as the helper starts them",
                         fix: { kind: "terminal", action: "update-bumblebee", label: "Install Bumblebee" } })
   for (const k of ["daily-check", "weekly-check", "full-scan"])
     assert.ok(!card(k, { checks: [check(), older], signaturesDue: true }).some(c => c.text.includes(M.BUMBLEBEE_INSTALL)), k)
-  // Clean all: the root half, in full.
+  // Clean all: the root half, in full, and only the cleanup a row offers.
   const care = parse(report({ checks: [check({ id: "journal", category: "care", status: "info", weight: 0,
     fix: { kind: "terminal", action: "clean-journal", label: "Keep two weeks" } })] }))
   const clean = M.confirmation("clean-all", "care", care, "/home/marc").commands
   assert.equal(clean.length, 1)
-  assert.equal(clean[0].text, M.actionPlan("clean-system", TOOLS, "/home/marc")[0].argv.slice(0, -1).join(" ")
-    + "\n" + M.actionPlan("clean-system", TOOLS, "/home/marc")[0].argv[5])
+  assert.equal(clean[0].text, M.actionPlan("clean-journal", TOOLS, "/home/marc")[0].argv.slice(0, -1).join(" ")
+    + "\n" + M.actionPlan("clean-journal", TOOLS, "/home/marc")[0].argv[5])
+  assert.ok(!clean[0].text.includes("paccache"))                 // logs only: the package cache is left alone
 })
 
 // ---------------------------------------------------------------------------
@@ -1413,4 +1414,17 @@ test("theme colours in the report are #rrggbb or nothing", () => {
                    { yellow: "#f9e2af", green: "" })
   for (const bad of [{ yellow: "red" }, { green: "#f9e2af; x" }, { yellow: 1 }, "x", ["#ffffff"]])
     assert.equal(parse(report({ themeColors: bad })), null)
+})
+
+test("cards promise only what happens", () => {
+  const r = parse(report())
+  // The daily check sends no notification; the weekly check and Run all do.
+  assert.ok(!M.confirmation("daily-check", "all", r).lines.some(l => /notification/.test(l)))
+  assert.ok(M.confirmation("weekly-check", "all", r).lines.some(l => /notification/.test(l)))
+  // Actions as you that a system service may still ask a password for say so.
+  for (const id of ["update-flatpaks", "wifi-autojoin-off", "undo-wifi-autojoin"])
+    assert.ok(!M.confirmation("terminal", id, r).lines.some(l => /No password needed/.test(l)), id)
+  assert.ok(M.confirmation("terminal", "restart", r).lines.some(l => /restarts at once/.test(l)))
+  // A whole list fits in one keep or remove.
+  assert.equal(M.MAX_PICK, 300)
 })

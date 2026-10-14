@@ -19,8 +19,9 @@ Rules this file keeps (they follow the marketplace review guidance):
   step is a constant script from Model.js that the panel runs the same way.
 - Its network use is the checks' own tools (arch-audit, osv-scanner,
   checkupdates, flatpak, fwupdmgr) and two curl calls to fixed addresses (the
-  AUR and Perplexity's Bumblebee lists). Every scan gets its list right
-  before it runs. Nothing it downloads is ever run.
+  AUR and Perplexity's Bumblebee lists). Each scan gets its list right
+  before it runs; ClamAV's own update service keeps the virus signatures
+  current. Nothing it downloads is ever run.
 - If the plugin is removed while a scan or update runs, it stops within
   seconds (plugin_removed), so removal leaves nothing running.
 - Every child process is an absolute path, runs in its own session with a
@@ -1342,7 +1343,8 @@ def check_persistence():
     if hits:
         return result(cid, cat, title, "warn", "%d suspicious line%s in startup files." % (
             len(hits), "" if len(hits) == 1 else "s"), why, clean_block(hits, 3000), weight=3)
-    return result(cid, cat, title, "pass", "No suspicious lines in %d startup files." % scanned, why, weight=3)
+    return result(cid, cat, title, "pass", "No suspicious lines in %d startup file%s." % (
+        scanned, "" if scanned == 1 else "s"), why, weight=3)
 
 
 @check
@@ -1367,12 +1369,13 @@ def check_ld_preload():
 # Omarchy plugins and infected files are listed one item each, with a box to
 # tick. Keeping an item (or marking a detection as a false positive) changes
 # only Vigil's own notes: it stays on the list, with a lock and last, and stops
-# counting. Removing is always the panel's job, on a card that shows the exact
-# command first; the helper only lists.
+# counting. The helper lists, keeps, marks false positives and moves leftovers
+# to the trash (named only by ids); removing packages and plugins is the
+# panel's job, on a card that shows the exact command first.
 
 REMOVABLE_PACKAGE = re.compile(r"[A-Za-z0-9@_+][A-Za-z0-9@._+-]{0,99}")   # Arch's package name rules
 REMOVABLE_PLUGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")         # omarchy-plugin-remove's ids
-PICK_MAX = 150
+PICK_MAX = 300                      # = ITEMS_MAX: Remove all and Keep all can take a whole list
 
 
 # --- Ids ----------------------------------------------------------------------
@@ -1434,13 +1437,13 @@ def _make_id_key(dirfd):
     return key
 
 
-def id_key():
+def id_key(make=False):
     """This install's key, made the first time it is needed. A look-only check
     (--peek) never creates the state folder, so before Vigil's first full
     check it, like a run without a state folder, gets a key for this run only:
-    its ids hold until the helper exits."""
+    its ids hold until the helper exits. make: create it even then."""
     if "key" not in _ID_KEY:
-        peek = INTEGRITY_PEEK["value"]
+        peek = INTEGRITY_PEEK["value"] and not make
         key = None
         try:
             dirfd = _open_home_dir(list(STATE_DIR)) if peek else _state_dir()
@@ -1643,7 +1646,7 @@ SCANNERS = [
     ("arch-audit", "arch-audit", "supply", "Known vulnerabilities (arch-audit)",
      "arch-audit checks your installed packages against the Arch security team's tracker and lists the "
      "ones where an update fixes a published vulnerability. Each daily check downloads the tracker again "
-     "(from security.archlinux.org) right before it compares; Check now does it straight away.",
+     "(from security.archlinux.org) right before it compares; Scan now does it straight away.",
      "run-arch-audit", "install-arch-audit"),
 ]
 
@@ -1679,7 +1682,7 @@ def _scanner_check(sid, binary, cat, title, why, run_action, install_action):
                 fix=fix("docs", "arch-clamav", "Learn more"), weight=0,
                 howto="Check your internet connection. Then press Run all on the Overview: when the signatures are "
                       "over two days old, it updates them first, behind your password.")
-        summary = "ClamAV's update service keeps them current (last %s)." % (
+        summary = "ClamAV's update service keeps them current (last updated %s)." % (
             "today" if days == 0 else "%d day%s ago" % (days, "" if days == 1 else "s"))
     if not run_action:                       # ClamAV: healthy signatures; the scan itself is Vigil's job
         return result(cid, cat, title, "pass", summary, why, weight=0)
@@ -1734,10 +1737,12 @@ def no_password_scan():
 
 
 PKEXEC = "/usr/bin/pkexec"
-# The one root step: a constant, read-only awk over /etc/shadow that prints the
-# names of accounts whose password field is empty. pkexec shows Omarchy's own
-# password dialog; nothing else runs as root.
-# /usr/bin/bash, not awk: on Arch awk is a link, which Vigil never runs as root.
+# The password scan's root step: a constant, read-only awk over /etc/shadow that
+# prints the names of accounts whose password field is empty. pkexec shows
+# Omarchy's own password dialog. (The helper's only other root step is the
+# virus signatures update in Run all, SIGNATURES_ARGV.) pkexec starts
+# /usr/bin/bash, a regular file, rather than /usr/bin/awk, which on Arch is a
+# link; bash then runs awk by its absolute path.
 ROOT_STEP = "/usr/bin/awk -F: '$2 == \"\" { print $1 }' /etc/shadow"
 NO_PASSWORD_ARGV = [PKEXEC, "/usr/bin/bash", "-c", ROOT_STEP]
 # ClamAV's own update service holds freshclam's log locked, so a second
@@ -1940,9 +1945,9 @@ def parse_arch_audit(text):
 
 def _arch_audit_check(cid, cat, title, why):
     cache = feed_cache("arch-audit")
-    refresh = fix("helper", "arch-audit-refresh", "Check now")
+    refresh = fix("helper", "arch-audit-refresh", "Scan now")
     if cache is None:
-        return result(cid, cat, title, "info", "Installed. The first check runs within a day.", why,
+        return result(cid, cat, title, "info", "Installed. Not scanned yet: press Scan now, or Daily check under Run now.", why,
                       fix=refresh, weight=0)
     pkgs = cache.get("packages") if isinstance(cache.get("packages"), list) else []
     good = [p for p in pkgs if isinstance(p, dict) and isinstance(p.get("name"), str) and _PKG_NAME.match(p["name"])
@@ -1970,13 +1975,14 @@ for _spec in SCANNERS:
 
 
 # ---------------------------------------------------------------------------
-# Scans and lookups ("feeds"). Vigil keeps no threat lists of its own, and it
-# never scans with a list it did not just fetch: every scan gets the newest
-# list from the people who maintain it right before it runs. arch-audit,
-# osv-scanner and the AUR lookup fetch theirs as they run; the Bumblebee scan
-# runs right after its list is downloaded; every ClamAV scan runs right after
-# Vigil makes sure the virus signatures are current. If a download fails, the
-# scan uses the last good list and says how old it is. Results are cached in
+# Scans and lookups ("feeds"). Vigil keeps no threat lists of its own: each
+# scan gets the newest list from the people who maintain it right before it
+# runs. arch-audit, osv-scanner and the AUR lookup fetch theirs as they run;
+# the Bumblebee scan runs right after its list is downloaded (if that download
+# fails, it uses the last good list and says how old it is); every ClamAV scan
+# first checks that the virus signatures exist and how old they are (ClamAV's
+# own update service keeps them current; only Run all updates them, when they
+# are over two days old). Results are cached in
 # the state folder; checks read only the cache. A failed step is tried again
 # the next day.
 
@@ -2388,9 +2394,10 @@ def check_osv():
         return result(cid, cat, title, "pass", "No AUR build folders or global npm and Bun installs to check.",
                       why, weight=0)
     cache = feed_cache("osv")
-    refresh = fix("helper", "osv-refresh", "Check now")
+    refresh = fix("helper", "osv-refresh", "Scan now")
     if cache is None:
-        return result(cid, cat, title, "info", "The first check runs within a day.", why, fix=refresh, weight=0)
+        return result(cid, cat, title, "info", "Not scanned yet: press Scan now, or Daily check under Run now.", why,
+                      fix=refresh, weight=0)
     mal = [m for m in cache.get("malicious", []) if isinstance(m, dict)][:500] \
         if isinstance(cache.get("malicious"), list) else []
     if mal:
@@ -2460,9 +2467,10 @@ def check_aur_status():
     if not feed_available("aur"):
         return result(cid, cat, title, "na", "pacman or curl is not available.", why, weight=0)
     cache = feed_cache("aur")
-    refresh = fix("helper", "aur-refresh", "Check now")
+    refresh = fix("helper", "aur-refresh", "Look up now")
     if cache is None:
-        return result(cid, cat, title, "info", "The first check runs within a day.", why, fix=refresh, weight=0)
+        return result(cid, cat, title, "info", "Not looked up yet: press Look up now, or Daily check under Run now.",
+                      why, fix=refresh, weight=0)
 
     def names(key):
         v = cache.get(key)
@@ -2480,13 +2488,14 @@ def check_aur_status():
         bits.append("%d no longer in the AUR" % len(gone))
     if orphans:
         bits.append("%d without a maintainer" % len(orphans))
-    return result(cid, cat, title, "info", "; ".join(bits).capitalize() + " (%s)." % feed_when(cache), why,
+    return result(cid, cat, title, "info", bits[0][:1].upper() + "; ".join(bits)[1:] + " (%s)." % feed_when(cache), why,
                   clean_block(lines), fix=refresh, weight=0,
                   howto="Switch to the official package where Arch now ships it, or to a maintained "
                         "replacement. If you need it as it is, mark it as reviewed.")
 
 
-# Weekly virus scan: ClamAV scans ~/Downloads as you (never as root), with
+# Virus scans: ClamAV scans ~ every week and what is new in ~/Downloads every
+# day, as you (never as root), with
 # the signatures ClamAV's own service keeps current. A detection is a match
 # against ClamAV's published signatures; potentially-unwanted-program rules
 # stay off (ClamAV's default), so adware-style guesses do not show up.
@@ -2744,7 +2753,7 @@ def check_virus_scan():
     cache = feed_cache("virus-scan")
     now = fix("helper", "virus-scan-now", "Scan now")
     if cache is None:
-        return result(cid, cat, title, "info", "The first scan runs within a day.", why, fix=now, weight=0,
+        return result(cid, cat, title, "info", "Not scanned yet.", why, fix=now, weight=0,
                       howto="Press Scan now to scan your home folder now, or wait for the next weekly check.")
     scanned = _virus_scans_line(cache)
     found = current_detections()
@@ -2804,7 +2813,7 @@ def _virus_scans_line(cache):
 
 
 # --- Marking a virus detection as a false positive ---------------------------
-# One detection at a time, and only while the file is exactly the one you
+# Up to PICK_MAX detections at once, each only while its file is exactly the one you
 # looked at: its SHA-256 is recorded, and a file that changes (an update, or
 # something replacing it) is reported again.
 
@@ -3081,8 +3090,8 @@ def refresh_firmware():
 
 
 # --- Flatpak apps --------------------------------------------------------------
-# Omarchy's updater does not update Flatpak apps, and Vigil installs ClamUI
-# (which carries its own ClamAV) as one. Your own (--user) apps update without
+# Omarchy's updater does not update Flatpak apps (ClamUI is one, if you
+# installed it from Flathub). Your own (--user) apps update without
 # a password, in Run daily check and Run all; apps installed for every account (--system)
 # need Omarchy's password dialog, so only their button does that.
 
@@ -3133,14 +3142,14 @@ def update_user_flatpaks():
 @check
 def check_flatpak():
     cid, cat, title = "flatpak-apps", "harden", "Flatpak updates"
-    why = ("Omarchy's own updater does not update apps installed with Flatpak, ClamUI among them. An app that "
-           "is never updated keeps its security holes, so Vigil checks them with each update and Update "
-           "sources installs the updates for your own apps.")
+    why = ("Omarchy's own updater does not update apps installed with Flatpak. An app that is never updated "
+           "keeps its security holes, so the daily check looks up their updates, and Daily check under Run now "
+           "(or Run all) also installs those for your own apps.")
     if not feed_available("flatpak"):
         return result(cid, cat, title, "na", "No Flatpak apps are installed.", why, weight=0)
     cache = feed_cache("flatpak")
     if cache is None:
-        return result(cid, cat, title, "info", "Checked with the next update.", why, weight=0,
+        return result(cid, cat, title, "info", "Not looked up yet: the next daily check does it.", why, weight=0,
                       howto="Press Daily check under Run now on the Overview.")
     ids = {w: [x for x in cache.get(w, []) if isinstance(x, str) and _APP_ID.match(x)][:200]
            if isinstance(cache.get(w), list) else [] for w in ("user", "system")}
@@ -3165,8 +3174,8 @@ def check_firmware():
     if not feed_available("firmware"):
         return result(cid, cat, title, "info", "Not checked: fwupd is not installed.", why,
                       fix=fix("terminal", "install-helpers", "Install"), weight=0,
-                      howto="Press Install: Vigil installs fwupd from the Arch repositories, and the next Full "
-                            "scan checks your firmware.")
+                      howto="Press Install: Vigil installs every missing helper it works with, fwupd among them "
+                            "(the card lists each), and the next weekly check looks up your firmware.")
     cache = feed_cache("firmware")
     if cache is None:
         return result(cid, cat, title, "info", "Checked in the next weekly check.", why, weight=0,
@@ -3625,8 +3634,8 @@ def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False
         return {"ok": True, "stopped": True, "action": "", "message": "Stopped."}
     if not done and not failed:
         if run_weekly:
-            return {"ok": True, "action": "", "message": "Checked every setting. Install ClamUI (Detect tab) "
-                    "to add a virus scan to the weekly check." + no_pkexec}
+            return {"ok": True, "action": "", "message": "Nothing to run yet: none of the tools these scans "
+                    "need is installed. Press Install on the Overview to add them." + no_pkexec}
         return {"ok": True, "action": "", "message": "Everything is up to date."}
     said = {"signatures-update": "updated the virus signatures",
             "pending-updates": "looked up waiting updates", "flatpak": "looked up Flatpak updates",
@@ -3640,7 +3649,7 @@ def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False
     retried = [n for n in failed if n not in ("password-check", "signatures-update", "signatures")
                and n not in timed_out]
     if retried:
-        msg += " Could not finish %s; Vigil tries again tomorrow." % _and([FEED_LABELS[n] for n in retried])
+        msg += " Could not finish %s; it runs again with the next check." % _and([FEED_LABELS[n] for n in retried])
     if "password-check" in failed:
         msg += " The password scan was skipped: no password was given."
     if "virus-scan" in timed_out:
@@ -3708,11 +3717,12 @@ def check_bumblebee():
     if not bumblebee_ok():
         return result(cid, cat, title, "info", "Not installed.", why,
                       fix=fix("terminal", "install-helpers", "Install"), weight=0,
-                      howto="Press Install: Vigil downloads Bumblebee " + BUMBLEBEE_VERSION + " from Perplexity, checks "
-                            "it against the checksum written in Vigil's code, and installs it.")
+                      howto="Press Install: Vigil installs every missing helper it works with (the card lists "
+                            "each), including Bumblebee " + BUMBLEBEE_VERSION + " from Perplexity, checked against the "
+                            "checksum written in Vigil's code.")
     cache = feed_cache("bumblebee")
     if cache is None:
-        return result(cid, cat, title, "info", "Installed. Its first check runs with the next daily check.", why,
+        return result(cid, cat, title, "info", "Installed. Not scanned yet: the next daily check runs it.", why,
                       weight=0, howto="Press Daily check under Run now on the Overview, or wait for the next one.")
     found = [f for f in cache.get("findings", []) if isinstance(f, dict)][:500] \
         if isinstance(cache.get("findings"), list) else []
@@ -3741,7 +3751,7 @@ def check_bumblebee():
 
 
 # --- Duplicate scan schedules --------------------------------------------------
-# Other tools that schedule what Vigil's weekly run already does. Vigil only
+# Other tools that schedule what Vigil's daily and weekly checks already do. Vigil only
 # reads their files here; turning them off is a confirmed panel action
 # ("hand-over-schedules" in Model.js), which leaves a marker per change in
 # HANDOVER_DIR so Undo restores exactly those.
@@ -3853,7 +3863,7 @@ def handover_marks():
 @check
 def check_other_schedules():
     cid, cat, title = "other-schedules", "detect", "Duplicate scan schedules"
-    why = ("Vigil already runs a weekly virus scan of your home folder and a Bumblebee check. When another "
+    why = ("Vigil already runs a weekly virus scan of your home folder and a daily Bumblebee scan. When another "
            "app runs the same scan on its own schedule, your computer does the work twice, sometimes at "
            "the same time.")
     twice, kept = [], []
@@ -4211,7 +4221,7 @@ def check_file_changes():
     files = base.get("files") if isinstance(base, dict) else None
     if not isinstance(files, dict) or not files:
         if INTEGRITY_PEEK["value"]:
-            return result(cid, cat, title, "na", "Vigil records how these files look on its next full check.",
+            return result(cid, cat, title, "na", "Vigil records how these files look the next time the panel on your main screen checks.",
                           why, weight=2)
         try:
             save_baseline(snap)
@@ -4228,8 +4238,9 @@ def check_file_changes():
     changed = [k for k in changed if k not in from_packages]
     added = [k for k in added if k not in from_packages]
     lines = ["changed: " + k for k in changed] + ["new: " + k for k in added] + ["removed: " + k for k in removed]
-    note = (" %d other change%s came from package updates and match what the package shipped." % (
-        len(from_packages), "" if len(from_packages) == 1 else "s")) if from_packages else ""
+    note = (" %d other change%s came from package updates and match%s what the package shipped." % (
+        len(from_packages), "" if len(from_packages) == 1 else "s", "es" if len(from_packages) == 1 else "")) \
+        if from_packages else ""
     if not lines:
         return result(cid, cat, title, "pass", "No unexpected changes to %d watched files since %s.%s" % (
             len(snap), since, note), why, weight=2)
@@ -4240,7 +4251,7 @@ def check_file_changes():
         if risky else "", note)
     accept = fix("helper", "integrity-accept", "Accept these changes")
     howto = ("Read the list under Details. If you recognise every change (an update, or something you did), "
-             "press Accept. If not, ask for help before changing anything.")
+             "press Accept these changes. If not, ask for help before changing anything.")
     if risky:
         return result(cid, cat, title, "warn", summary, why, clean_block(lines), accept, weight=2, howto=howto)
     return result(cid, cat, title, "info", summary, why, clean_block(lines), accept, weight=0, howto=howto)
@@ -5037,10 +5048,11 @@ def check_leftovers():
     why = ("Apps you remove leave their settings and data behind. Vigil lists what no installed app, program, "
            "Flatpak or startup file uses and nothing has changed for a month, in ~/.config, ~/.local/share, "
            "~/.local/state, ~/.var/app, ~/.local/bin, your launchers and the folders in ~ that start with a dot.")
-    howto = ("Keep what you want to hold on to (settings you would want back if you reinstall an app): it "
-             "stays where it is, locked at the bottom of the list, and Vigil stops counting it. Trash puts the "
-             "rest in the trash, not away: restore it from the trash in your file manager if you were wrong. "
-             "Emptying the trash, here or with Clean all, deletes it for good.")
+    howto = ("Tick what to remove and press Trash selected, or press Trash all: it goes to the trash, not away; "
+             "restore it from the trash in your file manager if you were wrong. Keep what you want to hold on to "
+             "(settings you would want back if you reinstall an app): it stays where it is, locked at the bottom "
+             "of the list, and Vigil stops counting it. Emptying the trash, on the Trash row or with Clean all, "
+             "deletes it for good.")
     learn = fix("docs", "arch-xdg", "Learn more")
     found = leftovers()
     if found is None:
@@ -5056,8 +5068,8 @@ def check_leftovers():
             live_size += f["size"]
     note = " %d kept." % (len(found) - len(live)) if len(found) > len(live) else ""
     if live:
-        out = result(cid, cat, title, "info", "%d left behind by apps that are gone (%s).%s" % (
-            len(live), human(live_size), note), why, clean_block(live), learn, weight=0, howto=howto)
+        out = result(cid, cat, title, "info", "%d item%s left behind by apps that are gone (%s).%s" % (
+            len(live), "" if len(live) == 1 else "s", human(live_size), note), why, clean_block(live), learn, weight=0, howto=howto)
     else:
         out = result(cid, cat, title, "pass", ("Nothing new left behind.%s" % note) if note
                      else "Nothing left behind.", why, fix=learn, weight=0)
@@ -5643,7 +5655,8 @@ def mark_seen(fp):
 
 def set_dismissed(check_id, on):
     """Mark the current warning of `check_id` as reviewed, or show it again."""
-    report = audit(peek=True)
+    id_key(make=True)       # made now if missing: a look-only check never makes it, and a
+    report = audit(peek=True)   # fingerprint under a throwaway key would never match again
     c = next((x for x in report["checks"] if x["id"] == check_id), None)
     if c is None:
         return {"ok": False, "action": "", "message": "Unknown check."}
@@ -5694,15 +5707,16 @@ def score_of(checks):
     return max(0, min(100, score))
 
 
-UNKNOWN_HOWTO = ("Vigil could not finish this check. Press R to check again; if it keeps happening, "
-                 "mark it as reviewed.")
+UNKNOWN_HOWTO = ("Vigil could not finish this check. Middle-click the lighthouse to read it again; if it keeps "
+                 "happening, mark it as reviewed.")
+UNKNOWN_HOWTO_ITEMS = "Vigil could not finish this check. Middle-click the lighthouse to read it again."
 
 # For findings Vigil cannot fix itself: how to fix it, and a button that
 # helps (a read-only command in a terminal, or a maintained guide).
 CHECK_HELP = {
-    "ssh-keys": ("Make ~/.ssh a normal folder owned by you, not a link, then press R.",
+    "ssh-keys": ("Make ~/.ssh a normal folder owned by you, not a link, then middle-click the lighthouse.",
                  ("docs", "arch-ssh-keys", "Learn more")),
-    "gnupg": ("Make ~/.gnupg a normal folder owned by you, not a link, then press R.",
+    "gnupg": ("Make ~/.gnupg a normal folder owned by you, not a link, then middle-click the lighthouse.",
               ("docs", "arch-gnupg", "Learn more")),
     "disk-encryption": ("Encryption can only be turned on when installing: back up, then reinstall Omarchy "
                         "with encryption on. If this machine never leaves home, mark it as reviewed.",
@@ -5749,7 +5763,9 @@ def add_help(c):
     if c["fix"]["kind"] == "none" and learn and c["status"] != "unknown":
         c["fix"] = fix(*learn)
     if not c.get("howto"):
-        c["howto"] = UNKNOWN_HOWTO if c["status"] == "unknown" else howto
+        # The lists reviewed item by item have no Mark as reviewed to suggest.
+        c["howto"] = ((UNKNOWN_HOWTO_ITEMS if c["id"] in ITEM_REVIEWED else UNKNOWN_HOWTO)
+                      if c["status"] == "unknown" else howto)
     return c
 
 
@@ -6448,7 +6464,7 @@ def main(argv):
         flag = argv[2] if len(argv) >= 3 else ""
         if not take_run_lock():
             emit({"ok": True, "busy": True, "action": "",
-                  "message": "Vigil is already running a scan or update. This one was not started."})
+                  "message": "Vigil is already running a check or scan. This one was not started."})
             return 0
         signal.signal(signal.SIGTERM, _on_stop)
         try:

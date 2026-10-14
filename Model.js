@@ -16,6 +16,7 @@ var MAX_CHECKS = 160
 var MAX_STR = 400
 var MAX_DETAIL = 4000
 var MAX_MESSAGE = 2000   // must equal MESSAGE_MAX in bin/vigil (a test checks)
+var MAX_PICK = 300       // ids in one keep, trash or remove: a whole list; must equal PICK_MAX in bin/vigil
 
 var CATEGORIES = ["harden", "detect", "supply", "privacy", "care"]
 var STATUSES = ["fail", "warn", "unknown", "info", "pass", "na"]
@@ -90,17 +91,17 @@ var HELPER_INFO = {
   "integrity-accept": { title: "Accept the file changes",
                         what: ["Records the watched files as they are now as the new normal.",
                                "Only do this once you recognise every change in the list."] },
-  "arch-audit-refresh": { title: "Check for known vulnerabilities now",
+  "arch-audit-refresh": { title: "Run the Arch security scan now",
                           what: ["Runs arch-audit, which downloads the Arch security tracker from security.archlinux.org",
                                  "and compares your packages with it. Vigil also does this in every daily check."] },
-  "osv-refresh": { title: "Check for known-malicious packages now",
+  "osv-refresh": { title: "Run the OSV malware scan now",
                    what: ["Runs osv-scanner on your AUR build folders and global npm and Bun installs.",
                           "It sends package names and versions (never your files) to OSV.dev, run by Google.",
                           "Vigil also does this in every daily check."] },
   "virus-scan-now": { title: "Scan your home folder for viruses now",
                       what: ["Runs ClamAV on your whole home folder as you, in the background. Nothing is deleted.",
                              "It can take a while. Vigil also does this in each weekly check."] },
-  "aur-refresh": { title: "Check your AUR packages now",
+  "aur-refresh": { title: "Run the AUR status lookup now",
                    what: ["Asks aur.archlinux.org about the AUR packages you have installed, the same lookup",
                           "yay and paru make on every update. Vigil also does this in every daily check."] }
 }
@@ -138,7 +139,7 @@ function confirmation(kind, id, report, home) {
   if (!card) return null
   var tools = report && report.tools ? report.tools : {}
   card.commands = kind === "terminal" ? actionCommands(id, tools, home)
-    : kind === "clean-all" && cleanAllPlan(report).system ? actionCommands("clean-system", tools, home)
+    : kind === "clean-all" && cleanAllPlan(report).system ? actionCommands(cleanAllPlan(report).system, tools, home)
     : kind === "daily-check" || kind === "weekly-check" || kind === "full-scan" ? runCommands(kind, report)
     : kind === "remove-orphans" || kind === "remove-foreign" || kind === "remove-plugins" ? removalCommands(kind, id, report)
     : []
@@ -201,6 +202,8 @@ function confirmationText(kind, id, report) {
     var mode = runMode(id)
     lines.push(mode === "terminal" ? "Opens a terminal: this tool asks you questions as it goes."
       : mode === "root" ? "Omarchy asks for your password, then Vigil shows the result here."
+      : id === "restart" ? "The computer restarts at once. No password needed."
+      : inList(id, MAY_ASK) ? "Vigil shows the result here. A password dialog may appear (see above)."
       : "Vigil shows the result here. No password needed.")
   }
   return { title: a.title, lines: lines }
@@ -275,11 +278,11 @@ function leftoverTrashIds(report) { return pickableIds(report, "leftover") }
 
 // The items a list of ids names ("id,id,..." as a card's action), or null
 // unless every one is a listed item of that kind you could remove now, at
-// most 150, none twice.
+// most MAX_PICK, none twice.
 function itemIdList(report, ids, kind) {
-  if (typeof ids !== "string" || ids.length > 150 * 17) return null
+  if (typeof ids !== "string" || ids.length > MAX_PICK * 17) return null
   var list = ids.split(",")
-  if (list.length === 0 || list.length > 150) return null
+  if (list.length === 0 || list.length > MAX_PICK) return null
   var seen = Object.create(null)
   for (var i = 0; i < list.length; i++) {
     var item = findItem(report, list[i], kind)
@@ -300,7 +303,7 @@ function itemLines(report, list, kind) {
 
 var TRASH_LINES = [
   "It goes to the trash, not away: open the trash in your file manager and choose Restore to put it back where it was.",
-  "Emptying the trash deletes it for good. So does Empty on the Trash row and Clean all on this tab, which empty the trash too.",
+  "Emptying the trash deletes it for good. So do Empty on the Trash row and Clean all on this tab, which empty the trash too.",
   "If you install the app again, it starts with fresh settings unless you restore this first.",
   "Technical: renames it into ~/.local/share/Trash/files and records where it came from in ~/.local/share/Trash/info, the freedesktop.org trash every file manager reads. Nothing is copied or deleted. Vigil checks again that no installed app uses it before it moves anything."]
 
@@ -391,7 +394,7 @@ var PACKAGE_LINES = [
   "pacman removes each package, the dependencies only it needed (-s) and the settings files it saved in /etc (-n). Your own files in your home folder stay.",
   "If another package still needs one of these, pacman refuses and removes nothing.",
   "Omarchy asks for your password. As root, Vigil first checks again that each one is still on this list; if one is not, nothing is removed.",
-  "Technical: sudo pacman -Rns --noconfirm -- <the packages above>"]
+  "Technical: pacman -Rns --noconfirm -- <the packages above>, as root through pkexec"]
 
 function removePackagesConfirmation(kind, ids, report) {
   var itemKind = CARD_KINDS[kind]
@@ -468,6 +471,10 @@ function undoDropIn(name, path, afterText, after) {
          + "sudo /usr/bin/rm -f -- \"$f\" && " + after
   }
 }
+
+// Actions that run as you but can make a system service ask for your password
+// through its own rules (NetworkManager, Flatpak for apps of every account).
+var MAY_ASK = ["update-flatpaks", "wifi-autojoin-off", "undo-wifi-autojoin"]
 
 // How an action runs. Most run without a terminal: "root" ones through pkexec,
 // so Omarchy's own password dialog asks, "user" ones as you; the panel shows
@@ -770,6 +777,7 @@ var TERMINAL_ACTIONS = {
   "undo-wifi-autojoin": {
     title: "Let those Wi-Fi networks join by themselves again",
     what: ["The open networks Vigil stopped from joining by themselves join by themselves again.",
+           "NetworkManager may ask for your password.",
            "Technical: nmcli connection modify <network> connection.autoconnect yes, for the networks Vigil recorded"],
     run: stateDirSh("", false)
       + "m=\"$s/wifi-autojoin-off\"\n"
@@ -782,7 +790,7 @@ var TERMINAL_ACTIONS = {
   },
   "update-flatpaks": {
     title: "Update your Flatpak apps",
-    what: ["Installs the waiting updates for your Flatpak apps, ClamUI among them, from Flathub.",
+    what: ["Installs the waiting updates for your Flatpak apps (ClamUI too, if you installed it from Flathub).",
            "Apps installed for every account on this computer may ask for your password.",
            "Technical: flatpak update --noninteractive"],
     run: "/usr/bin/flatpak update --noninteractive && echo 'Your Flatpak apps are up to date.'"
@@ -1000,7 +1008,7 @@ var TERMINAL_ACTIONS = {
   "show-plugins": {
     title: "List installed Omarchy plugins",
     what: ["Shows every plugin you have installed. Changes nothing.",
-           "Remove one you do not use with: omarchy plugin remove <id>",
+           "To remove one, tick it on the Other Omarchy plugins row and press Remove selected.",
            "Technical: omarchy plugin list"],
     tool: "omarchy-plugin-list", args: ""
   },
@@ -1157,7 +1165,8 @@ function terminalScript(id, tools) {
   var body = actionBody(a, tools)
   if (body === "") return ""
   var intro = ["Vigil: " + a.title, ""].concat(a.what).concat(["",
-    body.indexOf("sudo ") !== -1 ? "You will be asked for your password." : "No password needed."])
+    a.tool ? "Omarchy asks for your password when a step needs it."
+      : body.indexOf("sudo ") !== -1 ? "You will be asked for your password." : "No password needed."])
   var shown = []
   for (var i = 0; i < intro.length; i++) shown.push("'" + intro[i] + "'")
   return "printf '%s\\n' " + shown.join(" ")
@@ -1185,15 +1194,19 @@ function canRun(fixObj, tools, apps) {
 // ---------------------------------------------------------------------------
 // Clean all (Care tab). Runs the cleanups the Care checks currently offer, in
 // at most two steps: the no-root ones through the helper (`fix clean-user`),
-// the root ones in one pkexec run (`clean-system`), so you are asked once.
-// Orphaned packages are left out on purpose: removing packages can take away
-// something you use, so that stays a separate, reviewed step.
+// the root ones in one pkexec run (the package cache, the logs, or both in
+// `clean-system`, whichever rows offer a cleanup), so you are asked once.
+// Orphaned packages and leftovers are left out on purpose: removing packages
+// can take away something you use, so you tick those on their own rows.
 
 var CLEAN_ALL = { "clean-thumbnails": "user", "empty-trash": "user", "clean-app-cache": "user",
                   "clean-pacman-cache": "system", "clean-journal": "system" }
 
+// system names the one root action that covers exactly the system rows listed
+// (the package cache, the logs, or both), or "" when there are none.
 function cleanAllPlan(report) {
-  var plan = { user: false, system: false, items: [] }
+  var plan = { user: false, system: "", items: [] }
+  var cache = false, logs = false
   if (!report || !report.checks) return plan
   var systemOk = actionPlan("clean-system", report.tools, "/home/check").length > 0
   for (var i = 0; i < report.checks.length; i++) {
@@ -1203,9 +1216,11 @@ function cleanAllPlan(report) {
     var side = CLEAN_ALL[c.fix.action]
     if (side === "system" && !systemOk) continue
     if (side === "user") plan.user = true
-    else plan.system = true
+    else if (c.fix.action === "clean-journal") logs = true
+    else cache = true
     plan.items.push(c.title + ": " + c.summary.replace(/\.$/, ""))
   }
+  plan.system = cache && logs ? "clean-system" : cache ? "clean-pacman-cache" : logs ? "clean-journal" : ""
   return plan
 }
 
@@ -1214,7 +1229,8 @@ function cleanAllConfirmation(report) {
   if (plan.items.length === 0) return null
   var lines = plan.items.slice(0)
   if (plan.user) lines.push("Files are cleared right away. The trash cannot be restored; caches rebuild themselves.")
-  if (plan.system) lines.push("For the package cache and logs, Omarchy asks for your password once.")
+  if (plan.system) lines.push("For " + (plan.system === "clean-system" ? "the package cache and the logs"
+    : plan.system === "clean-journal" ? "the logs" : "the package cache") + ", Omarchy asks for your password once.")
   lines.push("Orphaned packages and leftover app data are left out: they deserve a look, so tick what to remove or keep in their own rows at the bottom of this tab.")
   return { title: "Clean all", lines: lines }
 }
@@ -1314,8 +1330,9 @@ function validCheck(c) {
 }
 
 // The Last run list: every scan and lookup, grouped by the run that does it.
-// There are no rows for the lists: every scan gets its list right before it
-// runs and says which one it used (note); old marks one over two days old.
+// There are no rows for the lists: each scan gets its list right before it
+// runs. The virus scans say which signatures they used (note), Bumblebee only
+// when it fell back to an old list; old marks one over two days old.
 var SOURCE_IDS = ["pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee", "downloads-scan",
                   "firmware", "virus-scan", "password-check"]
 var SOURCE_RUNS = ["daily", "weekly", "all"]
@@ -1560,7 +1577,7 @@ function missingLabel(report) {
   return "MISSING " + names.join(", ") + ". INSTALL"
 }
 
-// The four run buttons share one helper: what each runs, in the names the
+// The three run buttons share one helper: what each runs, in the names the
 // Last run list uses, one numbered line each.
 function runLines(report, ids) {
   var has = function(id) {
@@ -1572,12 +1589,13 @@ function runLines(report, ids) {
     if (ids[i] === "bumblebee-list") return has("bumblebee")
     if (ids[i] === "signatures") return i + 1 < ids.length && has(ids[i + 1])
     if (ids[i] === "signatures-update") return report.signaturesDue === true
+    if (ids[i] === "password-check") return has("password-check") && toolDir(report.tools, "pkexec") !== ""
     return has(ids[i])
   }
   var what = {
     "signatures-update": "Virus signatures update: they are over two days old (ClamAV's own update service has"
       + " fallen behind), so Vigil updates them first. Omarchy asks for your password.",
-    "password-check": "Password scan: every account has a password. Omarchy asks for your password.",
+    "password-check": "Password scan: checks that every account has a password. Omarchy asks for your password.",
     "pending-updates": "System update lookup: waiting system and Omarchy updates (nothing is installed).",
     "flatpak": "Flatpak update lookup, and the updates for your own Flatpak apps (no password).",
     "arch-audit": "Arch security scan: downloads the Arch security team's newest list, then compares your packages with it.",
@@ -1585,7 +1603,8 @@ function runLines(report, ids) {
     "aur": "AUR status lookup: asks the AUR whether your AUR packages are still maintained.",
     "bumblebee-list": "Bumblebee list: downloads Perplexity's newest list of compromised packages.",
     "bumblebee": "Bumblebee scan: your npm, Bun and other packages against that list.",
-    "signatures": "Virus signatures: makes sure ClamAV's are current; its own update service keeps them so.",
+    "signatures": "Virus signatures: checks that ClamAV has them and how old they are (ClamAV's own update"
+      + " service keeps them current; this step never updates them).",
     "downloads-scan": "Virus scan of ~/Downloads: what is new there since the last scan.",
     "firmware": "Firmware lookup: firmware updates for this computer, from LVFS.",
     "virus-scan": "Virus scan of ~: your whole home folder, Downloads included. This can take a while."
@@ -1597,18 +1616,19 @@ function runLines(report, ids) {
 }
 
 // Each scan comes right after its list: the Bumblebee list before the
-// Bumblebee scan, the virus signatures before each virus scan.
+// Bumblebee scan, the check of the virus signatures before each virus scan.
 var DAILY_IDS = ["pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee-list", "bumblebee", "signatures",
                  "downloads-scan"]
 var WEEKLY_IDS = ["firmware", "signatures", "virus-scan"]
 var DONE_LINE = "The panel shows the progress, and you get a notification when it is done."
+var DAILY_DONE_LINE = "The panel shows the progress and the result."
 
 // Run daily check: light work, no password.
 function dailyConfirmation(report) {
   if (!report) return null
   return { title: "Run daily check", lines: ["Runs the daily check now, in this order:"]
     .concat(runLines(report, DAILY_IDS))
-    .concat([CARE_RUN_LINE, NO_PASSWORD_LINE + DONE_LINE]) }
+    .concat([CARE_RUN_LINE, NO_PASSWORD_LINE + DAILY_DONE_LINE]) }
 }
 
 // The daily and weekly checks never ask for a password: ClamAV's own update
@@ -1626,7 +1646,7 @@ function cardShowsSignatures(card) {
 function weeklyConfirmation(report) {
   if (!report) return null
   var lines = runLines(report, WEEKLY_IDS)
-  if (lines.length === 0) lines = ["Nothing to run yet. Install ClamUI (Detect tab) to add the scan of your home folder."]
+  if (lines.length === 0) lines = ["Nothing to run yet: the weekly check needs fwupd or ClamAV. Press Install on the Overview to add them."]
   return { title: "Run weekly check", lines: ["Runs the weekly check now, in this order:"]
     .concat(lines).concat([NO_PASSWORD_LINE + "You can close this panel. " + DONE_LINE]) }
 }
@@ -1796,7 +1816,7 @@ function parseFixResult(text) {
 // ---------------------------------------------------------------------------
 // Display
 
-// With Vigil's own weekly run switched off, the other apps' schedules are
+// With Vigil's background checks switched off, the other apps' schedules are
 // the only ones, so they are not "twice" and nothing is offered.
 function withSettings(report, autoUpdate) {
   if (!report || autoUpdate !== false) return report
@@ -1805,7 +1825,7 @@ function withSettings(report, autoUpdate) {
     if (c.id !== "other-schedules" || c.status !== "info") return c
     return Object.assign({}, c, {
       status: "na",
-      summary: "The Vigil weekly scan is off in its settings, so these schedules are your only ones.",
+      summary: "Vigil's background checks are off in its settings, so these schedules are your only ones.",
       fix: { kind: "none", action: "", label: "" }, howto: ""
     })
   })
@@ -1831,9 +1851,9 @@ function separateFromCleanAll(check) {
 }
 
 // Which group a row belongs to on its tab, in the order the tab shows them:
-// the rows that are always current, then what the daily check, the weekly check and the list
-// update bring in; on the Care tab, what Clean all covers, then what it
-// leaves alone.
+// the rows that are always current, then what the daily check and the weekly
+// check bring in (the virus scan row under both); on the Care tab, what Clean
+// all covers, then what it leaves alone.
 function rowGroup(c) {
   if (separateFromCleanAll(c)) return 100
   return CHECK_SCHEDULE.hasOwnProperty(c.id) ? CHECK_SCHEDULE[c.id] : 0
@@ -1994,7 +2014,7 @@ function tabCounts(report, tab) {
 // The one notification about the virus signatures, at most once a day while
 // ClamAV's own update service has let them get over two days old. Constant
 // words, no data.
-var SIGNATURES_NOTICE = "ClamAV's virus signatures have not updated in over two days. Open Vigil and press Run all to update them."
+var SIGNATURES_NOTICE = "ClamAV's virus signatures have not been updated in over two days. Open Vigil and press Run all to update them."
 
 var CARE_NOTE = "Care is separate from security: it never counts toward the score, and the checks above never clean anything. Vigil cleans only when you press a button on the Care tab."
 var CARE_TAB_NOTE = "Separate from security: not part of the score, the daily check or the weekly check. Nothing is cleaned until you press a button."
@@ -2038,7 +2058,7 @@ function tooltip(report, running) {
 if (typeof module !== "undefined") {
   module.exports = {
     plain: plain, parseReport: parseReport, reportVersion: reportVersion, reportProblem: reportProblem,
-    VERSION: VERSION, parseFixResult: parseFixResult, terminalScript: terminalScript,
+    VERSION: VERSION, parseFixResult: parseFixResult, MAX_PICK: MAX_PICK, terminalScript: terminalScript,
     terminalAction: terminalAction, actionPlan: actionPlan, runMode: runMode, stripSudo: stripSudo, launcherPath: launcherPath, canRun: canRun, checksFor: checksFor, withSettings: withSettings,
     countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
     tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
