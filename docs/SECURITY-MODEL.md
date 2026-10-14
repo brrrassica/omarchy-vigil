@@ -179,16 +179,16 @@ program it is running, process group and all, and starts no further step.
   `hasOwnProperty` and collected into `Object.create(null)` maps. A Last
   run line's note ("with the list from Oct 14") must match one fixed
   pattern, and whether it shows in red is a separate boolean.
-- The severity colours of list items (what a plugin's code can do, what
-  ClamAV found) are the theme's red (Omarchy's urgent colour) and its
+- The severity colors of list items (what a plugin's code can do, what
+  ClamAV found) are the theme's red (Omarchy's urgent color) and its
   yellow and green, which the helper reads from the theme's `colors.toml`
   as text (64 KiB cap; the panel reads no files itself): only a line of the
   form `yellow = "#rrggbb"` or `green = "#rrggbb"` (spacing and quotes
   optional) is used, and the
   report must carry `#rrggbb` or nothing; without them the panel uses the
-  theme's accent or text colour. The colour is a separate field per part of the
+  theme's accent or text color. The color is a separate field per part of the
   line, from a closed list (high, medium, low), and the panel shows the
-  parts only when they read exactly as the item's plain line, so colour
+  parts only when they read exactly as the item's plain line, so color
   never adds or changes a word.
 - Every `Text` sets `textFormat: Text.PlainText`. Strings passed to host
   components (tooltip, `PanelHero`) go through `Model.plain`, which removes

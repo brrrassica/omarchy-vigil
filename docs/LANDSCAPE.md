@@ -48,7 +48,7 @@ rather than rebuilding them:
 - **Outbound firewall / per-app connections**: [Omasnatch](https://github.com/weedwhitesandwine/omasnatch) (OpenSnitch), [Citadel](https://github.com/NeatOuk/citadel), [Snitch](https://github.com/ccdwyer/omarchy-snitch).
 - **USB**: [Omaguard](https://github.com/fcsonline/omaguard) and [USBGuard](https://github.com/Skymebr/omarchy-usbguard). Omarchy shipped approval for new USB and Thunderbolt devices briefly (edge and dev, #11874) and then removed it, uninstalling the USBGuard it had set up. Vigil leaves USB alone: a wrong USB policy can lock a beginner out of their own keyboard.
 - **Vulnerabilities**: [Cyber Sentry](https://github.com/SiWestworth/omarchy-cyber-sentry) (CISA KEV), [depaudit](https://github.com/thomasvez/omarchy-depaudit) (project dependencies), [CVE Watcher](https://github.com/Bottelet/omarchy-cve-watcher).
-- **Plugin auditing**: [Omavet](https://github.com/vonsensey/omavet) and [Plugin Guard](https://github.com/kmpeeduwee/omarchy-plugin-guard) scan your other plugins' code more deeply; Vigil lists what each plugin's code can do, coloured by how much it deserves a look.
+- **Plugin auditing**: [Omavet](https://github.com/vonsensey/omavet) and [Plugin Guard](https://github.com/kmpeeduwee/omarchy-plugin-guard) scan your other plugins' code more deeply; Vigil lists what each plugin's code can do, colored by how much it deserves a look.
 - **ClamAV on-access**: [ClamAV Monitor](https://github.com/szentesg/omarchy-clamav-monitor).
 - **Login with hardware keys**: [FIDO2 Key Suite](https://github.com/Erijl/omarchy-fido2-key-suite). Omarchy ships `omarchy-setup-security-fido2`, which Vigil uses.
 

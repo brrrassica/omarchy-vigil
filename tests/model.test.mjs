@@ -1408,7 +1408,7 @@ test("severity marks: checked, shown only when they read exactly as the line", (
   assert.deepEqual(pickReport("omarchy-plugins", "plugin", [base]).checks[0].items[0].marks, [])
 })
 
-test("theme colours in the report are #rrggbb or nothing", () => {
+test("theme colors in the report are #rrggbb or nothing", () => {
   assert.deepEqual(parse(report()).themeColors, { yellow: "", green: "" })
   assert.deepEqual(parse(report({ themeColors: { yellow: "#f9e2af", green: "" } })).themeColors,
                    { yellow: "#f9e2af", green: "" })

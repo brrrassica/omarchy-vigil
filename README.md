@@ -1,6 +1,6 @@
 # Vigil - Security Suite
 
-<img src="docs/lighthouse.svg" width="96" alt="Vigil's lighthouse, in 16 EGA colours">
+<img src="docs/lighthouse.svg" width="96" alt="Vigil's lighthouse, in 16 EGA colors">
 
 ![Vigil in a Turbo Pascal-style screen: the panel's Overview beside its program listing](preview.png)
 
@@ -73,12 +73,12 @@ omarchy-shell keasbeexd.vigil refresh
 
 The lighthouse is dim until the first check finishes, about eight seconds
 after login, and shows its beams while a check runs. It takes your
-theme's urgent colour when something needs fixing and its accent colour when
-only improvements are left; every colour in Vigil comes from your Omarchy
+theme's urgent color when something needs fixing and its accent color when
+only improvements are left; every color in Vigil comes from your Omarchy
 theme.
 
 Each pillar's tab says, right under it, what matters most there: how many
-findings to fix (in your theme's urgent colour), else to improve (accent),
+findings to fix (in your theme's urgent color), else to improve (accent),
 else notes, else "all good". Hover a tab for every count; hover **Overview**
 for the score. **Care** sits apart, past a divider: it is upkeep, not
 security (see [Care](#care)).
@@ -202,7 +202,7 @@ ran. There are no lines for the lists themselves: each scan fetched its own
 right before it ran. The rows in each tab are ordered the same way: the
 always-current rows first, then the rows of the daily check and the weekly
 check. Anything that failed, is out of date, or used a list that was over
-two days old when it ran is shown in your theme's red (Omarchy's `urgent` colour, which
+two days old when it ran is shown in your theme's red (Omarchy's `urgent` color, which
 every theme sets from its own `red`).
 
 Work done outside Vigil counts too: signatures updated by ClamAV's own
@@ -347,7 +347,7 @@ lower it. A finding you mark as reviewed stops counting.
 | Known vulnerabilities (arch-audit) | Runs arch-audit in each daily check (the row offers **Install** if it is missing). It uses the Arch security team's tracker and lists only the problems an update fixes. **Scan now** runs it straight away. |
 | AUR package status | Asks the AUR about your AUR packages: which have left the AUR, which are now in the official repositories, and which have no maintainer (most 2026 AUR attacks took over such orphans). Information only, since packages leave the AUR for ordinary reasons too. |
 | AUR and other foreign packages | Lists packages that did not come from the official repositories, each with its version, size, description and what the last AUR lookup said about it. Tick what you no longer use and press **Remove selected**; **Keep** what you trust (see [Lists you tick](#lists-you-tick)). |
-| Other Omarchy plugins | Lists your third-party plugins and what each one's code can do: network access, root through sudo or pkexec, shell commands, downloading and running code, compiled binaries. Vigil reads the files as text and never loads or runs them. Each capability is coloured by how much it deserves a look, in the theme's own colours: red for root, downloading and running code, and compiled binaries; yellow for network access, shell commands, and a linked development install Vigil did not scan; green when none were found. Tick a plugin you no longer use and press **Remove selected**; **Keep** one you have looked at and trust. |
+| Other Omarchy plugins | Lists your third-party plugins and what each one's code can do: network access, root through sudo or pkexec, shell commands, downloading and running code, compiled binaries. Vigil reads the files as text and never loads or runs them. Each capability is colored by how much it deserves a look, in the theme's own colors: red for root, downloading and running code, and compiled binaries; yellow for network access, shell commands, and a linked development install Vigil did not scan; green when none were found. Tick a plugin you no longer use and press **Remove selected**; **Keep** one you have looked at and trust. |
 
 ### Privacy
 

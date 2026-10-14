@@ -1302,9 +1302,9 @@ function validCheck(c) {
                                                              || it.name === "keasbeexd.vigil"))) return null
         name = it.name
       } else if (it.name !== undefined) return null
-      // The second line in parts, each with a level for its colour (high,
+      // The second line in parts, each with a level for its color (high,
       // medium, low). Shown only when the parts read exactly as that line,
-      // so colour never adds or changes a word; otherwise the plain line.
+      // so color never adds or changes a word; otherwise the plain line.
       var marks = []
       if (it.marks !== undefined) {
         if (!Array.isArray(it.marks) || it.marks.length > 8) return null
@@ -1742,7 +1742,7 @@ function parseReport(text) {
       apps.clamui = d.apps.clamui
     }
   }
-  // The theme's yellow and green for severity colours, as the helper read
+  // The theme's yellow and green for severity colors, as the helper read
   // them from its colors.toml: "#rrggbb" or "".
   var themeColors = { yellow: "", green: "" }
   if (d.themeColors !== undefined) {

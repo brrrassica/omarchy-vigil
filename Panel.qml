@@ -71,20 +71,20 @@ Panel {
 
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
-  // Every colour comes from the Omarchy theme: text, urgent (to fix), accent
+  // Every color comes from the Omarchy theme: text, urgent (to fix), accent
   // (to improve) and muted (secondary text, nothing to do).
   // Secondary text (the key hints, times, descriptions): the theme's text
-  // colour, darkened, as mouse-ctrl does. The theme's own "muted" colour is
+  // color, darkened, as mouse-ctrl does. The theme's own "muted" color is
   // close to the background in some themes, which hid this text.
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property color warnColor: Commons.Color.accent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  // Severity colours for the parts of a list item (what a plugin's code can
+  // Severity colors for the parts of a list item (what a plugin's code can
   // do, what ClamAV found): the theme's red (urgent), and its yellow and
   // green, which the helper reads from the theme's colors.toml. Every Omarchy
   // theme has them; without them, yellow falls back to the accent and green
-  // to the text colour.
+  // to the text color.
   readonly property color mediumColor: report && report.themeColors.yellow !== "" ? report.themeColors.yellow : warnColor
   readonly property color lowColor: report && report.themeColors.green !== "" ? report.themeColors.green : foreground
   function markColor(level) {
@@ -881,7 +881,7 @@ Panel {
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
         // A thin bar with square ends in a faint shade of the theme's text
-        // colour; brighter on hover and while dragging, gone when all fits.
+        // color; brighter on hover and while dragging, gone when all fits.
         ScrollBar.vertical: ScrollBar {
           id: vbar
           parent: panelFlick.parent
@@ -1799,7 +1799,7 @@ Panel {
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WrapAtWordBoundaryOrAnywhere
               }
-              // Or the same line in parts, each in its severity's colour.
+              // Or the same line in parts, each in its severity's color.
               Flow {
                 visible: itemRow.modelData.marks.length > 0
                 width: parent.width

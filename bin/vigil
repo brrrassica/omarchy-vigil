@@ -1561,8 +1561,8 @@ THEME_COLORS = (".local", "state", "omarchy", "current", "theme", "colors.toml")
 
 
 def theme_colors():
-    """The theme's yellow and green, for the panel's severity colours (red is
-    already Omarchy's urgent colour). Only a line that is exactly
+    """The theme's yellow and green, for the panel's severity colors (red is
+    already Omarchy's urgent color). Only a line that is exactly
     `name = "#rrggbb"` counts; the file is read as text, capped, through the
     theme link Omarchy keeps (current/theme)."""
     try:
@@ -1577,8 +1577,8 @@ def theme_colors():
 
 
 def add_marks(item, marks):
-    """The item's second line in parts, each with a level for its colour.
-    Only when the parts read exactly as that line, so colour never adds or
+    """The item's second line in parts, each with a level for its color.
+    Only when the parts read exactly as that line, so color never adds or
     changes a word."""
     lines = item["text"].split("\n")
     if marks and len(lines) == 2 and len(marks) <= 8 and all(m["level"] in MARK_LEVELS for m in marks) \
@@ -4267,7 +4267,7 @@ PLUGIN_CAPABILITIES = [
     ("downloads and runs code", PERSISTENCE_PATTERNS[0][0]),
 ]
 PLUGIN_CODE_SUFFIXES = (".qml", ".js", ".mjs", ".py", ".sh", ".bash", ".lua")
-# How much each capability deserves a look, for the colour the panel gives
+# How much each capability deserves a look, for the color the panel gives
 # it: high (the theme's red) can act as root or run code nobody reviewed;
 # medium (yellow) reaches the network or runs commands; low (green) is a
 # plugin where none of these were found.

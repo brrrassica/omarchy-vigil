@@ -3449,7 +3449,7 @@ def test_false_positives_and_reviews_carry_over(v):
 
 
 # --------------------------------------------------------------------------
-# Severity colours on list items
+# Severity colors on list items
 
 def test_plugin_capabilities_carry_their_severity(v):
     homefile(v, ".config/omarchy/plugins/acme.weather/manifest.json", json.dumps({"name": "Weather"}))
@@ -3470,7 +3470,7 @@ def test_marks_never_change_a_word(v):
     assert "marks" not in item
 
 
-def test_infected_files_colour_known_malware_red_and_guesses_yellow(v):
+def test_infected_files_color_known_malware_red_and_guesses_yellow(v):
     assert v.detection_level("Win.Trojan.Agent-1") == "high"
     assert v.detection_level("Heuristics.Encrypted.Zip") == "medium"
     scanned_with(v, ("Downloads/crack.exe", b"MZ bad"))
@@ -3478,7 +3478,7 @@ def test_infected_files_colour_known_malware_red_and_guesses_yellow(v):
     assert item["marks"] == [{"text": item["text"].split("\n")[1], "level": "high"}]
 
 
-def test_theme_colours_come_only_from_exact_lines(v):
+def test_theme_colors_come_only_from_exact_lines(v):
     assert v.theme_colors() == {"yellow": "", "green": ""}
     homefile(v, ".local/state/omarchy/current/theme/colors.toml",
              'red = "#f38ba8"\nbright_yellow = "#000000"\nyellow = "#f9e2af"\ngreen = "#a6e3a1; x"\n')

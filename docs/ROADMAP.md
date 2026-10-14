@@ -150,7 +150,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       a capability. Kept items are one list, `kept.json`, for every row (an
       earlier build's `kept-leftovers.json` is read and folded in). The
       four rows reviewed item by item with Keep lose Mark as reviewed.
-- [x] Severity colours, from the theme: each plugin capability in red
+- [x] Severity colors, from the theme: each plugin capability in red
       (root, downloads and runs code, compiled binaries), yellow (network,
       shell commands, a linked install that was not scanned) or green
       (none found); each infected file's signature in red (known malware)
@@ -283,8 +283,8 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 ## 0.28.2: readable hints on every theme
 
 - [x] Secondary text (the key hints, times, descriptions) uses the theme's
-      text colour darkened, as mouse-ctrl does, instead of the theme's
-      muted colour, which some themes set close to the background.
+      text color darkened, as mouse-ctrl does, instead of the theme's
+      muted color, which some themes set close to the background.
 
 ## 0.28.1: file names stay out of process lists
 
@@ -311,7 +311,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 - [x] Run daily check, Run weekly check, Run update check and Run all
       replace Full scan and Update sources. Run all does not scan
       ~/Downloads twice. Each button restarts its own countdown.
-- [x] The scroll bar has its own lane, in the theme's colours.
+- [x] The scroll bar has its own lane, in the theme's colors.
 
 ## 0.24: daily and weekly
 
@@ -462,7 +462,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       the whole home folder, a Bumblebee rescan, the password check, every
       setting; a notification says when it is done.
 - [x] Rows with nothing to do are dimmed in the pillar tabs.
-- [x] Every colour comes from the Omarchy theme (urgent, accent, muted,
+- [x] Every color comes from the Omarchy theme (urgent, accent, muted,
       text), the bar shield included; the scroll bar is themed and has its
       own gutter, so it no longer covers text.
 
@@ -531,7 +531,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       Omarchy's own small-caps section label.
 - [x] Each tab opens with its question in bold, then what it covers in dim
       text. Pillar names and finding titles are bold; problem counts are
-      coloured; "Reviewed on" and status messages are in italics.
+      colored; "Reviewed on" and status messages are in italics.
 - [x] An open finding labels its explanation and details ("Why it matters",
       "Details").
 
