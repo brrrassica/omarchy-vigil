@@ -429,11 +429,13 @@ say where they connect before they run.
   to walk within the limit is treated as in use.
 - Each leftover is named to the panel by an id: 16 hex digits of the
   SHA-256 of its place and name. File names never reach a command line.
-  The verbs are `vigil keep|unkeep <id>` (Vigil's notes in
-  `kept-leftovers.json`, nothing else) and `vigil trash <id>...` (at most
-  150 distinct ids, each checked against the pattern). The panel asks
-  first, on a card that lists every item, and sends exactly the ids that
-  card showed. The helper runs the whole check again and moves only ids it
+  The verbs are `vigil keep|unkeep <id>...` (Vigil's notes in
+  `kept-leftovers.json`, nothing else) and `vigil trash <id>...`, each
+  taking at most 150 distinct ids, each checked against the pattern on both
+  sides. For trash the panel asks first, on a card that lists every ticked
+  item, and sends exactly the ids that card showed (the card's action is
+  that id list, and Run accepts it only if every id is still listed and not
+  kept). The helper runs the whole check again and moves only ids it
   still lists and you have not kept, so something reinstalled or kept in
   the meantime stays put.
 - Moving to the trash follows the freedesktop.org trash layout, as a file

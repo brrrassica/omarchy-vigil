@@ -200,6 +200,13 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       there was nothing new to scan. Bumblebee no longer names its list,
       since it downloads the newest right before every scan; only a scan
       that fell back to the last good list says which.
+- [x] Leftovers are ticked, not handled one button at a time: below the
+      list, **Trash** and **Keep** act on every item not kept (Trash all,
+      Keep all) or, once you tick some, on just those (Trash selected,
+      Keep selected). Any confirmation card now scrolls the panel to the
+      top, where it opens, wherever the button was.
+- [x] System logs under 500 MB count as tidy: no cleanup offered, and not
+      part of Clean all.
 - [ ] Later: show launchers that point to a program by name rather than
       by path, once there is a reliable way to know the PATH your session
       uses.

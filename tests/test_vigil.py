@@ -3100,3 +3100,26 @@ def test_the_downloads_scan_says_which_signatures_even_with_nothing_new(v):
     v.refresh_due_feeds(daily_only=True)                                   # no new downloads
     row = {s["id"]: s for s in v.source_status()}["downloads-scan"]
     assert row["note"] == "with signatures from " + time.strftime("%b %-d") and row["old"] is False
+
+
+def test_system_logs_are_tidy_under_500_mb(v):
+    v.TRUSTED.add(v.ROOT + "/usr/bin/journalctl")
+    for size, status in (("172.6M", "pass"), ("499.9M", "pass"), ("512.0K", "pass"), ("500.0M", "info"),
+                         ("1.2G", "info")):
+        v.COMMANDS[("/usr/bin/journalctl", "--disk-usage")] = (
+            0, "Archived and active journals take up %s in the file system." % size)
+        c = v.check_journal()
+        assert c["status"] == status and c["summary"] == "Logs take up %s." % size, size
+        assert (c["fix"]["action"] == "clean-journal") == (status == "info"), size   # no cleanup, not in Clean all
+
+
+def test_keep_and_stop_keeping_take_several_at_once(v, capsys):
+    leftover_home(v)
+    ids = [i["id"] for i in v.check_leftovers()["items"]][:3]
+    assert v.set_kept(ids, True)["message"] == "Kept 3 items. They stay where they are and Vigil stops counting them."
+    assert sum(i["kept"] for i in v.check_leftovers()["items"]) == 3
+    assert v.set_kept(ids[:2], False)["message"] == "Counting 2 items again."
+    assert v.main(["vigil", "keep"] + ids) == 0
+    assert v.main(["vigil", "keep", ids[0], ids[0]]) == 2                  # each id once
+    assert v.set_kept(["0" * 16], True)["ok"] is False                      # not on the list
+

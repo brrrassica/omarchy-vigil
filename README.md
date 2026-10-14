@@ -323,7 +323,7 @@ groups:
 | Trash | Files you deleted in the file manager | Emptied without root, directly in its standard folders |
 | Application caches | Files apps keep in `~/.cache` to start faster | **Clear unused** (no root), see below |
 | Package cache | Packages pacman downloaded | `paccache -rk2` and `paccache -ruk0` (asks for your password), see below |
-| System logs | The system journal | `journalctl --vacuum-time=2weeks` (asks for your password) |
+| System logs | The system journal; under 500 MB it counts as tidy | Over 500 MB: `journalctl --vacuum-time=2weeks` (asks for your password) |
 
 **Not in Clean all**, at the bottom of the tab under its own heading:
 removing packages, or settings you may want back, deserves a look, so you
@@ -332,7 +332,7 @@ review these one by one.
 | Row | What it measures | Cleanup |
 |---|---|---|
 | Orphaned packages | Packages nothing needs any more | `omarchy-update-orphan-pkgs`, which asks before removing anything |
-| Leftover app data | Settings and data that apps you removed left in your home folder | **Move to trash** or **Keep**, one item at a time (no root), see below |
+| Leftover app data | Settings and data that apps you removed left in your home folder | Tick items, then **Trash** or **Keep** them (no root), see below |
 
 **Application caches.** A file in `~/.cache` counts as unused when no app
 has read or changed it for a week, whether or not that app is open now.
@@ -366,19 +366,22 @@ which usually come from a dotfile manager.
 | `~/.local/share/applications` | the launcher starts a program that is gone, or a Flatpak that is no longer installed |
 
 The list is information: it never lowers the score or notifies. Open the
-row and go through it item by item:
+row and tick the items you want to act on (the box, or the item's text),
+then use the buttons below the list. With nothing ticked they act on every
+item not kept (**Trash all**, **Keep all**); once you tick some, on just
+those (**Trash selected**, **Keep selected**, with how many).
 
-- **Keep** leaves it where it is: settings you want back if you install the
-  app again, or something Vigil cannot know you use. It stays in the list,
-  dimmed and marked "(kept)", and is no longer counted. **Stop keeping**
-  counts it again. Both only change Vigil's own notes, so they do not ask.
-- **Move to trash** asks first, then moves it to the trash, the same
-  trash your file manager uses. Nothing is deleted: open the trash in your
-  file manager and choose **Restore** to put it back. Emptying the trash
-  deletes it for good, and so do **Empty** on the Trash row and
-  **Clean all**, which empty the trash too.
-- **Move all to trash** does the same for every item not kept, after one
-  confirmation that lists them.
+- **Trash** asks first, on a card at the top of the panel that lists each
+  item, then moves them to the trash, the same trash your file manager
+  uses. Nothing is deleted: open the trash in your file manager and choose
+  **Restore** to put one back. Emptying the trash deletes it for good, and
+  so do **Empty** on the Trash row and **Clean all**, which empty the trash
+  too.
+- **Keep** leaves them where they are: settings you want back if you
+  install the app again, or something Vigil cannot know you use. They stay
+  in the list, dimmed and marked "(kept)", and are no longer counted.
+  **Stop keeping** on a kept item counts it again. Keeping only changes
+  Vigil's own notes, so it does not ask.
 
 Just before it moves anything, Vigil looks again: an item that something
 now uses, or that you kept, stays where it is. Leftovers are never part of
@@ -421,8 +424,8 @@ The panel always says which kind an action is:
    making `~/.ssh` and `~/.gnupg` private, the opt-out file, the thumbnail
    cache, the trash and unused application caches. Each is a fixed action name; nothing from a file or
    from the report reaches it. Leftover app data is kept or moved to the
-   trash the same way, named only by an id (`vigil keep <id>`, `vigil trash
-   <id>...`).
+   trash the same way, named only by an id (`vigil keep <id>...`, `vigil
+   trash <id>...`).
 3. **Script actions** run one of the constant scripts in
    [`Model.js`](Model.js) without a terminal. The panel first shows what it
    will do in plain words, with the exact commands under the **Run** button

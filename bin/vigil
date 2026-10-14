@@ -4696,14 +4696,16 @@ def check_leftovers():
     return out
 
 
-def set_kept(lid, on):
-    """`vigil keep <id>` / `vigil unkeep <id>`: only Vigil's own notes change."""
-    if not re.fullmatch(r"[0-9a-f]{16}", lid):
+def set_kept(lids, on):
+    """`vigil keep <id>...` / `vigil unkeep <id>...`: only Vigil's own notes change.
+    Keeping takes only ids the check lists right now."""
+    lids = [lids] if isinstance(lids, str) else list(lids)
+    if not lids or not all(re.fullmatch(r"[0-9a-f]{16}", x) for x in lids):
         return {"ok": False, "action": "", "message": "Unknown item."}
-    f = None
+    listed = {x["id"]: x for x in leftovers() or []} if on else {}
     if on:
-        f = next((x for x in leftovers() or [] if x["id"] == lid), None)
-        if f is None:
+        lids = [x for x in lids if x in listed]
+        if not lids:
             return {"ok": False, "action": "", "message": "That item is no longer on the list."}
     try:
         dirfd = _state_dir()
@@ -4711,15 +4713,21 @@ def set_kept(lid, on):
         return {"ok": False, "action": "", "message": "Could not open the Vigil state folder."}
     try:
         _lock(dirfd)
-        current = [e for e in kept_leftovers().values() if e["id"] != lid]
+        current = [e for e in kept_leftovers().values() if e["id"] not in lids]
         if on:
-            current.append({"id": lid, "shown": clean(f["shown"], 200), "at": time.strftime("%Y-%m-%d")})
+            current += [{"id": x, "shown": clean(listed[x]["shown"], 200), "at": time.strftime("%Y-%m-%d")}
+                        for x in lids]
         write_atomic(dirfd, KEPT_FILE, json.dumps({"schema": SCHEMA, "kept": current[-KEPT_MAX:]},
                                                   separators=(",", ":")).encode())
     finally:
         os.close(dirfd)
-    return {"ok": True, "action": "", "message": "Kept. It stays where it is and Vigil stops counting it."
-            if on else "Counting it again."}
+    n = len(lids)
+    if on:
+        msg = ("Kept. It stays where it is and Vigil stops counting it." if n == 1 else
+               "Kept %d items. They stay where they are and Vigil stops counting them." % n)
+    else:
+        msg = "Counting it again." if n == 1 else "Counting %d items again." % n
+    return {"ok": True, "action": "", "message": msg}
 
 
 def _trash_url(path):
@@ -4904,8 +4912,23 @@ def check_journal():
     m = re.search(r"take up ([0-9.]+[KMGT]?B?)", out or "")
     if rc is None or not m:
         return result(cid, cat, title, "unknown", "Could not read the journal size.", why, weight=0)
+    size = _journal_bytes(m.group(1))
+    if size is not None and size < JOURNAL_TIDY_BYTES:
+        return result(cid, cat, title, "pass", "Logs take up %s." % clean(m.group(1), 20), why, weight=0)
     return result(cid, cat, title, "info", "Logs take up %s." % clean(m.group(1), 20), why,
                   fix=fix("terminal", "clean-journal", "Keep two weeks"), weight=0)
+
+
+# Under this the journal is tidy enough: no cleanup offered, not in Clean all.
+JOURNAL_TIDY_BYTES = 500 * 1024 * 1024
+
+
+def _journal_bytes(text):
+    """Bytes in journalctl's size ("172.6M", "1.2G", "512.0K"), or None."""
+    m = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([KMGT]?)B?", text)
+    if not m:
+        return None
+    return int(float(m.group(1)) * 1024 ** " KMGT".index(m.group(2) or " "))
 
 
 # ---------------------------------------------------------------------------
@@ -5936,8 +5959,9 @@ def main(argv):
     if len(argv) == 3 and argv[1] in ("ignore", "unignore") and re.fullmatch(r"[0-9a-f]{16}", argv[2]):
         emit(set_ignored(argv[2], argv[1] == "ignore"))
         return 0
-    if len(argv) == 3 and argv[1] in ("keep", "unkeep") and re.fullmatch(r"[0-9a-f]{16}", argv[2]):
-        emit(set_kept(argv[2], argv[1] == "keep"))
+    if 3 <= len(argv) <= 2 + LEFTOVER_MAX and argv[1] in ("keep", "unkeep") \
+            and len(set(argv[2:])) == len(argv) - 2 and all(re.fullmatch(r"[0-9a-f]{16}", a) for a in argv[2:]):
+        emit(set_kept(argv[2:], argv[1] == "keep"))
         return 0
     if 3 <= len(argv) <= 2 + LEFTOVER_MAX and argv[1] == "trash" and len(set(argv[2:])) == len(argv) - 2 \
             and all(re.fullmatch(r"[0-9a-f]{16}", a) for a in argv[2:]):
@@ -5977,7 +6001,7 @@ def main(argv):
     if len(argv) == 2 and argv[1] == "version":
         emit({"version": VERSION})
         return 0
-    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection> | vigil keep|unkeep <leftover> | vigil trash <leftover>... | vigil refresh-feeds [--force|--daily|--weekly|--full|--scan] [--signatures] | vigil running | vigil stop | vigil version\n")
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection> | vigil keep|unkeep <leftover>... | vigil trash <leftover>... | vigil refresh-feeds [--force|--daily|--weekly|--full|--scan] [--signatures] | vigil running | vigil stop | vigil version\n")
     return 2
 
 

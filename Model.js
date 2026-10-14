@@ -183,7 +183,6 @@ function confirmationText(kind, id, report) {
   if (kind === "clean-all") return cleanAllConfirmation(report)
   if (kind === "ignore") return ignoreConfirmation(id, report)
   if (kind === "trash") return trashConfirmation(id, report)
-  if (kind === "trash-all") return trashAllConfirmation(report)
   if (kind === "full-scan") return fullScanConfirmation(report)
   if (kind === "daily-check") return dailyConfirmation(report)
   if (kind === "weekly-check") return weeklyConfirmation(report)
@@ -233,21 +232,33 @@ var TRASH_LINES = [
   "If you install the app again, it starts with fresh settings unless you restore this first.",
   "Technical: renames it into ~/.local/share/Trash/files and records where it came from in ~/.local/share/Trash/info, the freedesktop.org trash every file manager reads. Nothing is copied or deleted. Vigil checks again that no installed app uses it before it moves anything."]
 
-function trashConfirmation(id, report) {
-  var item = leftoverItem(report, id)
-  if (!item || item.kept) return null
-  return { title: "Move this to the trash?", lines: [item.text].concat(TRASH_LINES) }
+// The leftovers a list of ids names ("id,id,..." as the card's action), or
+// null unless every one is a listed leftover you have not kept, at most 150.
+function leftoverIdList(report, ids) {
+  if (typeof ids !== "string" || ids.length > 150 * 17) return null
+  var list = ids.split(",")
+  if (list.length === 0 || list.length > 150) return null
+  var seen = Object.create(null)
+  for (var i = 0; i < list.length; i++) {
+    var item = leftoverItem(report, list[i])
+    if (!item || item.kept || seen[list[i]]) return null
+    seen[list[i]] = true
+  }
+  return list
 }
 
-function trashAllConfirmation(report) {
-  var ids = leftoverTrashIds(report)
-  if (ids.length === 0) return null
+// The card for Trash selected and Trash all: every item it moves, then what
+// the trash means.
+function trashConfirmation(ids, report) {
+  var list = leftoverIdList(report, ids)
+  if (!list) return null
+  if (list.length === 1)
+    return { title: "Move this to the trash?", lines: [leftoverItem(report, list[0]).text].concat(TRASH_LINES) }
   var lines = []
-  for (var i = 0; i < ids.length && i < 40; i++) lines.push(leftoverItem(report, ids[i]).text)
-  if (ids.length > 40) lines.push("… and " + (ids.length - 40) + " more")
-  lines.push("Items you marked Keep stay where they are.")
-  return { title: "Move " + ids.length + (ids.length === 1 ? " item" : " items") + " to the trash?",
-           lines: lines.concat(TRASH_LINES) }
+  for (var i = 0; i < list.length && i < 40; i++) lines.push(leftoverItem(report, list[i]).text)
+  if (list.length > 40) lines.push("… and " + (list.length - 40) + " more")
+  lines.push("Everything else on the list stays where it is.")
+  return { title: "Move " + list.length + " items to the trash?", lines: lines.concat(TRASH_LINES) }
 }
 
 function ignoreConfirmation(id, report) {
@@ -1851,7 +1862,7 @@ if (typeof module !== "undefined") {
     BUMBLEBEE_INSTALL: BUMBLEBEE_INSTALL, BUMBLEBEE_VERSION: BUMBLEBEE_VERSION,
     SIGNATURES_SCRIPT: SIGNATURES_SCRIPT, NO_PASSWORD_STEP: NO_PASSWORD_STEP,
     SOURCE_IDS: SOURCE_IDS, DAILY_IDS: DAILY_IDS, WEEKLY_IDS: WEEKLY_IDS, cardShowsSignatures: cardShowsSignatures,
-    parseProgress: parseProgress, parseRunning: parseRunning, detectionItem: detectionItem, leftoverItem: leftoverItem, leftoverTrashIds: leftoverTrashIds, actionStage: actionStage, actionProgress: actionProgress,
+    parseProgress: parseProgress, parseRunning: parseRunning, detectionItem: detectionItem, leftoverItem: leftoverItem, leftoverIdList: leftoverIdList, leftoverTrashIds: leftoverTrashIds, actionStage: actionStage, actionProgress: actionProgress,
     actionOutputText: actionOutputText, progressText: progressText, lastRunRows: lastRunRows, missingLabel: missingLabel,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,
     SYSCTL_LINES: SYSCTL_LINES

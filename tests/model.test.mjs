@@ -809,7 +809,7 @@ function leftoverReport(items) {
     title: "Leftover app data", fix: { kind: "docs", action: "arch-xdg", label: "Learn more" }, items })] }))
 }
 
-test("leftovers each carry Move to trash and Keep, and the cards say it goes to the trash", () => {
+test("ticked leftovers go to the trash on one card that lists each, and says it is the trash", () => {
   const items = [
     { id: "0123456789abcdef", kind: "leftover", text: "~/.config/Slack: 210.0 MB, no installed app uses it", kept: false, ignored: false },
     { id: "fedcba9876543210", kind: "leftover", text: "~/.var/app/com.spotify.Client: 1.2 GB, data of a Flatpak app that is no longer installed", kept: true, ignored: false },
@@ -828,12 +828,17 @@ test("leftovers each carry Move to trash and Keep, and the cards say it goes to 
   assert.equal(M.confirmation("trash", "ffffffffffffffff", r), null)        // not in the report
   assert.equal(M.confirmation("ignore", "0123456789abcdef", r), null)       // a leftover is not a detection
 
-  const all = M.confirmation("trash-all", "leftovers", r)
-  assert.equal(all.title, "Move 2 items to the trash?")
-  assert.deepEqual(all.lines.slice(0, 2), [items[0].text, items[2].text])
-  assert.ok(all.lines.some(l => /marked Keep stay/.test(l)))
-  assert.ok(!all.lines.some(l => /Spotify|spotify/.test(l)))
-  assert.equal(M.confirmation("trash-all", "leftovers", leftoverReport([items[1]])), null)
+  // Several ticked (or Trash all): one card listing each one.
+  const two = M.confirmation("trash", "0123456789abcdef,00000000000000aa", r)
+  assert.equal(two.title, "Move 2 items to the trash?")
+  assert.deepEqual(two.lines.slice(0, 2), [items[0].text, items[2].text])
+  assert.ok(two.lines.some(l => /Everything else on the list stays/.test(l)))
+  assert.ok(!two.lines.some(l => /spotify/i.test(l)))
+  // Any id that is kept, unknown, repeated or malformed refuses the whole card.
+  for (const bad of ["0123456789abcdef,fedcba9876543210", "0123456789abcdef,ffffffffffffffff",
+                     "0123456789abcdef,0123456789abcdef", "0123456789abcdef,", "../x", ""])
+    assert.equal(M.confirmation("trash", bad, r), null, bad)
+  assert.deepEqual(M.leftoverIdList(r, "00000000000000aa"), ["00000000000000aa"])
   assert.equal(M.docsUrl("arch-xdg"), "https://wiki.archlinux.org/title/XDG_Base_Directory")
 })
 
