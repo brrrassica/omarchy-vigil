@@ -846,14 +846,14 @@ test("leftover items that do not match the shape reject the report", () => {
     assert.equal(leftoverReport([bad]), null, JSON.stringify(bad))
 })
 
-test("each tab's caption shows its most urgent count; Overview sums the security pillars, never Care", () => {
+test("each pillar tab's caption shows its most urgent count; the Overview has none", () => {
   const c = (category, status, extra = {}) => check(Object.assign({ id: category + "-" + status + Math.random().toString(16).slice(2, 8),
     category, status, weight: 0, fix: { kind: "none", action: "", label: "" } }, extra))
   const r = parse(report({ checks: [c("harden", "fail", { weight: 3 }), c("harden", "warn", { weight: 1 }), c("detect", "info"),
     c("supply", "warn", { weight: 1 }), c("supply", "info"), c("privacy", "pass"), c("care", "warn"), c("care", "info"),
     c("care", "pass"), c("privacy", "warn", { weight: 1, dismissible: true, dismissed: true })] }))
   const cap = (tab) => { const x = M.tabCaption(r, tab); return [x.count, x.label, x.tone] }
-  assert.deepEqual(cap("overview"), ["1", "to fix", "urgent"])
+  assert.deepEqual(cap("overview"), ["", "", "dim"])                       // no caption; its tooltip has the score
   assert.deepEqual(cap("harden"), ["1", "to fix", "urgent"])
   assert.deepEqual(cap("detect"), ["1", "note", "dim"])
   assert.deepEqual(cap("supply"), ["1", "to improve", "warn"])
@@ -861,11 +861,11 @@ test("each tab's caption shows its most urgent count; Overview sums the security
   assert.deepEqual(cap("care"), ["2", "to tidy", "warn"])                 // Care never says "to fix"
   assert.equal(M.tabCaption(r, "harden").text, "1 to fix")
   assert.equal(M.tabCaption(null, "harden").text, "")
-  assert.equal(M.tabCounts(r, "overview"), "Security: 1 to fix \u00b7 2 to improve \u00b7 2 notes")
+  assert.equal(M.tabCounts(r, "overview"), "Score 70/100")
   assert.equal(M.tabCounts(r, "care"), "1 to improve \u00b7 1 note")
   const tidy = parse(report({ checks: [c("care", "pass"), c("harden", "info")] }))
   assert.deepEqual([M.tabCaption(tidy, "care").count, M.tabCaption(tidy, "care").label], ["\u2713", "tidy"])
-  assert.deepEqual([M.tabCaption(tidy, "overview").count, M.tabCaption(tidy, "overview").label], ["1", "note"])
+  assert.equal(M.tabCaption(tidy, "overview").text, "")
 })
 
 test("the Overview, the Care tab and the run cards say Care is never part of a run", () => {

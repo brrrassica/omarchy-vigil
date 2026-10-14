@@ -1613,7 +1613,9 @@ function withSettings(report, autoUpdate) {
 
 // The run each tab row belongs to: 1 daily check, 2 weekly check. Every
 // other row is always current (0): read again whenever you open Vigil.
-var CHECK_SCHEDULE = { "virus-scan": 1, "updates": 1, "flatpak-apps": 1, "bumblebee": 1, "firmware": 2,
+// The virus scan row holds both scans, the daily one of new downloads and the
+// weekly one of your home folder, so it has a group of its own between them.
+var CHECK_SCHEDULE = { "virus-scan": 1.5, "updates": 1, "flatpak-apps": 1, "bumblebee": 1, "firmware": 2,
                        "scanner-arch-audit": 1, "malicious-packages": 1, "aur-status": 1 }
 
 // Care rows that are never part of Clean all: removing packages, or settings
@@ -1649,7 +1651,8 @@ function currentNote(refreshMinutes) {
   return "Read again from your settings and files whenever you open Vigil, after every fix, and " + every + "."
 }
 
-var GROUP_HEADINGS = { 0: CURRENT_HEADING, 1: "DAILY CHECK", 2: "WEEKLY CHECK", 100: CARE_SEPARATE_HEADING }
+var GROUP_HEADINGS = { 0: CURRENT_HEADING, 1: "DAILY CHECK", 1.5: "DAILY AND WEEKLY CHECKS", 2: "WEEKLY CHECK",
+                       100: CARE_SEPARATE_HEADING }
 
 // The heading above a row, or "": at the start of each group, on tabs that
 // have more than one. The Care tab names its groups for Clean all.
@@ -1755,7 +1758,10 @@ function tabCaption(report, tab) {
     var tidy = warn + countBy(report, "care", "info") + countBy(report, "care", "fail")
     return tidy ? caption(tidy, "to tidy", warn ? "warn" : "dim") : caption("\u2713", "tidy", "dim")
   }
-  var cats = tab === "overview" ? SECURITY_PILLARS : (inList(tab, SECURITY_PILLARS) ? [tab] : [])
+  // The Overview lists no findings of its own: no caption (its tooltip has
+  // the score).
+  if (tab === "overview") return { count: "", label: "", tone: "dim", text: "" }
+  var cats = inList(tab, SECURITY_PILLARS) ? [tab] : []
   if (cats.length === 0) return { count: "", label: "", tone: "dim", text: "" }
   var f = 0, w = 0, n = 0
   for (var i = 0; i < cats.length; i++) {
@@ -1772,7 +1778,8 @@ function tabCaption(report, tab) {
 // Every count of a tab, for its tooltip and the top of its page.
 function tabCounts(report, tab) {
   if (!report) return ""
-  var cats = tab === "overview" ? SECURITY_PILLARS : (inList(tab, SECURITY_PILLARS.concat(["care"])) ? [tab] : [])
+  if (tab === "overview") return "Score " + report.score + "/100"
+  var cats = inList(tab, SECURITY_PILLARS.concat(["care"])) ? [tab] : []
   if (cats.length === 0) return ""
   var f = 0, w = 0, n = 0
   for (var i = 0; i < cats.length; i++) {
@@ -1780,7 +1787,7 @@ function tabCounts(report, tab) {
     w += countBy(report, cats[i], "warn")
     n += countBy(report, cats[i], "info")
   }
-  return (tab === "overview" ? "Security: " : "") + pillarCounts(f, w, n)
+  return pillarCounts(f, w, n)
 }
 
 // The one notification about the virus signatures, at most once a day while

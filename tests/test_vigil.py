@@ -1333,7 +1333,7 @@ def test_virus_scan_states(v):
     assert v.run_fix("virus-scan-now")["ok"]
     c = v.check_virus_scan()
     assert c["status"] == "fail" and "~/Documents/x.exe: Win.Test.EICAR_HDB-1" in c["detail"]
-    assert c["summary"].startswith("1 infected file in your home folder")
+    assert c["summary"].startswith("1 infected file. ~ scanned ") and "(weekly check)" in c["summary"]
     v.TRUSTED.add(v.ROOT + "/usr/bin/clamui")
     assert v.check_virus_scan()["fix"]["kind"] == "app"                   # hand off quarantine to ClamUI
     clamscan_ok(v)
@@ -1517,12 +1517,13 @@ def test_a_scan_that_used_old_signatures_says_so(v, monkeypatch):
     row = {s["id"]: s for s in v.source_status()}["virus-scan"]
     assert row["note"].startswith("with signatures from ") and row["old"] is True      # red in the panel
     assert ", with signatures from " in v.check_virus_scan()["summary"]
-    # Current signatures: the line still says which ones it used, but not in red.
+    # Current signatures: the Last run line still says which ones it used, but
+    # not in red, and the row does not mention them.
     fresh_signatures(v)
     v.refresh_due_feeds(weekly_only=True)
     row = {s["id"]: s for s in v.source_status()}["virus-scan"]
     assert row["note"] == "with signatures from " + time.strftime("%b %-d") and row["old"] is False
-    assert ", with signatures from " in v.check_virus_scan()["summary"]
+    assert "with signatures from" not in v.check_virus_scan()["summary"]
     # Judged when the scan ran, not now: a week-old scan with fresh signatures stays black.
     meta = Path(v.home_path(*v.STATE_DIR, "virus-scan.json"))
     data = json.loads(meta.read_text())
@@ -2285,7 +2286,7 @@ def test_ignore_one_detection_keeps_the_others(v):
     assert all(len(i) == 16 for i in ids) and ids[0] != ids[1]
     assert v.set_ignored(ids[0], True)["message"].startswith("Marked as a false positive.")
     c = v.check_virus_scan()
-    assert c["status"] == "fail" and c["summary"].startswith("1 infected file in") and "1 marked as a false positive" in c["summary"]
+    assert c["status"] == "fail" and c["summary"].startswith("1 infected file.") and "1 marked as a false positive" in c["summary"]
     assert "dx11.dll" not in c["detail"] and "crack.exe" in c["detail"]
     assert [i["ignored"] for i in c["items"]] == [True, False]
     assert v.feed_findings()[0].startswith("1 infected file in")
@@ -2816,7 +2817,8 @@ def test_a_failed_list_download_scans_with_the_last_good_list(v, monkeypatch):
         raise v.Refused("the list could not be downloaded")
     monkeypatch.setattr(v, "refresh_bumblebee_list", fail)
     monkeypatch.setattr(v, "refresh_bumblebee", lambda: scanned.append(1) or v.save_feed(
-        "bumblebee", {"findings": [], "status": "complete", "used": ["2026-10-01", "08:00"]}))
+        "bumblebee", {"findings": [], "status": "complete", "used": ["2026-10-01", "08:00"],
+                      "fallback": v.LIST_FALLBACK["bumblebee"]}))
     res = v.refresh_due_feeds(daily_only=True)
     assert scanned and "used the one from 2026-10-01" in res["message"]
     row = {s["id"]: s for s in v.source_status()}["bumblebee"]
@@ -3076,3 +3078,25 @@ def test_trash_never_moves_the_folders_that_hold_the_trash(v):
         with pytest.raises(v.Refused):
             v.move_to_trash(parts, name)
     assert Path(v.HOME, ".local/share/Trash/files/keep").exists()
+
+
+def test_bumblebee_names_its_list_only_when_the_download_failed(v, monkeypatch):
+    """The list is downloaded right before every scan, so it is always the
+    newest and not mentioned; only a scan that fell back to the last good list
+    says which one it used."""
+    bee_installed(v)
+    put(Path(v.HOME, ".local/state/omarchy-vigil", v.BUMBLEBEE_CATALOG), "{}")
+    v.COMMANDS[(v.BUMBLEBEE_BIN, "scan", "--profile", "baseline", "--exposure-catalog",
+                v.home_path(*v.STATE_DIR, v.BUMBLEBEE_CATALOG), "--findings-only", "--output", "stdout",
+                "--max-duration", "5m")] = (0, '{"record_type": "scan_summary", "status": "complete"}\n')
+    monkeypatch.setattr(v, "refresh_bumblebee_list", lambda: v.save_feed("bumblebee-list", {}))
+    v.refresh_due_feeds(daily_only=True)
+    assert {s["id"]: s for s in v.source_status()}["bumblebee"]["note"] == ""
+    assert "with the list" not in v.check_bumblebee()["summary"]
+
+
+def test_the_downloads_scan_says_which_signatures_even_with_nothing_new(v):
+    clamscan_ok(v)
+    v.refresh_due_feeds(daily_only=True)                                   # no new downloads
+    row = {s["id"]: s for s in v.source_status()}["downloads-scan"]
+    assert row["note"] == "with signatures from " + time.strftime("%b %-d") and row["old"] is False

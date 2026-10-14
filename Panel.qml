@@ -779,8 +779,9 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    // 440 for the content plus the 22-unit scroll bar lane.
-    contentWidth: panel.fittedContentWidth(Style.space(462))
+    // 500 for the content (room for six tabs with their captions at larger
+    // fonts) plus the 22-unit scroll bar lane.
+    contentWidth: panel.fittedContentWidth(Style.space(522))
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(640))
 
     PanelKeyCatcher {
@@ -1426,9 +1427,9 @@ Panel {
       selected: root.tab === cell.tab
       bordered: true
       foreground: root.foreground
-      background: Commons.Color.background
       fontFamily: root.fontFamily
       fontSize: Style.font.bodySmall
+      horizontalPadding: Style.space(8)
       onClicked: root.selectTab(cell.tab)
     }
     Text {

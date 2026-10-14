@@ -75,11 +75,11 @@ theme's urgent colour when something needs fixing and its accent colour when
 only improvements are left; every colour in Vigil comes from your Omarchy
 theme.
 
-Each tab at the top of the panel says, right under it, what matters most
-there: how many findings to fix (in your theme's urgent colour), else to
-improve (accent), else notes, else "all good". Hover a tab for every count.
-Under **Overview** is the total of the four security pillars. **Care** sits
-apart, past a divider: it is upkeep, not security (see [Care](#care)).
+Each pillar's tab says, right under it, what matters most there: how many
+findings to fix (in your theme's urgent colour), else to improve (accent),
+else notes, else "all good". Hover a tab for every count; hover **Overview**
+for the score. **Care** sits apart, past a divider: it is upkeep, not
+security (see [Care](#care)).
 
 The **Overview** tab shows your score out of 100, the run buttons under
 **Run now** with when each check next runs by itself, a line on Care, and the
@@ -88,7 +88,9 @@ other tabs it shows the score.
 
 In the pillar tabs, rows are grouped under headings that say which check
 brings them in: **Always current** (see below), then **Daily check** and
-**Weekly check**. A tab
+**Weekly check**. The virus scan row on the Detect tab holds both virus
+scans (new downloads daily, your home folder weekly), so it sits under
+**Daily and weekly checks** and names each scan with its run. A tab
 with only one group has no headings. Rows with nothing to do (passing, not
 applicable, or marked as reviewed) are dimmed. The key hints at the bottom
 show the keys of the tab you are on.

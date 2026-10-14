@@ -1970,7 +1970,10 @@ def source_status():
             state = "failed"
         else:
             state = fresh(at, FEED_INTERVAL.get(name, FEED_DAYS) + FEED_RETRY_DAYS)
-        text, old = used_note(meta, note) if note and at else ("", False)
+        # The Bumblebee list is fetched right before its scan: worth a mention
+        # only when the download failed and the scan used the last good one.
+        quiet = name == "bumblebee" and not meta.get("fallback")
+        text, old = used_note(meta, note) if note and at and not quiet else ("", False)
         add(name, run_, at, tm if at else "", state, tried if state == "failed" else "", note=text, old=old)
 
     for name in DAILY_FEEDS:
@@ -2360,7 +2363,8 @@ def refresh_downloads_scan(on_progress=None):
         last = time.time() - 86400
     files = new_downloads(min(last, time.time() - 3600) - 3600)      # an hour of overlap, never a gap
     if not files:
-        save_feed("downloads-scan", {"found": [], "files": 0})
+        # Nothing to hand ClamAV, but the line still says which signatures it had.
+        save_feed("downloads-scan", {"found": [], "files": 0, "used": list(signatures_updated())})
         return "No new downloads to scan."
     dirfd = _state_dir()
     try:
@@ -2486,8 +2490,7 @@ def check_virus_scan():
     if cache is None:
         return result(cid, cat, title, "info", "The first scan runs within a day.", why, fix=now, weight=0,
                       howto="Press Scan now to scan your home folder now, or wait for the next weekly check.")
-    used, _ = used_note(cache, "signatures")
-    scanned = feed_when(cache).replace("checked", "scanned") + ((", " + used) if used else "")
+    scanned = _virus_scans_line(cache)
     found = current_detections()
     ignored = ignored_detections()
     items, live = [], []
@@ -2503,29 +2506,40 @@ def check_virus_scan():
     odd = [clean(x, 200) for x in cache.get("oddNames", []) if isinstance(x, str)][:20] \
         if isinstance(cache.get("oddNames"), list) else []
     if odd and not live:
-        out = result(cid, cat, title, "warn", "No infected files, but %d file name%s contain%s a line break (%s)." % (
-            len(odd), "" if len(odd) == 1 else "s", "s" if len(odd) == 1 else "", scanned), why, clean_block(odd), fix=now, weight=1,
+        out = result(cid, cat, title, "warn", "No infected files, but %d file name%s contain%s a line break. %s." % (
+            len(odd), "" if len(odd) == 1 else "s", "s" if len(odd) == 1 else "", scanned), why, clean_block(odd),
+            fix=now, weight=1,
             howto="Normal programs never name files like this; it is a trick to confuse virus scanners. "
                   "Look at where these files came from, and delete them if you do not know them.")
         out["items"] = items
         return out
     if live:
         handoff = fix("app", "open-clamui", "Open ClamUI to quarantine them") if clamui_install() else now
-        out = result(cid, cat, title, "fail", "%d infected file%s in %s (%s).%s" % (
-            len(live), "" if len(live) == 1 else "s", _scanned_where(cache),
-            scanned, note),
+        out = result(cid, cat, title, "fail", "%d infected file%s. %s.%s" % (
+            len(live), "" if len(live) == 1 else "s", scanned, note),
             why, clean_block(live), handoff, weight=3,
             howto="Do not open these files. Quarantine or delete them in ClamUI; if you downloaded them "
                   "on purpose, get them again from the official site. Only if you are sure a file is safe "
                   "(for example a game file ClamAV mistakes for malware), press False positive next to it.")
     else:
-        daily = feed_cache("downloads-scan")
-        daily_note = " New downloads scanned %s." % feed_when(daily).replace("checked ", "") if daily else ""
-        out = result(cid, cat, title, "pass", "No infected files in %s (%s).%s%s" % (
-            _scanned_where(cache), scanned, note, daily_note), why,
-            fix=now, weight=3)
+        out = result(cid, cat, title, "pass", "No infected files. %s.%s" % (scanned, note), why, fix=now, weight=3)
     out["items"] = items
     return out
+
+
+def _virus_scans_line(cache):
+    """Both virus scans behind the row, each with its run: "~ scanned yesterday
+    at 19:58 (weekly check); ~/Downloads today at 00:30 (daily check)". A scan
+    that used signatures over two days old says so."""
+    def when(meta):
+        text, old = used_note(meta, "signatures")
+        return feed_when(meta).replace("checked ", "") + ((", " + text) if old else "")
+    parts = ["~ scanned %s (weekly check)" % when(cache)]
+    # "~ scanned ..." starts a sentence in the summary.
+    daily = feed_cache("downloads-scan")
+    if daily and not daily.get("byFullScan"):
+        parts.append("~/Downloads %s (daily check)" % when(daily))
+    return "; ".join(parts)
 
 
 # --- Marking a virus detection as a false positive ---------------------------
@@ -3112,6 +3126,10 @@ def refresh_bumblebee():
         raise Refused("its list could not be downloaded")
     listed = feed_cache("bumblebee-list") or {}
     used = [listed.get("at", ""), listed.get("time", "")]
+    # The list is downloaded right before every scan, so it is the newest and
+    # not worth a mention, unless that download failed and this is the last
+    # good one (fallback): then the row and the Last run line say which.
+    fallback = LIST_FALLBACK["bumblebee"]
     rc, out = run([BUMBLEBEE_BIN, "scan", "--profile", "baseline", "--exposure-catalog", catalog,
                    "--findings-only", "--output", "stdout", "--max-duration", "5m"],
                   timeout=360, limit=4 * 1024 * 1024)
@@ -3119,7 +3137,7 @@ def refresh_bumblebee():
     if rc not in (0, 1) or status in (None, "error"):
         save_feed("bumblebee", {}, ok=False)
         raise Refused("its scan did not finish")
-    save_feed("bumblebee", {"findings": findings, "status": status, "used": used})
+    save_feed("bumblebee", {"findings": findings, "status": status, "used": used, "fallback": fallback})
     return "Bumblebee scanned."
 
 
@@ -3143,6 +3161,9 @@ STEP_TEXT = dict(ITEM_NAME, **{
     "password-check": ITEM_NAME["password-check"] + ASKS,
     "signatures-update": "Virus signatures update" + ASKS})
 CLAM_SCANS = ("downloads-scan", "virus-scan")
+# Set during a run when the Bumblebee list could not be downloaded and the
+# scan uses the last good one.
+LIST_FALLBACK = {"bumblebee": False}
 
 
 def run_plan(full=False, scan_only=False, daily_only=False, weekly_only=False, signatures=False):
@@ -3220,6 +3241,7 @@ def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False
     PROGRESS["spans"] = spans
     done, failed, why, timed_out, notes = [], [], {}, [], []
     no_signatures = ""
+    LIST_FALLBACK["bumblebee"] = False
     for i, name in enumerate(steps, 1):
         if not STOP["on"] and plugin_removed():
             STOP["on"] = True                        # the plugin was removed: start nothing more
@@ -3253,6 +3275,7 @@ def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False
                     old = feed_cache("bumblebee-list")
                     if old is None or not exists(home_path(*STATE_DIR, BUMBLEBEE_CATALOG)):
                         raise
+                    LIST_FALLBACK["bumblebee"] = True
                     notes.append("Bumblebee's list could not be downloaded, so the Bumblebee scan used the one "
                                  "from %s." % old["at"])
             elif name == "bumblebee":
@@ -3287,7 +3310,8 @@ def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False
             if name in FEED_FILES and name not in done:
                 save_feed(name, {}, ok=False)
     if run_weekly and "virus-scan" in done and feed_available("downloads-scan"):
-        save_feed("downloads-scan", {"found": [], "files": 0, "byFullScan": True})
+        save_feed("downloads-scan", {"found": [], "files": 0, "byFullScan": True,
+                                     "used": (feed_cache("virus-scan") or {}).get("used")})
     if run_weekly:
         save_feed("full-scan", {}, ok=not stopped and not [n for n in failed if n in ("virus-scan", "firmware")],
                   retry_days=FEED_DAYS if timed_out else None)
@@ -3388,7 +3412,7 @@ def check_bumblebee():
     found = [f for f in cache.get("findings", []) if isinstance(f, dict)][:500] \
         if isinstance(cache.get("findings"), list) else []
     when = feed_when(cache).replace("checked", "scanned")
-    used, _ = used_note(cache, "the list")
+    used, _ = used_note(cache, "the list") if cache.get("fallback") else ("", False)
     when += (", " + used) if used else ""
     if found:
         lines = ["%s: %s %s %s in %s" % (clean(f.get("catalog_name"), 120), clean(f.get("ecosystem"), 30),

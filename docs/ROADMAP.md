@@ -191,6 +191,15 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 - [x] No run installs or updates Bumblebee. Only Install, or Install
       Bumblebee on its row once a Vigil update has raised the pinned
       version, puts the reviewed version in place.
+- [x] Panel review: the Overview tab has no caption (its tooltip is the
+      score); the panel is 60 units wider and the tabs use slightly less
+      padding, so six tabs and their captions fit at larger fonts; the tabs
+      use the same unfilled button style as the rest of the panel. The virus
+      scan row sits under **Daily and weekly checks** and names both scans
+      with their run. The Downloads scan records its signatures even when
+      there was nothing new to scan. Bumblebee no longer names its list,
+      since it downloads the newest right before every scan; only a scan
+      that fell back to the last good list says which.
 - [ ] Later: show launchers that point to a program by name rather than
       by path, once there is a reliable way to know the PATH your session
       uses.
