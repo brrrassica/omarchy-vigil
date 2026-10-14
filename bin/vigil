@@ -11,10 +11,10 @@ with a cleared environment, and reads exactly one JSON object from stdout.
 Rules this file keeps (they follow the marketplace review guidance):
 
 - It runs as you, and never runs a file from the plugin folder as root. Its
-  only root steps are two constant pkexec commands, started only by a Run
-  now button you pressed, never in the background: the virus signatures,
-  only when they are over a day old (SIGNATURES_ARGV; Daily check, Weekly
-  check, Run all), and the password scan (NO_PASSWORD_ARGV; Run all). The
+  only root steps are two constant pkexec commands, started only by Run all,
+  never in the background: the virus signatures, only when ClamAV's own
+  update service has let them get over two days old (SIGNATURES_ARGV), and
+  the password scan (NO_PASSWORD_ARGV). The
   panel shows both in full on the confirmation card first. Every other root
   step is a constant script from Model.js that the panel runs the same way.
 - Its network use is the checks' own tools (arch-audit, osv-scanner,
@@ -1402,25 +1402,28 @@ def _scanner_check(sid, binary, cat, title, why, run_action, install_action):
     if sid == "arch-audit":
         return _arch_audit_check(cid, cat, title, why)
     if sid == "clamav":
-        newest = 0
-        for name in ("daily.cld", "daily.cvd"):
-            try:
-                newest = max(newest, os.stat(sys_path("/var/lib/clamav/" + name)).st_mtime)
-            except OSError:
-                pass
+        # ClamAV's own update service keeps the signatures current; Vigil only
+        # watches. Over STALE_HOURS old, the service has fallen behind: Run all
+        # then updates them first (behind your password), and the panel sends
+        # one notification a day saying so.
+        stamp = signatures_updated()
+        age = _hours_since(stamp) if stamp[0] else None
+        days = int(age // 24) if age is not None else None
+        old = age is None or age > STALE_HOURS
         auto = systemctl("is-enabled", "clamav-freshclam.service") == "enabled"
-        days = int((time.time() - newest) // 86400) if newest else None
         if not auto:
-            return result(cid, cat, title, "warn" if days is None or days > 7 else "info",
+            return result(cid, cat, title, "warn" if old else "info",
                           ("The virus signatures are missing" if days is None else
                            "The virus signatures are %d day%s old" % (days, "" if days == 1 else "s"))
                           + " and do not update by themselves.", why,
                           fix=fix("terminal", "freshclam-service", "Update them automatically"), weight=0)
-        if days is None or days > 7:
-            return result(cid, cat, title, "warn", "Automatic updates are on, but the signatures are %s." % (
-                "missing" if days is None else "%d days old" % days) + " Check your internet connection.",
-                why, fix=fix("terminal", "freshclam", "Update now"), weight=0)
-        summary = "Signatures update automatically (last %s)." % (
+        if old:
+            return result(cid, cat, title, "warn", "ClamAV's update service is on, but the signatures are %s." % (
+                "missing" if days is None else "%d days old" % days), why,
+                fix=fix("docs", "arch-clamav", "Learn more"), weight=0,
+                howto="Check your internet connection. Then press Run all on the Overview: when the signatures are "
+                      "over two days old, it updates them first, behind your password.")
+        summary = "ClamAV's update service keeps them current (last %s)." % (
             "today" if days == 0 else "%d day%s ago" % (days, "" if days == 1 else "s"))
     if not run_action:                       # ClamAV: healthy signatures; the scan itself is Vigil's job
         return result(cid, cat, title, "pass", summary, why, weight=0)
@@ -1505,9 +1508,9 @@ def can_update_signatures():
 
 
 # The one root step a run can take besides the password scan: updating the
-# virus signatures, only from a Run now button you pressed (its card shows this
-# exact command first) and only when they are over a day old. The background
-# run never asks; ClamAV's own update service keeps them current.
+# virus signatures, only from Run all (its card shows this exact command
+# first) and only when they are over two days old. ClamAV's own update
+# service keeps them current; no other run asks.
 SIGNATURES_ARGV = [PKEXEC, "/usr/bin/bash", "-c", SIGNATURES_SCRIPT]
 
 
@@ -1894,7 +1897,9 @@ def _newer(a, b):
 
 
 SIGNATURE_FILES = ("daily.cld", "daily.cvd", "main.cld", "main.cvd", "bytecode.cld", "bytecode.cvd", "freshclam.dat")
-SIGNATURES_FRESH_HOURS = 24
+# Older than this, a list or the virus signatures count as old: a scan says
+# which one it used, and Run all updates the signatures first.
+STALE_HOURS = 48
 
 
 def signatures_updated():
@@ -1917,19 +1922,20 @@ def _hours_since(stamp):
 
 
 def signatures_due():
-    """True when a Run now button would update the virus signatures first: ClamAV
-    is installed and its signatures are over a day old, which means its own
-    update service is off or offline. Only ever behind your password."""
+    """True when Run all would update the virus signatures first: ClamAV is
+    installed and its signatures are over two days old, which means its own
+    update service has fallen behind (off, or offline). Only ever behind your
+    password, and only from Run all: the daily and weekly checks never ask."""
     if not (feed_available("virus-scan") and can_update_signatures()):
         return False
     age = _hours_since(signatures_updated())
-    return age is None or age > SIGNATURES_FRESH_HOURS
+    return age is None or age > STALE_HOURS
 
 
 def _age_note(stamp, what):
-    """ "with the list from Oct 12" when a scan used something over a day old, else ""."""
+    """ "with the list from Oct 12" when a scan used something over two days old, else ""."""
     age = _hours_since(stamp) if isinstance(stamp, (list, tuple)) and len(stamp) == 2 else None
-    if age is None or age <= SIGNATURES_FRESH_HOURS:
+    if age is None or age <= STALE_HOURS:
         return ""
     try:
         return "with %s from %s" % (what, time.strftime("%b %-d", time.strptime(stamp[0], "%Y-%m-%d")))
@@ -3142,11 +3148,12 @@ def run_plan(full=False, scan_only=False, daily_only=False, weekly_only=False, s
     """The steps a run takes, in order. With no flag it is the background run:
     only what is due, never a password. Each scan comes right after its list:
     the Bumblebee list before the Bumblebee scan, the virus signatures before
-    each ClamAV scan. A Run now button (daily, weekly, all) updates signatures
-    over a day old first, behind your password, while you are at the screen,
-    but only when the panel says its card showed that command (signatures):
-    no root step runs that the card did not show. Run all also runs the
-    password scan first. A row's Scan now never asks."""
+    each ClamAV scan. ClamAV's own update service keeps the signatures
+    current, so no run forces an update, except Run all when they are over two
+    days old (the service has fallen behind), and only when the panel says its
+    card showed that command (signatures): no root step runs that the card did
+    not show. Run all also runs the password scan first. The daily and weekly
+    checks and a row's Scan now never ask for a password."""
     background = not (full or scan_only or daily_only or weekly_only)
     pressed = not background
     run_weekly = full or weekly_only or (background and feed_due("full-scan"))
@@ -3167,8 +3174,7 @@ def run_plan(full=False, scan_only=False, daily_only=False, weekly_only=False, s
     if (run_weekly or scan_only) and feed_available("virus-scan"):
         steps += ["signatures", "virus-scan"]      # last: it takes longest
     first = []
-    if signatures and (full or daily_only or weekly_only) and any(n in steps for n in CLAM_SCANS) \
-            and signatures_due():
+    if signatures and full and any(n in steps for n in CLAM_SCANS) and signatures_due():
         first.append("signatures-update")
     if full and can_ask_password():
         first.append("password-check")
@@ -3177,15 +3183,15 @@ def run_plan(full=False, scan_only=False, daily_only=False, weekly_only=False, s
 
 def verify_signatures():
     """Right before a ClamAV scan: are the virus signatures there and current?
-    Returns a note when they are over a day old; raises when there are none."""
+    Returns a note when they are over two days old; raises when there are none."""
     stamp = signatures_updated()
     if not stamp[0]:
         raise Refused("ClamAV has no virus signatures yet")
     age = _hours_since(stamp)
-    if age is not None and age > SIGNATURES_FRESH_HOURS:
+    if age is not None and age > STALE_HOURS:
         days = max(1, int(age // 24))
-        return ("The virus signatures are %d day%s old (ClamAV's update service is off or offline), so the "
-                "virus scan used them as they were." % (days, "" if days == 1 else "s"))
+        return ("The virus signatures are %d day%s old (ClamAV's update service has fallen behind), so the "
+                "virus scan used them as they were; Run all updates them." % (days, "" if days == 1 else "s"))
     return ""
 
 
@@ -5944,11 +5950,11 @@ def main(argv):
     if len(argv) == 3 and argv[1] in ("dismiss", "undismiss") and re.fullmatch(r"[a-z0-9-]{1,40}", argv[2]):
         emit(set_dismissed(argv[2], argv[1] == "dismiss"))
         return 0
-    # --signatures: the confirmed card showed the virus signatures update, so
-    # a Run now button may run it (only when they are over a day old).
+    # --signatures: the confirmed Run all card showed the virus signatures
+    # update, so Run all may run it (only when they are over two days old).
     if 2 <= len(argv) <= 4 and argv[1] == "refresh-feeds" and argv[2:] in (
             [], ["--force"], ["--full"], ["--scan"], ["--daily"], ["--weekly"],
-            ["--full", "--signatures"], ["--daily", "--signatures"], ["--weekly", "--signatures"]):
+            ["--full", "--signatures"]):
         PROGRESS["on"] = True
         flag = argv[2] if len(argv) >= 3 else ""
         if not take_run_lock():

@@ -51,14 +51,14 @@
         "type": "boolean",
         "label": "Notify about new findings",
         "defaultValue": true,
-        "description": "Send one desktop notification when a check that was fine starts failing. The notification only says how many; details stay in the panel."
+        "description": "Send one desktop notification when a check that was fine starts failing. The notification only says how many; details stay in the panel. Also one a day, in fixed words, while ClamAV's virus signatures are over two days old, pointing to Run all."
       },
       {
         "key": "autoUpdate",
         "type": "boolean",
         "label": "Background checks",
         "defaultValue": true,
-        "description": "Runs the daily and weekly checks by themselves. Every scan gets its list right before it runs. Daily: waiting system and Flatpak updates; known vulnerabilities (arch-audit downloads the tracker from security.archlinux.org); known-malicious npm and Bun packages (osv-scanner sends package names and versions to OSV.dev, never files); your AUR packages (aur.archlinux.org); Perplexity's Bumblebee list from GitHub, then a Bumblebee scan; and a ClamAV scan of what is new in Downloads. Weekly: firmware (LVFS) and a ClamAV scan of your home folder. Each step runs only once its tool is installed; scans run as you, and the background run never asks for a password. Turn off to run them only with the Run now buttons."
+        "description": "Runs the daily and weekly checks by themselves. Every scan gets its list right before it runs. Daily: waiting system and Flatpak updates; known vulnerabilities (arch-audit downloads the tracker from security.archlinux.org); known-malicious npm and Bun packages (osv-scanner sends package names and versions to OSV.dev, never files); your AUR packages (aur.archlinux.org); Perplexity's Bumblebee list from GitHub, then a Bumblebee scan; and a ClamAV scan of what is new in Downloads. Weekly: firmware (LVFS) and a ClamAV scan of your home folder. Each step runs only once its tool is installed; scans run as you, and the daily and weekly checks never ask for a password. Turn off to run them only with the Run now buttons."
       }
     ]
   }

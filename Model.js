@@ -163,11 +163,12 @@ function actionCommands(id, tools, home) {
   return out
 }
 
-// The run cards' root steps, exactly as the helper starts them: the virus
-// signatures when they are over a day old (any Run now button; the helper says
-// so in signaturesDue), and in Run all the password scan. The rest runs as you.
+// The run cards' root steps, exactly as the helper starts them. Only Run all
+// has any: the virus signatures when ClamAV's own update service has let them
+// get over two days old (the helper says so in signaturesDue), and the
+// password scan. The daily and weekly checks run entirely as you.
 function runCommands(kind, report) {
-  if (!report || toolDir(report.tools, "pkexec") === "") return []
+  if (!report || kind !== "full-scan" || toolDir(report.tools, "pkexec") === "") return []
   var out = []
   if (report.signaturesDue)
     out.push({ who: "As root, through pkexec (Omarchy asks for your password), for the virus signatures:",
@@ -674,12 +675,6 @@ var TERMINAL_ACTIONS = {
            "Technical: pacman -S osv-scanner"],
     run: "/usr/bin/pacman -S --needed --noconfirm osv-scanner && echo 'osv-scanner is installed.'"
   },
-  "freshclam": {
-    title: "Update virus signatures now",
-    what: ["Downloads the newest virus signatures from ClamAV.",
-           "Technical: sudo freshclam"],
-    run: "sudo /usr/bin/freshclam"
-  },
   "install-clamui": {
     title: "Install ClamUI",
     what: ["Installs ClamUI, an app for virus scans and quarantine, with ClamAV and its virus signatures,",
@@ -956,7 +951,8 @@ var DOCS = {
   "black-ops": "https://github.com/brightwalker25/omarchy-black-ops",
   "arch-users": "https://wiki.archlinux.org/title/Users_and_groups",
   "attack-history": "https://attack.mitre.org/techniques/T1070/003/",
-  "arch-xdg": "https://wiki.archlinux.org/title/XDG_Base_Directory"
+  "arch-xdg": "https://wiki.archlinux.org/title/XDG_Base_Directory",
+  "arch-clamav": "https://wiki.archlinux.org/title/ClamAV"
 }
 
 function docsUrl(id) {
@@ -1196,7 +1192,7 @@ var RUN_HEADINGS = { daily: "Daily check", weekly: "Weekly check", all: "Run all
 
 // The Overview's LAST RUN list: when your settings and files were last read,
 // then each run's scans and lookups under its name, in the order it runs them.
-// A scan that had to use a list over a day old is red, and says how old.
+// A scan that had to use a list over two days old is red (the theme's red), and says how old.
 function lastRunRows(report, now) {
   if (!report) return []
   var rows = [{ label: "Your settings and files", heading: false, problem: false,
@@ -1406,8 +1402,8 @@ function runLines(report, ids) {
     return has(ids[i])
   }
   var what = {
-    "signatures-update": "Virus signatures update: they are over a day old (ClamAV's own update service is off or"
-      + " offline), so Vigil updates them first. Omarchy asks for your password.",
+    "signatures-update": "Virus signatures update: they are over two days old (ClamAV's own update service has"
+      + " fallen behind), so Vigil updates them first. Omarchy asks for your password.",
     "password-check": "Password scan: every account has a password. Omarchy asks for your password.",
     "pending-updates": "System update lookup: waiting system and Omarchy updates (nothing is installed).",
     "flatpak": "Flatpak update lookup, and the updates for your own Flatpak apps (no password).",
@@ -1438,30 +1434,28 @@ var DONE_LINE = "The panel shows the progress, and you get a notification when i
 function dailyConfirmation(report) {
   if (!report) return null
   return { title: "Run daily check", lines: ["Runs the daily check now, in this order:"]
-    .concat(runLines(report, ["signatures-update"].concat(DAILY_IDS)))
-    .concat([CARE_RUN_LINE, passwordLine(report) + DONE_LINE]) }
+    .concat(runLines(report, DAILY_IDS))
+    .concat([CARE_RUN_LINE, NO_PASSWORD_LINE + DONE_LINE]) }
 }
 
-// Whether a confirmation card shows the virus signatures update among its
-// commands: only then does the panel let the helper run it.
+// The daily and weekly checks never ask for a password: ClamAV's own update
+// service keeps the virus signatures current, and only Run all tops them up.
+var NO_PASSWORD_LINE = "No password needed. "
+
+// Whether a confirmation card (Run all's) shows the virus signatures update
+// among its commands: only then does the panel let the helper run it.
 function cardShowsSignatures(card) {
   if (!card || !Array.isArray(card.commands)) return false
   return card.commands.some(function(c) { return c && c.text === commandText([PKEXEC, BASH, "-c", SIGNATURES_SCRIPT]) })
 }
 
-// Whether a Run now button asks for your password, in words.
-function passwordLine(report) {
-  return report.signaturesDue ? "Omarchy asks for your password first, for the virus signatures. "
-                              : "No password needed. "
-}
-
 // Run weekly check: the long one.
 function weeklyConfirmation(report) {
   if (!report) return null
-  var lines = runLines(report, ["signatures-update"].concat(WEEKLY_IDS))
+  var lines = runLines(report, WEEKLY_IDS)
   if (lines.length === 0) lines = ["Nothing to run yet. Install ClamUI (Detect tab) to add the scan of your home folder."]
   return { title: "Run weekly check", lines: ["Runs the weekly check now, in this order:"]
-    .concat(lines).concat([passwordLine(report) + "You can close this panel. " + DONE_LINE]) }
+    .concat(lines).concat([NO_PASSWORD_LINE + "You can close this panel. " + DONE_LINE]) }
 }
 
 // Run all: the daily check and the weekly check, plus the password scan. The
@@ -1830,6 +1824,11 @@ function tabCounts(report, tab) {
   return (tab === "overview" ? "Security: " : "") + pillarCounts(f, w, n)
 }
 
+// The one notification about the virus signatures, at most once a day while
+// ClamAV's own update service has let them get over two days old. Constant
+// words, no data.
+var SIGNATURES_NOTICE = "ClamAV's virus signatures have not updated in over two days. Open Vigil and press Run all to update them."
+
 var CARE_NOTE = "Care is separate from security: it never counts toward the score, and the checks above never clean anything. Vigil cleans only when you press a button on the Care tab."
 var CARE_TAB_NOTE = "Separate from security: not part of the score, the daily check or the weekly check. Nothing is cleaned until you press a button."
 var CARE_RUN_LINE = "Nothing on the Care tab is cleaned: that happens only when you press a button there."
@@ -1877,7 +1876,7 @@ if (typeof module !== "undefined") {
     topFindings: topFindings, countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
     tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
     categoryLabel: categoryLabel, pillarCounts: pillarCounts, tabCaption: tabCaption, tabCounts: tabCounts,
-    CARE_NOTE: CARE_NOTE, rowHeading: rowHeading, rowHeadingNote: rowHeadingNote, currentNote: currentNote, CURRENT_HEADING: CURRENT_HEADING, runCaptions: runCaptions,
+    CARE_NOTE: CARE_NOTE, SIGNATURES_NOTICE: SIGNATURES_NOTICE, rowHeading: rowHeading, rowHeadingNote: rowHeadingNote, currentNote: currentNote, CURRENT_HEADING: CURRENT_HEADING, runCaptions: runCaptions,
     scheduleNotes: scheduleNotes, heroMeta: heroMeta, keyHints: keyHints, separateFromCleanAll: separateFromCleanAll,
     CARE_SEPARATE_HEADING: CARE_SEPARATE_HEADING, CARE_SEPARATE_NOTE: CARE_SEPARATE_NOTE, CARE_TAB_NOTE: CARE_TAB_NOTE, CARE_RUN_LINE: CARE_RUN_LINE, tabIntro: tabIntro, cleanAllPlan: cleanAllPlan,
     howTo: howTo, docsUrl: docsUrl, docsCommand: docsCommand, DOCS: DOCS, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,

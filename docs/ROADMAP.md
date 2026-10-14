@@ -172,12 +172,17 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       followed by the virus scan of new downloads; the weekly check checks
       the signatures again right before the virus scan of `~`. These
       lookups move from weekly to daily: a few MB a day more.
-- [x] Virus signatures stay root-only: ClamAV's own update service keeps
-      them current, Vigil checks them before every virus scan, and a Run
-      now button updates them first, behind your password and with the
-      command on its card, only when they are over a day old. The
-      background run and a row's Scan now never ask; a scan with old
-      signatures says how old they were.
+- [x] Virus signatures are ClamAV's job: its own update service keeps them
+      current, and Vigil checks them before every virus scan. The daily and
+      weekly checks never ask for a password. Over two days old (the
+      service fell behind), Vigil sends one notification a day pointing to
+      Run all, which updates them first, behind your password and with the
+      command on its card. Run all's password scan and that update are the
+      only password prompts in any run. The Virus signatures row lost its
+      own Update now button: Run all is the one way to force an update.
+- [x] Lists and signatures count as old after 48 hours, not 24: only then
+      does a scan's note ("with the list from Oct 1", in the theme's red)
+      appear.
 - [x] A failed list download no longer stops a scan: it uses the last good
       list, and its row and its Last run line say "with the list from Oct 1".
       The Last run list groups every scan and lookup under the run that

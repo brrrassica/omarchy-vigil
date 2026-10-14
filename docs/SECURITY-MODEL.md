@@ -33,9 +33,9 @@ These hold for every pillar, now and in later phases:
    a password) only in Run all, keeping only account names; Show listeners
    (`ss -tulpn`, read-only) on its own button; and the virus signature
    update (freshclam, which downloads signatures and scans nothing), only
-   from a Run now button (Daily check, Weekly check, Run all) and only
-   when the signatures are over a day old. The background run never asks
-   for a password, and neither does a row's Scan now.
+   in Run all and only when ClamAV's own update service has let them get
+   over two days old. The daily and weekly checks (pressed or in the
+   background) and a row's Scan now never ask for a password.
 4. **Hand off, don't absorb.** ClamUI keeps quarantine, Black Ops keeps
    telemetry blocking. Vigil reads their results and opens them; it does not
    run their code or write their files, with one exception you confirm:
@@ -72,7 +72,9 @@ These hold for every pillar, now and in later phases:
    leftover as kept, changes only Vigil's own notes and is undone with one
    click, so it does not ask. Nothing in your home folder is deleted to
    tidy it: a leftover goes to the trash, where you can restore it.
-   Notifications carry counts only; IPC methods take no parameters.
+   Notifications carry counts, or one fixed sentence (the virus signatures
+   are over two days old: press Run all), never data from the report or a
+   file; IPC methods take no parameters.
 7. **Removal leaves nothing running.** Vigil has no units, cron jobs or
    daemons of its own, and a scan or update under way stops within seconds
    of the plugin folder being removed. Services Vigil switched on for you
@@ -135,7 +137,8 @@ program it is running, process group and all, and starts no further step.
 - Every `Text` sets `textFormat: Text.PlainText`. Strings passed to host
   components (tooltip, `PanelHero`, notifications) go through
   `Model.plain`, which removes `<`, `>`, `&`, control and bidi characters
-  and caps the length. Notifications contain only a count.
+  and caps the length. Notifications contain only a count, or the one
+  constant sentence `SIGNATURES_NOTICE` from `Model.js` (at most once a day).
 - The IPC target exposes `open`, `close`, `show`, `hide`, `toggle` and
   `refresh`, none with parameters, and is registered only by the copy of the
   widget on the first monitor.
@@ -161,22 +164,24 @@ program it is running, process group and all, and starts no further step.
   `/usr/bin/pkexec /usr/bin/env HOME=<your home> /usr/bin/bash -c`), then
   the script exactly as it is passed, unabridged; for a terminal action, the
   command the terminal runs. The run cards show the helper's root steps the
-  same way: the virus signatures update (only when they are over a day old,
-  which the report states as `signaturesDue`) and, in Run all, the password
-  scan. The panel lets the helper run the signatures update only when the
-  card you confirmed showed that exact command (`refresh-feeds --daily
-  --signatures`, and likewise for the weekly check and Run all); without the
-  flag the helper never asks for that password, so a card drawn before the
-  signatures grew old cannot lead to a prompt it did not show. `Model.js` keeps copies of
+  same way; only Run all has any: the virus signatures update (only when
+  they are over two days old, which the report states as `signaturesDue`)
+  and the password scan. The panel lets the helper run the signatures
+  update only when the Run all card you confirmed showed that exact command
+  (`refresh-feeds --full --signatures`, the one combination the helper
+  accepts); without the flag the helper never asks for that password, so a
+  card drawn before the signatures grew old cannot lead to a prompt it did
+  not show. `Model.js` keeps copies of
   those two helper scripts, and a test checks they are identical to what the
   helper starts; another checks every card against the plan that runs.
 - Right before every virus scan, the helper checks how old the virus
   signatures are, from the dates of ClamAV's database files and
   `freshclam.dat` (which ClamAV's service touches on every check), Vigil's
-  own record and ClamUI's log. Over a day old, a Run now button updates
-  them first, at the start of the run while you are at the screen (the
-  background run never asks; it scans with what is there and records how
-  old they were), with one constant root script through pkexec: if
+  own record and ClamUI's log. ClamAV's own service keeps them current, so
+  no run forces an update until they are over two days old; then only Run
+  all updates them, first, while you are at the screen (every other run
+  scans with what is there and records how old they were), with one
+  constant root script through pkexec: if
   ClamAV's update service runs, it is woken with `systemctl kill
   --signal=SIGUSR1` (it then checks at once; a second freshclam would fail
   on the service's log lock), and the script waits up to two minutes for the

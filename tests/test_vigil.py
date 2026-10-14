@@ -1020,10 +1020,15 @@ def test_clamav_signatures_come_from_freshclam(v):
     assert c["status"] == "info" and c["fix"]["action"] == "freshclam-service"
     v.UNITS[("is-enabled", "clamav-freshclam.service")] = "enabled"
     c = clamav(v)()
-    assert c["status"] == "pass" and "update automatically" in c["summary"] and c["fix"]["kind"] == "none"
+    assert c["status"] == "pass" and "update service keeps them current" in c["summary"] and c["fix"]["kind"] == "none"
     p = v.ROOT + "/var/lib/clamav/daily.cld"
-    os.utime(p, (os.path.getmtime(p) - 10 * 86400,) * 2)
-    assert clamav(v)()["status"] == "warn"
+    os.utime(p, (time.time() - 47 * 3600,) * 2)                         # under two days: still fine
+    assert clamav(v)()["status"] == "pass"
+    os.utime(p, (time.time() - 49 * 3600,) * 2)                         # the service fell behind
+    c = v.tidy(clamav(v)())
+    assert c["status"] == "warn" and "2 days old" in c["summary"] and "press Run all" in c["howto"]
+    v.add_help(c)
+    assert c["fix"]["action"] == "arch-clamav"                           # no second way to force an update
 
 
 def test_secret_patterns_are_provider_formats_only(v):
@@ -1466,7 +1471,8 @@ def test_cli_refresh_feeds_arguments():
     vigil = str(REPO / "bin" / "vigil")
     for args in (["refresh-feeds", "--all"], ["refresh-feeds", "--force", "x"], ["refresh-feeds", "--sources"],
                  ["refresh-feeds", "--signatures"], ["refresh-feeds", "--scan", "--signatures"],
-                 ["refresh-feeds", "--daily", "--signatures", "--signatures"]):
+                 ["refresh-feeds", "--daily", "--signatures", "--signatures"], ["refresh-feeds", "--daily", "--signatures"],
+                 ["refresh-feeds", "--weekly", "--signatures"]):
         p = subprocess.run(["/usr/bin/python3", "-I", "-S", vigil] + args, capture_output=True, timeout=30)
         assert p.returncode == 2, args
 
@@ -1678,7 +1684,7 @@ def test_remove_secret_lines(v):
     assert v.run_fix("remove-secret-lines")["message"] == "No lines with keys were found."
 
 
-def test_old_signatures_are_updated_only_from_a_run_now_button(v, monkeypatch):
+def test_only_run_all_updates_signatures_and_only_after_two_days(v, monkeypatch):
     v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash", v.ROOT + "/usr/bin/freshclam"}
     clamscan_ok(v)
     monkeypatch.setattr(v, "count_home_files", lambda **kw: 1)
@@ -1688,41 +1694,36 @@ def test_old_signatures_are_updated_only_from_a_run_now_button(v, monkeypatch):
     calls = []
     real = v.run
     v.run = lambda argv, **kw: (calls.append(tuple(argv)), real(argv, **kw))[1]
-    # Current (ClamAV's update service ran recently): no button asks.
-    for kw in ({"daily_only": True}, {"weekly_only": True}):
-        v.refresh_due_feeds(**kw)
-    assert SIG not in calls and v.audit(peek=True)["signaturesDue"] is False
-    # Two days old: a Run now button whose card showed the command updates
-    # them first, behind your password.
-    fresh_signatures(v, hours_old=48)
+    # 47 hours: ClamAV's own service is just slow. Nothing forces an update.
+    fresh_signatures(v, hours_old=47)
+    assert v.audit(peek=True)["signaturesDue"] is False
+    v.refresh_due_feeds(full=True, signatures=True)
+    assert SIG not in calls
+    # 49 hours: the service fell behind. Run all, whose card showed the
+    # command, updates them first, then asks for the password scan.
+    fresh_signatures(v, hours_old=49)
     assert v.audit(peek=True)["signaturesDue"] is True
     calls.clear()
-    res = v.refresh_due_feeds(daily_only=True, signatures=True)
-    assert calls[0] == SIG and res["message"].startswith("Updated the virus signatures")
+    res = v.refresh_due_feeds(full=True, signatures=True)
+    assert calls[:2] == [SIG, NOPW] and res["message"].startswith("Updated the virus signatures")
     assert "days old" not in res["message"]                               # the scan used the new ones
-    fresh_signatures(v, hours_old=48)
+    # The daily and weekly checks, the background run and Scan now never ask,
+    # flag or not: they scan with what is there and say how old it was.
+    fresh_signatures(v, hours_old=72)
     calls.clear()
-    v.refresh_due_feeds(full=True, signatures=True)                       # Run all: both prompts first
-    assert calls[:2] == [SIG, NOPW]
-    # A card that did not show the command (it was drawn before they got old)
-    # never leads to that password prompt.
-    fresh_signatures(v, hours_old=48)
-    calls.clear()
-    for kw in ({"daily_only": True}, {"weekly_only": True}, {"full": True}):
-        v.refresh_due_feeds(**kw)
+    for kw in ({"daily_only": True, "signatures": True}, {"weekly_only": True, "signatures": True},
+               {"scan_only": True}, {}):
+        res = v.refresh_due_feeds(**kw)
+    assert not [c for c in calls if c[0] == "/usr/bin/pkexec"]
+    assert "3 days old" in v.refresh_due_feeds(weekly_only=True)["message"]
+    # A Run all card that did not show the command never leads to that prompt.
+    v.refresh_due_feeds(full=True)
     assert SIG not in calls
-    # The background run and a row's Scan now never ask; they scan with what is there.
-    fresh_signatures(v, hours_old=48)
-    os.remove(v.home_path(*v.STATE_DIR, v.FEED_FILES["downloads-scan"]))
-    calls.clear()
-    res = v.refresh_due_feeds()
-    v.refresh_due_feeds(scan_only=True)
-    assert SIG not in calls and NOPW not in calls and "2 days old" in res["message"]
     # Password dialog dismissed: said once, and the scan still runs.
     v.COMMANDS[SIG] = (126, "")
-    res = v.refresh_due_feeds(daily_only=True, signatures=True)
+    res = v.refresh_due_feeds(full=True, signatures=True)
     assert "virus signatures were not updated: no password was given" in res["message"]
-    assert "Scanned what is new in Downloads" in res["message"] and "tries again" not in res["message"]
+    assert "scanned your home folder" in res["message"]
 
 
 def test_clamui_activity_counts_in_the_last_run_list(v):

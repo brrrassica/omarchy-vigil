@@ -116,31 +116,35 @@ compares against the newest one the people who maintain it have published.
 updating them needs root. ClamAV's own update service (`clamav-freshclam`,
 which Vigil turns on when it installs ClamAV) refreshes them every couple of
 hours, so they are normally never more than a few hours old. Right before
-every virus scan, Vigil makes sure they are current. If they are over a day
-old (the service is off, or the computer was offline), a **Run now** button
-updates them first, behind your password, and its card shows that exact
-command. The background run never asks for a password: it scans with what
-is there and says how old the signatures were. The Virus signatures row on
-the Detect tab offers to turn the update service back on.
+every virus scan, Vigil makes sure they are current, and leaves updating
+them to ClamAV: the daily and weekly checks never ask for a password. If
+the service falls behind and they are **over two days old** (the service is
+off, or the computer was offline), Vigil sends one notification a day
+saying so, the Virus signatures row on the Detect tab turns to a warning,
+and **Run all** updates them first, behind your password, with that exact
+command on its card. Until then, scans use what is there and say how old
+it was. The Virus signatures row also offers to turn the update service
+back on if it is off.
 
 **When a download fails**, the scan still runs with the last good list and
-says so: its row and its Last run line read "with the list from Oct 1". A
-scan with no list at all does not run, and is tried again the next day.
+says so once that list is over two days old: its row and its Last run line
+read "with the list from Oct 1", in your theme's red. A scan with no list
+at all does not run, and is tried again the next day.
 
 Under **Run now**, the Overview has a button for each run, and **Run all**
 for both. Under each button is when that run next happens by itself. Each
 asks first, on a card that lists exactly what it runs, in order:
 
 - **Daily check** runs the daily check now. Pressed, it also installs
-  updates for your own Flatpak apps. No password, unless the virus
-  signatures are over a day old (see above).
+  updates for your own Flatpak apps. No password.
 - **Weekly check** runs the weekly check now: the firmware lookup, then a
   virus scan of your whole home folder (skipping caches, game libraries,
   `node_modules` and `.git` folders, at low priority). It can take a while;
   a notification says when it is done.
 - **Run all** (`R` or `S`) runs the daily check, then the weekly check, plus
-  the password scan. The password prompts come first, while you are at the
-  screen. The virus scan of your home folder includes Downloads, so Run all
+  the password scan, and updates the virus signatures first when they are
+  over two days old. Those are the only password prompts in any run, and
+  they come first, while you are at the screen. The virus scan of your home folder includes Downloads, so Run all
   does not scan Downloads twice.
 
 Bumblebee itself is never installed or updated by a run. Vigil installs
@@ -179,8 +183,9 @@ Weekly check, Run all only), in the order it runs them, with when it last
 ran. There are no lines for the lists themselves: each scan fetched its own
 right before it ran. The rows in each tab are ordered the same way: the
 always-current rows first, then the rows of the daily check and the weekly
-check. Anything that failed, is out of date, or had to use a list over a
-day old is red.
+check. Anything that failed, is out of date, or had to use a list over
+two days old is shown in your theme's red (Omarchy's `urgent` colour, which
+every theme sets from its own `red`).
 
 Work done outside Vigil counts too: signatures updated by ClamAV's own
 update service or in ClamUI count as current, and the virus scan line
@@ -227,7 +232,7 @@ settings:
 | Key | Default | Meaning |
 |---|---|---|
 | `refreshMinutes` | `30` | How often to check in the background (5 to 1440). |
-| `notifyOnNew` | `true` | One desktop notification when a check that was fine starts failing. It only says how many. |
+| `notifyOnNew` | `true` | One desktop notification when a check that was fine starts failing. It only says how many. Also one a day, in fixed words, while ClamAV's virus signatures are over two days old. |
 | `autoUpdate` | `true` | Run the daily check and the weekly check by themselves (see [When Vigil runs what](#when-vigil-runs-what) and [Where the data comes from](#where-the-data-comes-from)). Off means they run only when you press a Run button. |
 
 ## What Vigil checks
@@ -471,7 +476,7 @@ Vigil keeps no threat lists of its own.
 
 | What | Maintained by | How it stays current |
 |---|---|---|
-| Virus signatures | ClamAV (Cisco Talos) | ClamAV's own `clamav-freshclam` service, several times a day; checked right before every virus scan, and updated first by a Run now button when over a day old |
+| Virus signatures | ClamAV (Cisco Talos) | ClamAV's own `clamav-freshclam` service, several times a day; checked right before every virus scan; updated by **Run all** only when over two days old |
 | Known vulnerabilities in Arch packages | Arch Linux security team | arch-audit downloads the tracker as it scans, in each daily check |
 | Known-malicious npm, Bun and other packages | OSV.dev and the OpenSSF Malicious Packages project | osv-scanner asks OSV.dev as it scans, in each daily check |
 | AUR package status | the AUR | AUR lookup, in each daily check |

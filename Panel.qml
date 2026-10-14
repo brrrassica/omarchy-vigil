@@ -89,6 +89,7 @@ Panel {
   property bool updatePending: false
   property real lastAutoRun: 0
   property bool statusIsError: false
+  property string signaturesNoticeDay: ""
 
   property string tab: "overview"
   readonly property var tabs: ["overview", "harden", "detect", "supply", "privacy", "care"]
@@ -158,6 +159,13 @@ Panel {
     if (updatePending) setStatus("Vigil was updated to " + helperVersion + ". Restart the shell to load the new panel.", false)
     if (rowIndex >= visibleChecks.length) rowIndex = Math.max(0, visibleChecks.length - 1)
     if (root.isPrimary && root.notifyOnNew && parsed.fresh.length > 0) notifyNew(parsed.fresh.length)
+    // ClamAV's own update service has let the signatures get over two days
+    // old: say so once a day, and point to Run all, which updates them.
+    var today = new Date().toDateString()
+    if (root.isPrimary && root.notifyOnNew && parsed.signaturesDue && signaturesNoticeDay !== today) {
+      signaturesNoticeDay = today
+      notifySignatures()
+    }
     // The automatic run starts at most every six hours, whatever happens to it,
     // so a run that keeps failing can never restart in a loop.
     if (root.isPrimary && root.autoUpdate && parsed.feedsDue && parsed.running === null
@@ -175,9 +183,9 @@ Panel {
   readonly property var feedFlags: ({ daily: "--daily", weekly: "--weekly", full: "--full", scan: "--scan" })
   readonly property var feedTitles: ({ daily: "Run daily check", weekly: "Run weekly check", full: "Run all",
                                        scan: "Virus scan" })
-  // withSignatures: the card you confirmed showed the virus signatures update
-  // (they were over a day old), so the helper may run it. Without it, the
-  // helper never asks for that password, whatever happened since.
+  // withSignatures (Run all only): the card you confirmed showed the virus
+  // signatures update (they were over two days old), so the helper may run
+  // it. Without it, the helper never asks for that password.
   function refreshFeeds(mode, withSignatures) {
     if (feedProc.running || runElsewhere) return
     feedBuffer = ""
@@ -189,13 +197,13 @@ Panel {
     feedMode = mode
     feedProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, "refresh-feeds"]
       .concat(feedForced ? [feedFlags[mode]] : [])
-      .concat(feedForced && withSignatures === true && mode !== "scan" ? ["--signatures"] : [])
+      .concat(mode === "full" && withSignatures === true ? ["--signatures"] : [])
     feedProc.running = true
     // Anything that scans files can take hours.
     feedDeadline.interval = 4 * 3600000
     feedDeadline.restart()
     if (mode === "full") setStatus("Run all started. Omarchy may ask for your password first; after that you can close this panel.", false)
-    else if (mode === "daily") setStatus("Daily check started. Omarchy asks for your password first only if the virus signatures are old.", false)
+    else if (mode === "daily") setStatus("Daily check started.", false)
     else if (mode === "weekly") setStatus("Weekly check started. You can close this panel; you get a notification when it is done.", false)
     else if (mode === "scan") setStatus("Virus scan started. It runs in the background.", false)
   }
@@ -214,6 +222,10 @@ Panel {
     pendingAction = "install-helpers"
   }
 
+
+  function notifySignatures() {
+    Quickshell.execDetached(["/usr/bin/notify-send", "--app-name=Vigil", "--", "Vigil", Model.SIGNATURES_NOTICE])
+  }
 
   function notifyNew(count) {
     var n = Math.max(1, Math.min(99, Math.round(Number(count) || 1)))
@@ -288,7 +300,7 @@ Panel {
       return
     }
     if (kind === "daily-check" || kind === "weekly-check") {
-      refreshFeeds(kind === "daily-check" ? "daily" : "weekly", Model.cardShowsSignatures(shown))
+      refreshFeeds(kind === "daily-check" ? "daily" : "weekly")
       return
     }
     if (kind === "clean-all") {

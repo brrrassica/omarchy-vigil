@@ -463,22 +463,28 @@ test("run cards: each scan right after its list; Run all scans ~ but not ~/Downl
     assert.ok(!JSON.stringify(M.confirmation(k, "all", r)).includes("releases/download"), k)
 })
 
-test("old signatures: a Run now card asks for the password first and shows the command", () => {
+test("old signatures: only the Run all card asks for the password, and shows the command", () => {
   const src = id => ({ id, label: "x", run: "daily", date: "", time: "", state: "never", tried: "" })
-  const r = parse(report({ signaturesDue: true, sources: ["downloads-scan", "virus-scan"].map(src) }))
-  for (const k of ["daily-check", "weekly-check", "full-scan"]) {
+  const r = parse(report({ signaturesDue: true, sources: ["downloads-scan", "virus-scan", "password-check"].map(src) }))
+  const all = M.confirmation("full-scan", "all", r, "/home/a")
+  assert.match(all.lines[1], /^1\. Virus signatures update: they are over two days old/)
+  assert.deepEqual(all.commands.map(c => c.text), ["/usr/bin/pkexec /usr/bin/bash -c\n" + M.SIGNATURES_SCRIPT,
+                                                    "/usr/bin/pkexec /usr/bin/bash -c\n" + M.NO_PASSWORD_STEP])
+  assert.ok(all.lines.some(l => /password at the start, twice/.test(l)))
+  assert.equal(M.cardShowsSignatures(all), true)
+  // The daily and weekly checks never ask: ClamAV's own service keeps them current.
+  for (const k of ["daily-check", "weekly-check"]) {
     const card = M.confirmation(k, "all", r, "/home/a")
-    assert.match(card.lines[1], /^1\. Virus signatures update: they are over a day old/, k)
-    assert.equal(card.commands[0].text, "/usr/bin/pkexec /usr/bin/bash -c\n" + M.SIGNATURES_SCRIPT, k)
-    assert.ok(card.lines.some(l => /Omarchy asks for your password/.test(l)), k)
+    assert.deepEqual(card.commands, [], k)
+    assert.ok(!card.lines.some(l => /Virus signatures update/.test(l)), k)
+    assert.ok(card.lines.some(l => l.startsWith("No password needed.")), k)
+    assert.equal(M.cardShowsSignatures(card), false, k)
   }
-  assert.equal(M.confirmation("full-scan", "all", r, "/home/a").commands.length, 2)   // and the password scan
-  // The panel lets the helper update them only when the confirmed card showed the command.
-  for (const k of ["daily-check", "weekly-check", "full-scan"]) {
-    assert.equal(M.cardShowsSignatures(M.confirmation(k, "all", r, "/home/a")), true, k)
-    assert.equal(M.cardShowsSignatures(M.confirmation(k, "all", parse(report({ sources: r.sources })), "/home/a")), false, k)
-  }
+  assert.equal(M.cardShowsSignatures(M.confirmation("full-scan", "all", parse(report({ sources: r.sources })), "/home/a")), false)
   assert.equal(M.cardShowsSignatures(null), false)
+  // The notification: constant words, pointing to Run all.
+  assert.match(M.SIGNATURES_NOTICE, /over two days\. Open Vigil and press Run all/)
+  assert.doesNotMatch(M.SIGNATURES_NOTICE, /[<>&]/)
 })
 
 test("every terminal says what it does, plainly, then the technical part", () => {
@@ -1278,7 +1284,7 @@ test("run cards show the helper's root steps exactly as the helper starts them",
   assert.deepEqual(card("weekly-check", {}), [])
   assert.deepEqual(card("full-scan", {}).map(c => c.text), [nopw])
   for (const k of ["daily-check", "weekly-check"])
-    assert.deepEqual(card(k, { signaturesDue: true }).map(c => c.text), [sig], k)
+    assert.deepEqual(card(k, { signaturesDue: true }), [], k)                          // never: ClamAV's service does it
   assert.deepEqual(card("full-scan", { signaturesDue: true }).map(c => c.text), [sig, nopw])
   assert.deepEqual(card("full-scan", { tools: {}, signaturesDue: true }), [])            // no pkexec: no root step
   // Even a Bumblebee older than the pin is never installed by a run.
