@@ -10,7 +10,7 @@
 // Must match manifest.json and VERSION in bin/vigil (a test checks). The
 // helper runs from disk every time, but this file stays loaded until the
 // shell restarts, so after an update the two can differ for a while.
-var VERSION = "0.29.0"
+var VERSION = "0.30.0"
 var MAX_REPORT_CHARS = 512 * 1024
 var MAX_CHECKS = 160
 var MAX_STR = 400
@@ -183,6 +183,8 @@ function runCommands(kind, report) {
 function confirmationText(kind, id, report) {
   if (kind === "clean-all") return cleanAllConfirmation(report)
   if (kind === "ignore") return ignoreConfirmation(id, report)
+  if (kind === "trash") return trashConfirmation(id, report)
+  if (kind === "trash-all") return trashAllConfirmation(report)
   if (kind === "update-sources") return updateConfirmation(report)
   if (kind === "full-scan") return fullScanConfirmation(report)
   if (kind === "daily-check") return dailyConfirmation(report)
@@ -201,14 +203,53 @@ function confirmationText(kind, id, report) {
   return { title: a.title, lines: lines }
 }
 
-// Find one detection in the report by its id.
-function detectionItem(report, id) {
+// Find one item of a check in the report by its id: a virus detection
+// ("detection") or a leftover of an app that is gone ("leftover").
+function findItem(report, id, kind) {
   if (!report || typeof id !== "string" || !/^[0-9a-f]{16}$/.test(id)) return null
   for (var i = 0; i < report.checks.length; i++) {
     var items = report.checks[i].items || []
-    for (var j = 0; j < items.length; j++) if (items[j].id === id) return items[j]
+    for (var j = 0; j < items.length; j++) if (items[j].id === id && items[j].kind === kind) return items[j]
   }
   return null
+}
+
+function detectionItem(report, id) { return findItem(report, id, "detection") }
+function leftoverItem(report, id) { return findItem(report, id, "leftover") }
+
+// The leftovers Move all to trash would move: every listed item not kept.
+function leftoverTrashIds(report) {
+  if (!report || !report.checks) return []
+  var out = []
+  for (var i = 0; i < report.checks.length; i++) {
+    var items = report.checks[i].items || []
+    for (var j = 0; j < items.length; j++)
+      if (items[j].kind === "leftover" && !items[j].kept) out.push(items[j].id)
+  }
+  return out
+}
+
+var TRASH_LINES = [
+  "It goes to the trash, not away: open the trash in your file manager and choose Restore to put it back where it was.",
+  "Emptying the trash deletes it for good. So does Empty on the Trash row and Clean all on this tab, which empty the trash too.",
+  "If you install the app again, it starts with fresh settings unless you restore this first.",
+  "Technical: renames it into ~/.local/share/Trash/files and records where it came from in ~/.local/share/Trash/info, the freedesktop.org trash every file manager reads. Nothing is copied or deleted. Vigil checks again that no installed app uses it before it moves anything."]
+
+function trashConfirmation(id, report) {
+  var item = leftoverItem(report, id)
+  if (!item || item.kept) return null
+  return { title: "Move this to the trash?", lines: [item.text].concat(TRASH_LINES) }
+}
+
+function trashAllConfirmation(report) {
+  var ids = leftoverTrashIds(report)
+  if (ids.length === 0) return null
+  var lines = []
+  for (var i = 0; i < ids.length && i < 40; i++) lines.push(leftoverItem(report, ids[i]).text)
+  if (ids.length > 40) lines.push("… and " + (ids.length - 40) + " more")
+  lines.push("Items you marked Keep stay where they are.")
+  return { title: "Move " + ids.length + (ids.length === 1 ? " item" : " items") + " to the trash?",
+           lines: lines.concat(TRASH_LINES) }
 }
 
 function ignoreConfirmation(id, report) {
@@ -924,7 +965,8 @@ var DOCS = {
   "bumblebee": "https://github.com/perplexityai/bumblebee",
   "black-ops": "https://github.com/brightwalker25/omarchy-black-ops",
   "arch-users": "https://wiki.archlinux.org/title/Users_and_groups",
-  "attack-history": "https://attack.mitre.org/techniques/T1070/003/"
+  "attack-history": "https://attack.mitre.org/techniques/T1070/003/",
+  "arch-xdg": "https://wiki.archlinux.org/title/XDG_Base_Directory"
 }
 
 function docsUrl(id) {
@@ -1080,7 +1122,8 @@ function validCheck(c) {
     if (!isString(c.dismissedAt, 10) || !/^\d{4}-\d{2}-\d{2}$/.test(c.dismissedAt)) return null
     dismissedAt = c.dismissedAt
   }
-  // One line per detection (the virus scan), each with its own False positive button.
+  // One line per item, each with its own buttons: a virus detection (False
+  // positive) or a leftover of an app that is gone (Move to trash, Keep).
   var items = []
   if (c.items !== undefined) {
     if (!Array.isArray(c.items) || c.items.length > 500) return null
@@ -1088,7 +1131,12 @@ function validCheck(c) {
       var it = c.items[k]
       if (!it || typeof it !== "object" || typeof it.ignored !== "boolean" || !isString(it.text, 400)
           || typeof it.id !== "string" || (it.id !== "" && !/^[0-9a-f]{16}$/.test(it.id))) return null
-      items.push({ id: it.id, text: plain(it.text, 400), ignored: it.ignored })
+      var leftover = it.kind === "leftover"
+      if (it.kind !== undefined && !leftover) return null
+      if (leftover && (it.id === "" || typeof it.kept !== "boolean" || it.ignored)) return null
+      if (!leftover && it.kept !== undefined) return null
+      items.push({ id: it.id, kind: leftover ? "leftover" : "detection", text: plain(it.text, 400),
+                   ignored: it.ignored, kept: leftover ? it.kept : false })
     }
   }
   return {
@@ -1704,7 +1752,7 @@ if (typeof module !== "undefined") {
     relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine, countdown: countdown, scheduleLines: scheduleLines,
     BUMBLEBEE_INSTALL: BUMBLEBEE_INSTALL, BUMBLEBEE_VERSION: BUMBLEBEE_VERSION,
     SIGNATURES_SCRIPT: SIGNATURES_SCRIPT, NO_PASSWORD_STEP: NO_PASSWORD_STEP, rootUpdatesScript: rootUpdatesScript,
-    parseProgress: parseProgress, parseRunning: parseRunning, detectionItem: detectionItem, actionStage: actionStage, actionProgress: actionProgress,
+    parseProgress: parseProgress, parseRunning: parseRunning, detectionItem: detectionItem, leftoverItem: leftoverItem, leftoverTrashIds: leftoverTrashIds, actionStage: actionStage, actionProgress: actionProgress,
     actionOutputText: actionOutputText, progressText: progressText, lastRunRows: lastRunRows, missingLabel: missingLabel,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,
     SYSCTL_LINES: SYSCTL_LINES

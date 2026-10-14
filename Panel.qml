@@ -267,6 +267,17 @@ Panel {
       if (Model.detectionItem(report, action)) runHelper(["ignore", action])
       return
     }
+    if (kind === "trash") {
+      var left = Model.leftoverItem(report, action)
+      if (left && !left.kept) runHelper(["trash", action])
+      return
+    }
+    if (kind === "trash-all") {
+      // Exactly the items the card listed: every leftover not kept.
+      var ids = Model.leftoverTrashIds(report)
+      if (ids.length > 0) runHelper(["trash"].concat(ids))
+      return
+    }
     if (kind === "update-sources") {
       refreshFeeds("sources")
       return
@@ -344,17 +355,24 @@ Panel {
     runAudit()
   }
 
-  // Runs bin/vigil with a fixed verb and an id the panel already validated:
-  // `fix <helper action>`, `dismiss|undismiss <check id>`, `ignore|unignore <detection id>`.
+  // Runs bin/vigil with a fixed verb and ids the panel already validated:
+  // `fix <helper action>`, `dismiss|undismiss <check id>`, `ignore|unignore <detection id>`,
+  // `keep|unkeep <leftover id>`, `trash <leftover id>...`. Ids are hashes the
+  // helper made; no file name ever reaches the command line.
   function runHelper(args) {
-    if (fixProc.running || args.length !== 2) return
-    if (["fix", "dismiss", "undismiss", "ignore", "unignore"].indexOf(args[0]) === -1
-        || !/^[a-z0-9-]{1,40}$/.test(args[1])) return
-    if ((args[0] === "ignore" || args[0] === "unignore") && !/^[0-9a-f]{16}$/.test(args[1])) return
+    if (fixProc.running || args.length < 2) return
+    if (["fix", "dismiss", "undismiss", "ignore", "unignore", "keep", "unkeep", "trash"].indexOf(args[0]) === -1) return
+    var hashed = ["ignore", "unignore", "keep", "unkeep", "trash"].indexOf(args[0]) !== -1
+    if (args.length !== 2 && (args[0] !== "trash" || args.length > 151)) return
+    for (var i = 1; i < args.length; i++) {
+      if (!/^[a-z0-9-]{1,40}$/.test(args[i])) return
+      if (hashed && !/^[0-9a-f]{16}$/.test(args[i])) return
+      if (args.indexOf(args[i]) !== i) return
+    }
     fixBuffer = ""
     fixOverflow = false
     fixAction = args[1]
-    fixProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, args[0], args[1]]
+    fixProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath].concat(args)
     fixProc.running = true
     fixDeadline.restart()
     setStatus("Working…", false)
@@ -379,6 +397,25 @@ Panel {
   function requestUnignore(item) {
     if (!report || busy || !item || item.id === "" || !item.ignored) return
     runHelper(["unignore", item.id])
+  }
+
+  // Leftovers of apps that are gone: Move to trash asks first; Keep and Stop
+  // keeping only change Vigil's own notes, so they do not.
+  function requestTrash(item) {
+    if (!report || busy || !item || item.kind !== "leftover" || item.kept) return
+    pendingKind = "trash"
+    pendingAction = item.id
+  }
+
+  function requestTrashAll() {
+    if (!report || busy || Model.leftoverTrashIds(report).length === 0) return
+    pendingKind = "trash-all"
+    pendingAction = "leftovers"
+  }
+
+  function setKept(item, on) {
+    if (!report || busy || !item || item.kind !== "leftover" || item.kept === on) return
+    runHelper([on ? "keep" : "unkeep", item.id])
   }
 
   function requestUndo(check) {
@@ -1362,6 +1399,8 @@ Panel {
     readonly property bool undoable: check !== null && root.report !== null && check.undo.action !== ""
       && Model.canRun({ kind: "terminal", action: check.undo.action }, root.report.tools, root.report.apps)
     readonly property bool reviewable: check !== null && (check.dismissible || check.dismissed)
+    readonly property bool trashable: check !== null && check.items.some(function(it) {
+      return it.kind === "leftover" && !it.kept })
     signal clicked()
 
     hasCursor: selected
@@ -1502,43 +1541,79 @@ Panel {
         font.pixelSize: Style.font.caption
         wrapMode: Text.WrapAnywhere
       }
-      // One line per detection, each with False positive (or Not a false positive).
+      // One line per item. A detection has False positive (or Not a false
+      // positive); a leftover has Move to trash and Keep (or Stop keeping).
       Repeater {
         model: row.expanded && row.check !== null ? row.check.items : []
         delegate: Row {
           id: itemRow
           required property var modelData
+          readonly property bool leftover: modelData.kind === "leftover"
+          readonly property bool quiet: modelData.ignored || modelData.kept
           width: parent ? parent.width : 0
           spacing: Style.space(8)
           Text {
             textFormat: Text.PlainText
-            width: itemRow.width - itemButton.width - itemRow.spacing
+            width: itemRow.width - itemButtons.width - itemRow.spacing
             anchors.verticalCenter: parent.verticalCenter
-            text: itemRow.modelData.text + (itemRow.modelData.ignored ? "  (false positive)" : "")
+            text: itemRow.modelData.text + (itemRow.modelData.ignored ? "  (false positive)"
+                                            : itemRow.modelData.kept ? "  (kept)" : "")
             color: root.dim
-            opacity: itemRow.modelData.ignored ? 0.6 : 1
+            opacity: itemRow.quiet ? 0.6 : 1
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WrapAnywhere
           }
-          Button {
-            id: itemButton
-            visible: itemRow.modelData.id !== ""
-            text: itemRow.modelData.ignored ? "Not a false positive" : "False positive"
-            tooltipText: itemRow.modelData.ignored ? "Count this detection again"
-                                                   : "The file is safe and ClamAV is wrong. Only if you are sure; it comes back if the file changes"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            enabled: !root.busy && root.pending === null
-            onClicked: itemRow.modelData.ignored ? root.requestUnignore(itemRow.modelData)
-                                                 : root.requestIgnore(itemRow.modelData)
+          Row {
+            id: itemButtons
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(6)
+            Button {
+              visible: itemRow.leftover && !itemRow.modelData.kept
+              text: "Move to trash"
+              tooltipText: "Asks first. You can restore it from the trash in your file manager"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              enabled: !root.busy && root.pending === null
+              onClicked: root.requestTrash(itemRow.modelData)
+            }
+            Button {
+              visible: itemRow.leftover
+              text: itemRow.modelData.kept ? "Stop keeping" : "Keep"
+              tooltipText: itemRow.modelData.kept ? "Count it again, so you can move it to the trash"
+                                                  : "Leave it where it is; Vigil stops counting it"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              enabled: !root.busy && root.pending === null
+              onClicked: root.setKept(itemRow.modelData, !itemRow.modelData.kept)
+            }
+            Button {
+              visible: !itemRow.leftover && itemRow.modelData.id !== ""
+              text: itemRow.modelData.ignored ? "Not a false positive" : "False positive"
+              tooltipText: itemRow.modelData.ignored ? "Count this detection again"
+                                                     : "The file is safe and ClamAV is wrong. Only if you are sure; it comes back if the file changes"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              enabled: !root.busy && root.pending === null
+              onClicked: itemRow.modelData.ignored ? root.requestUnignore(itemRow.modelData)
+                                                   : root.requestIgnore(itemRow.modelData)
+            }
           }
         }
       }
       Flow {
-        visible: row.expanded && (row.runnable || row.undoable || row.reviewable)
+        visible: row.expanded && (row.runnable || row.undoable || row.reviewable || row.trashable)
         width: parent.width
         spacing: Style.space(8)
+        Button {
+          visible: row.trashable
+          text: "Move all to trash"
+          tooltipText: "Asks first, listing each item. Items you keep stay where they are"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          enabled: !root.busy && root.pending === null
+          onClicked: root.requestTrashAll()
+        }
         Button {
           visible: row.runnable && !(row.check !== null && row.check.dismissed)
           text: row.check ? row.check.fix.label : ""

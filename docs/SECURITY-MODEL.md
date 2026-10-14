@@ -62,8 +62,10 @@ These hold for every pillar, now and in later phases:
    the installed one is older), never by a background check, at the
    version pinned in Vigil's code, after its checksum matches.
 6. **Nothing automatic.** Every change to your system is confirmed. Marking
-   a finding as reviewed, or a virus detection as a false positive, changes
-   only Vigil's own notes and is undone with one click, so it does not ask.
+   a finding as reviewed, a virus detection as a false positive, or a
+   leftover as kept, changes only Vigil's own notes and is undone with one
+   click, so it does not ask. Nothing in your home folder is deleted to
+   tidy it: a leftover goes to the trash, where you can restore it.
    Notifications carry counts only; IPC methods take no parameters.
 7. **Removal leaves nothing running.** Vigil has no units, cron jobs or
    daemons of its own, and a scan or update under way stops within seconds
@@ -77,7 +79,7 @@ These hold for every pillar, now and in later phases:
 | Part | Runs as | Does |
 |---|---|---|
 | `Panel.qml` + `Model.js` | you, inside `omarchy-shell` | Draws the lighthouse and panel, starts the helper, validates its output, launches confirmed actions. |
-| `bin/vigil` | you, as a child process | Reads local settings and returns one JSON report; performs the six helper actions. |
+| `bin/vigil` | you, as a child process | Reads local settings and returns one JSON report; performs the helper actions (a closed list), and moves leftovers you choose to the trash. |
 | Script actions | root through `pkexec` (Omarchy's password dialog), or you | Constant scripts from `Model.js`, shown in full on a confirmation first; what they print is shown in the panel. |
 | Terminal actions | you, in a visible terminal | Omarchy's own interactive commands, and choosing an SSH passphrase. |
 | App actions | you | Open ClamUI with a fixed argv: `/usr/bin/clamui`, or `/usr/bin/flatpak run io.github.linx_systems.ClamUI`. |
@@ -386,6 +388,36 @@ say where they connect before they run.
   else re-hashes, and a different hash, a missing file or a link in its
   place counts the detection again. The panel asks first. The helper verbs
   are `vigil ignore|unignore <16 hex digits>`.
+- **Leftover app data** reads, never runs: pacman's `desc` files in
+  `/var/lib/pacman/local` (names, provides and replaces only, 64 KiB cap
+  each), the names in `/usr/bin`, `/usr/share`, `/usr/lib`, `/etc`, `/opt`
+  and the like, desktop entries (`Exec`, `TryExec`, `StartupWMClass` and
+  `Icon` of the main group, 64 KiB cap), the installed Flatpak app folders,
+  `/proc/<pid>/comm`, and the same startup files the persistence check
+  reads. All within four seconds; if that survey does not finish, the row
+  says so and lists nothing, since an incomplete survey would list things
+  that are in use. Folder walks never follow links, and a folder too big
+  to walk within the limit is treated as in use.
+- Each leftover is named to the panel by an id: 16 hex digits of the
+  SHA-256 of its place and name. File names never reach a command line.
+  The verbs are `vigil keep|unkeep <id>` (Vigil's notes in
+  `kept-leftovers.json`, nothing else) and `vigil trash <id>...` (at most
+  150 distinct ids, each checked against the pattern). The panel asks
+  first, on a card that lists every item, and sends exactly the ids that
+  card showed. The helper runs the whole check again and moves only ids it
+  still lists and you have not kept, so something reinstalled or kept in
+  the meantime stays put.
+- Moving to the trash follows the freedesktop.org trash layout, as a file
+  manager does. The source folder is opened with the usual no-follow walk
+  from your home folder, and so are `~/.local/share/Trash/files` and
+  `info`. The item must be yours; a link is moved as a link, never
+  followed. The `.trashinfo` file is created first with `O_EXCL` (mode
+  0600), reserving the name, with the original path percent-encoded byte
+  by byte, so a line break in a name cannot add a line. Then one `rename`
+  between the held folders, and `fsync` of all three. An item on another
+  disk than the trash (a mount point, say) is refused rather than copied,
+  and nothing that holds the trash itself is ever moved. Nothing is
+  deleted.
 - The daily Downloads scan lists files changed since the last one (an hour
   of overlap, never a gap) in your Downloads folder (`XDG_DOWNLOAD_DIR` only
   when it is a plain `$HOME/...` path), without following links, at most

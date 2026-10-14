@@ -781,7 +781,7 @@ test("virus detections each carry an id for Ignore, and the card says what ignor
   const items = [{ id: "0123456789abcdef", text: "~/Games/dx11.dll: Win.Trojan.Agent-1", ignored: false },
                  { id: "", text: "~/old.exe: Win.X-1", ignored: false }]
   const r = parse(report({ checks: [check({ id: "virus-scan", category: "detect", items })] }))
-  assert.deepEqual(r.checks[0].items, items)
+  assert.deepEqual(r.checks[0].items, items.map(i => Object.assign({ kind: "detection", kept: false }, i)))
   assert.equal(parse(report()).checks[0].items.length, 0)
   const card = M.confirmation("ignore", "0123456789abcdef", r)
   assert.equal(card.title, "Mark this as a false positive?")
@@ -793,6 +793,48 @@ test("virus detections each carry an id for Ignore, and the card says what ignor
     assert.equal(parse(report({ checks: [check({ items: [bad] })] })), null)
 })
 
+
+function leftoverReport(items) {
+  return parse(report({ checks: [check({ id: "leftovers", category: "care", status: "info", weight: 0,
+    title: "Leftover app data", fix: { kind: "docs", action: "arch-xdg", label: "Learn more" }, items })] }))
+}
+
+test("leftovers each carry Move to trash and Keep, and the cards say it goes to the trash", () => {
+  const items = [
+    { id: "0123456789abcdef", kind: "leftover", text: "~/.config/Slack: 210.0 MB, no installed app uses it", kept: false, ignored: false },
+    { id: "fedcba9876543210", kind: "leftover", text: "~/.var/app/com.spotify.Client: 1.2 GB, data of a Flatpak app that is no longer installed", kept: true, ignored: false },
+    { id: "00000000000000aa", kind: "leftover", text: "~/.local/bin/old: 0 B, a link to a program that is gone", kept: false, ignored: false }]
+  const r = leftoverReport(items)
+  assert.deepEqual(r.checks[0].items, items)
+  assert.deepEqual(M.leftoverTrashIds(r), ["0123456789abcdef", "00000000000000aa"])     // kept ones stay
+
+  const one = M.confirmation("trash", "0123456789abcdef", r, "/home/a")
+  assert.equal(one.title, "Move this to the trash?")
+  assert.equal(one.lines[0], items[0].text)
+  assert.ok(one.lines.some(l => /choose Restore/.test(l)))
+  assert.ok(one.lines.some(l => /deletes it for good/.test(l) && /Clean all/.test(l)))
+  assert.deepEqual(one.commands, [])
+  assert.equal(M.confirmation("trash", "fedcba9876543210", r), null)        // kept: no trash card
+  assert.equal(M.confirmation("trash", "ffffffffffffffff", r), null)        // not in the report
+  assert.equal(M.confirmation("ignore", "0123456789abcdef", r), null)       // a leftover is not a detection
+
+  const all = M.confirmation("trash-all", "leftovers", r)
+  assert.equal(all.title, "Move 2 items to the trash?")
+  assert.deepEqual(all.lines.slice(0, 2), [items[0].text, items[2].text])
+  assert.ok(all.lines.some(l => /marked Keep stay/.test(l)))
+  assert.ok(!all.lines.some(l => /Spotify|spotify/.test(l)))
+  assert.equal(M.confirmation("trash-all", "leftovers", leftoverReport([items[1]])), null)
+  assert.equal(M.docsUrl("arch-xdg"), "https://wiki.archlinux.org/title/XDG_Base_Directory")
+})
+
+test("leftover items that do not match the shape reject the report", () => {
+  const ok = { id: "0123456789abcdef", kind: "leftover", text: "x", kept: false, ignored: false }
+  for (const bad of [Object.assign({}, ok, { id: "" }), Object.assign({}, ok, { kept: "no" }),
+                     Object.assign({}, ok, { kept: undefined }), Object.assign({}, ok, { ignored: true }),
+                     Object.assign({}, ok, { kind: "file" }), Object.assign({}, ok, { id: "../.ssh" }),
+                     { id: "0123456789abcdef", text: "x", ignored: false, kept: true }])
+    assert.equal(leftoverReport([bad]), null, JSON.stringify(bad))
+})
 
 test("after an update, the panel names the new version instead of failing", () => {
   const manifest = JSON.parse(readFileSync(path.join(here, "..", "manifest.json"), "utf8"))

@@ -35,6 +35,7 @@ Rules this file keeps (they follow the marketplace review guidance):
 
 Standard library only.
 """
+import bisect
 import errno
 import fcntl
 import zlib
@@ -55,7 +56,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta, timezone
 
-VERSION = "0.29.0"
+VERSION = "0.30.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -4285,6 +4286,542 @@ def check_user_cache():
                   fix=fix("helper", "clean-app-cache", "Clear unused"), weight=0)
 
 
+# --- Leftover app data --------------------------------------------------------
+# Apps you remove leave their settings and data in your home folder. A file's
+# age says nothing about whether you still use an app (settings are written
+# once and read for years), so Vigil asks instead whether anything on this
+# machine still claims the folder: an installed package or what it provides,
+# a program, a desktop entry, a Flatpak, Omarchy's own config set, a running
+# process, or a startup file that names it. Only what nothing claims, and
+# nothing has changed for a month, is listed. It is information, never a
+# problem: each item can be kept (Vigil stops listing it) or moved to the
+# trash, one at a time, never deleted.
+
+LEFTOVER_DAYS = 30
+LEFTOVER_MAX = 150
+LEFTOVER_SECONDS = 4.0
+KEPT_FILE = "kept-leftovers.json"
+KEPT_MAX = 500
+
+# (key, folder under home, what is listed there)
+LEFTOVER_ROOTS = (
+    ("config", (".config",), "names"),
+    ("share", (".local", "share"), "names"),
+    ("state", (".local", "state"), "names"),
+    ("home", (), "dotdirs"),
+    ("flatpak", (".var", "app"), "flatpak"),
+    ("bin", (".local", "bin"), "links"),
+    ("launchers", (".local", "share", "applications"), "launchers"),
+)
+
+# Shared folders that no single app owns, and folders that hold your keys,
+# your shell or Omarchy itself. Never listed, whatever is installed.
+LEFTOVER_NEVER = {
+    "config": {"autostart", "systemd", "environment.d", "user-dirs.dirs", "user-dirs.locale", "user-dirs.conf",
+               "mimeapps.list", "gtk-2.0", "gtk-3.0", "gtk-4.0", "gtkrc", "gtkrc-2.0", "fontconfig", "dconf",
+               "pulse", "pipewire", "wireplumber", "xdg-desktop-portal", "menus", "omarchy", "uwsm", "hypr",
+               "kdeglobals", "qtproject.conf", "trolltech.conf", "qt5ct", "qt6ct", "kvantum", "ibus", "fcitx",
+               "fcitx5", "gnome-session", "procps", "enchant", "user-tmpfiles.d", "containers",
+               "xdg-terminals.list", "monitors.xml", "session", "configstore", "kwalletrc", "kwinrc"},
+    "share": {"applications", "icons", "fonts", "themes", "mime", "trash", "recently-used.xbel", "keyrings",
+              "gvfs-metadata", "flatpak", "omarchy", "sounds", "backgrounds", "color-schemes",
+              "desktop-directories", "xorg", "systemd", "containers", "man", "bash-completion", "zsh", "fish",
+              "dbus-1", "pki", "user-places.xbel", "locale", "doc", "help", "info", "vulkan", "webapps",
+              "nautilus-python", "kservices5", "kxmlgui5", "glib-2.0", "mime-types"},
+    "state": {"omarchy-vigil", "omarchy", "wireplumber", "lesshst", "python_history", "bash", "zsh", "fish",
+              "systemd", "pipewire", "uwsm"},
+    "home": {".ssh", ".gnupg", ".local", ".config", ".cache", ".var", ".pki", ".password-store", ".icons",
+             ".themes", ".fonts", ".terminfo", ".trash", ".dbus", ".git", ".dotfiles", ".oh-my-zsh", ".zsh",
+             ".bashrc.d", ".nvm", ".pyenv", ".rbenv", ".sdkman", ".asdf", ".nix-profile", ".nix-defexpr",
+             ".gnome", ".kde", ".kde4", ".x11", ".xmonad", ".mail", ".maildir", ".tor", ".secrets"},
+}
+
+# Folder names that do not resemble the package or program they belong to.
+LEFTOVER_ALIASES = {
+    "mozilla": ("firefox", "thunderbird", "librewolf", "floorp", "zenbrowser", "seamonkey"),
+    "m2": ("maven", "mvn"),
+    "vscode": ("code", "codium", "vscodium", "visualstudiocode"),
+    "vscodeoss": ("code", "codium", "vscodium"),
+    "vscodium": ("codium",),
+    "ohmyzsh": ("zsh",),
+    "azure": ("az", "azurecli"),
+    "jetbrains": ("idea", "pycharm", "clion", "goland", "webstorm", "rider", "phpstorm", "rubymine", "datagrip",
+                  "rustrover", "jetbrainstoolbox", "intellijidea", "android"),
+    "google": ("googlechrome", "googleearth", "chrome"),
+    "android": ("androidstudio", "adb", "androidtools"),
+    "gnupg": ("gpg", "gnupg"),
+}
+
+_NORM = re.compile(r"[^a-z0-9]")
+_FILE_SUFFIX = re.compile(r"(\.[A-Za-z0-9]{1,8})+$")
+PROGRAM_DIRS = ("/usr/bin", "/usr/local/bin", "/usr/sbin", "/bin", "/opt", "/usr/share/omarchy/bin")
+CLAIM_DIRS = ("/usr/share", "/usr/local/share", "/usr/lib", "/usr/lib32", "/usr/libexec", "/etc", "/etc/xdg",
+              "/usr/share/omarchy/config", "/usr/share/omarchy/default")
+DESKTOP_DIRS = ("/usr/share/applications", "/usr/local/share/applications",
+                "/var/lib/flatpak/exports/share/applications")
+
+
+def _norm(name):
+    return _NORM.sub("", name.lower())
+
+
+def flatpak_app_ids():
+    """Installed Flatpak app ids, for you and for the whole system."""
+    ids = set()
+    for d in (home_path(".local", "share", "flatpak", "app"), sys_path("/var/lib/flatpak/app")):
+        ids.update(n for n in list_dir(d, 2000) if _APP_ID.match(n))
+    return ids
+
+
+def _desktop_keys(text):
+    """Exec, TryExec, StartupWMClass and Icon of a desktop entry's main group."""
+    out, group = {}, ""
+    for line in text.splitlines()[:2000]:
+        s = line.strip()
+        if s.startswith("["):
+            group = s
+            continue
+        if group == "[Desktop Entry]" and "=" in s:
+            k, _, val = s.partition("=")
+            k = k.strip()
+            if k in ("Exec", "TryExec", "StartupWMClass", "Icon", "Hidden") and k not in out:
+                out[k] = val.strip()
+    return out
+
+
+def _exec_program(cmd):
+    """(program, flatpak app id or "") from an Exec line: env and VAR=value
+    are skipped; field codes and quotes are dropped."""
+    tokens = [t.strip("\"'") for t in cmd.split() if not t.startswith("%")]
+    while tokens and (tokens[0] == "env" or tokens[0].endswith("/env") or
+                      ("=" in tokens[0] and not tokens[0].startswith("/"))):
+        tokens.pop(0)
+    if not tokens:
+        return "", ""
+    prog, app = tokens[0], ""
+    if prog.rsplit("/", 1)[-1] == "flatpak" and "run" in tokens:
+        rest = tokens[tokens.index("run") + 1:]
+        app = next((t for t in rest if not t.startswith("-")), "")
+    return prog, app
+
+
+def _claims(deadline):
+    """Normalised names that something installed or running answers to,
+    the raw text of your startup files, and whether the survey finished."""
+    words = set()
+
+    def add(name):
+        n = _norm(name)
+        if n:
+            words.add(n)
+        for suffix in ("bin", "git", "desktop", "appimage", "nightly", "beta", "stable", "browser"):
+            if len(n) > len(suffix) + 2 and n.endswith(suffix):
+                words.add(n[: -len(suffix)])
+
+    pkgdir = sys_path("/var/lib/pacman/local")
+    for pkg in list_dir(pkgdir, 10000):
+        if time.monotonic() > deadline:
+            return words, "", False
+        try:
+            text = read_text("%s/%s/desc" % (pkgdir, pkg), SMALL_FILE_MAX)
+        except Refused:
+            continue
+        section = ""
+        for line in (text or "").splitlines():
+            if line.startswith("%") and line.endswith("%"):
+                section = line
+            elif line and section in ("%NAME%", "%PROVIDES%", "%REPLACES%"):
+                add(re.split(r"[<>=]", line, maxsplit=1)[0])
+    for d in PROGRAM_DIRS + CLAIM_DIRS:
+        for name in list_dir(sys_path(d), 20000):
+            add(name)
+    for name in list_dir(home_path(".local", "bin"), 5000):
+        if exists_followed(home_path(".local", "bin", name)):
+            add(name)
+    for name in list_dir(home_path(".local", "share", "omarchy", "config"), 2000):
+        add(name)
+    for app in flatpak_app_ids():
+        add(app)
+        add(app.rsplit(".", 1)[-1])
+    desktop = [sys_path(d) for d in DESKTOP_DIRS] + [home_path(".local", "share", "flatpak", "exports", "share",
+                                                               "applications")]
+    for d in desktop:
+        for name in list_dir(d, 3000):
+            if not name.endswith(".desktop") or time.monotonic() > deadline:
+                continue
+            base = name[:-len(".desktop")]
+            add(base)
+            add(base.rsplit(".", 1)[-1])
+            try:
+                keys = _desktop_keys(read_text(d + "/" + name, SMALL_FILE_MAX, follow=True) or "")
+            except Refused:
+                continue
+            for k in ("StartupWMClass", "Icon"):
+                if keys.get(k) and "/" not in keys[k]:
+                    add(keys[k])
+            prog, app = _exec_program(keys.get("Exec", ""))
+            if prog:
+                add(prog.rsplit("/", 1)[-1])
+            if app:
+                add(app.rsplit(".", 1)[-1])
+    for pid in list_dir(sys_path("/proc"), 5000):
+        if pid.isdigit() and time.monotonic() <= deadline:
+            try:
+                add((read_text(sys_path("/proc/%s/comm" % pid), 256) or "").strip())
+            except Refused:
+                pass
+    texts, total = [], 0
+    files = [home_path(*p) for p in STARTUP_FILES]
+    for parts, suffix in STARTUP_DIRS:
+        d = home_path(*parts)
+        files += [d + "/" + n for n in list_dir(d, 300) if not suffix or n.endswith(suffix)]
+    for path in files[:600]:
+        try:
+            t = read_text(path, FILE_MAX, follow=True)
+        except Refused:
+            continue
+        if t and total < 8 * FILE_MAX:
+            texts.append(t)
+            total += len(t)
+    return words, "\n".join(texts), time.monotonic() <= deadline
+
+
+def exists_followed(path):
+    try:
+        os.stat(path)
+        return True
+    except OSError:
+        return False
+
+
+def _name_variants(name, is_file):
+    """The names an entry may answer to: itself, without a file's extension
+    (pavucontrol.ini), and the last part of a reverse-DNS name
+    (org.gnome.TextEditor)."""
+    bare = name.lstrip(".")
+    out = [_norm(bare)]
+    if is_file:
+        out.append(_norm(_FILE_SUFFIX.sub("", bare)))
+    dotted = bare.split(".")
+    if len(dotted) >= 3 and all(dotted):
+        out.append(_norm(dotted[-1]))
+    return [n for n in dict.fromkeys(out) if n]
+
+
+def _is_claimed(name, is_file, words, ordered, mentions):
+    variants = _name_variants(name, is_file)
+    if not variants:
+        return True                        # nothing to go by: never guess
+    bare = name.lstrip(".")
+    if len(bare) >= 3 and bare in mentions:
+        return True                        # a startup file names it (an installer that lives in ~, say)
+    return any(_word_claimed(n, words, ordered) for n in variants)
+
+
+def _word_claimed(n, words, ordered):
+    for candidate in (n,) + LEFTOVER_ALIASES.get(n, ()):
+        if candidate in words:
+            return True
+        if len(candidate) >= 4:
+            # A claim that begins the name ("brave" for BraveSoftware), or a
+            # name that begins a claim ("signal" for signal-desktop).
+            if any(candidate[:k] in words for k in range(4, len(candidate))):
+                return True
+            i = bisect.bisect_left(ordered, candidate)
+            if i < len(ordered) and ordered[i].startswith(candidate):
+                return True
+    return False
+
+
+def _tree_stats(path, deadline, limit=100000):
+    """(bytes, newest mtime, complete) under a path, never following a link."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return 0, 0.0, False
+    if not stat.S_ISDIR(st.st_mode):
+        return st.st_blocks * 512, st.st_mtime, True
+    total, newest, count, stack = 0, st.st_mtime, 0, [path]
+    while stack:
+        if count >= limit or time.monotonic() > deadline:
+            return total, newest, False
+        cur = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                for e in it:
+                    count += 1
+                    try:
+                        s = e.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    newest = max(newest, s.st_mtime)
+                    if stat.S_ISDIR(s.st_mode):
+                        stack.append(e.path)
+                    else:
+                        total += s.st_blocks * 512
+        except OSError:
+            continue
+    return total, newest, True
+
+
+def leftover_id(key, name):
+    return hashlib.sha256(("%s\0%s" % (key, name)).encode("utf-8", "surrogateescape")).hexdigest()[:16]
+
+
+def _launcher_gone(path, apps):
+    """Why a desktop entry of yours starts nothing any more, or ""."""
+    try:
+        keys = _desktop_keys(read_text(path, SMALL_FILE_MAX) or "")
+    except Refused:
+        return ""
+    for k in ("TryExec", "Exec"):
+        prog, app = _exec_program(keys.get(k, ""))
+        if app and _APP_ID.match(app) and app not in apps:
+            return "starts a Flatpak app that is no longer installed"
+        if prog.startswith("/"):
+            real = prog if prog.startswith(HOME + "/") else sys_path(prog)
+            if not exists_followed(real):
+                return "starts a program that is gone"
+    return ""
+
+
+def leftovers():
+    """Everything listed, kept or not, largest first. Internal records."""
+    deadline = time.monotonic() + LEFTOVER_SECONDS
+    words, mentions, complete = _claims(deadline)
+    if not complete:
+        return None
+    ordered = sorted(words)
+    apps = flatpak_app_ids()
+    cutoff = time.time() - LEFTOVER_DAYS * 86400
+    found = []
+    for key, parts, kind in LEFTOVER_ROOTS:
+        base = home_path(*parts)
+        never = LEFTOVER_NEVER.get(key, set())
+        for name in list_dir(base, 3000):
+            if len(found) >= LEFTOVER_MAX * 2 or time.monotonic() > deadline + WALK_MAX_SECONDS:
+                break
+            path = os.path.join(base, name)
+            try:
+                st = os.lstat(path)
+            except OSError:
+                continue
+            if st.st_uid != os.geteuid() or name.lower() in never:
+                continue
+            reason = ""
+            if kind == "links":
+                if stat.S_ISLNK(st.st_mode) and not exists_followed(path):
+                    reason = "a link to a program that is gone"
+            elif kind == "launchers":
+                if stat.S_ISREG(st.st_mode) and name.endswith(".desktop"):
+                    gone = _launcher_gone(path, apps)
+                    reason = "a launcher that %s" % gone if gone else ""
+            elif kind == "flatpak":
+                if stat.S_ISDIR(st.st_mode) and _APP_ID.match(name) and name not in apps:
+                    reason = "data of a Flatpak app that is no longer installed"
+            elif stat.S_ISLNK(st.st_mode):
+                continue                    # a dotfile manager's link: deliberate
+            elif kind == "dotdirs" and not (name.startswith(".") and stat.S_ISDIR(st.st_mode)):
+                continue
+            elif not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
+                continue
+            elif not _is_claimed(name, stat.S_ISREG(st.st_mode), words, ordered, mentions):
+                reason = "no installed app uses it"
+            if not reason:
+                continue
+            size, newest, whole = _tree_stats(path, deadline + WALK_MAX_SECONDS)
+            if kind in ("names", "dotdirs") and (not whole or newest >= cutoff):
+                continue                    # changed this month, or too big to be sure: still in use
+            found.append({"id": leftover_id(key, name), "parts": parts, "name": name,
+                          "shown": "~/" + "/".join(parts + (name,)), "size": size,
+                          "newest": newest, "reason": reason})
+    found.sort(key=lambda f: (-f["size"], f["shown"]))
+    return found[:LEFTOVER_MAX]
+
+
+def kept_leftovers():
+    data = _state_json(KEPT_FILE)
+    entries = data.get("kept") if isinstance(data, dict) else None
+    out = {}
+    for e in (entries if isinstance(entries, list) else [])[:KEPT_MAX]:
+        if isinstance(e, dict) and isinstance(e.get("id"), str) and re.fullmatch(r"[0-9a-f]{16}", e["id"]):
+            out[e["id"]] = e
+    return out
+
+
+def _leftover_text(f):
+    when = time.strftime("%Y-%m", time.localtime(f["newest"])) if f["newest"] else ""
+    age = ", unchanged since %s" % when if when and f["reason"] == "no installed app uses it" else ""
+    return "%s: %s, %s%s" % (clean(f["shown"], 200), human(f["size"]), f["reason"], age)
+
+
+@check
+def check_leftovers():
+    cid, cat, title = "leftovers", "care", "Leftover app data"
+    why = ("Apps you remove leave their settings and data behind. Vigil lists what no installed app, program, "
+           "Flatpak or startup file uses and nothing has changed for a month, in ~/.config, ~/.local/share, "
+           "~/.local/state, ~/.var/app, ~/.local/bin, your launchers and the folders in ~ that start with a dot.")
+    howto = ("Keep what you want to hold on to (settings you would want back if you reinstall an app): it "
+             "stays where it is and Vigil stops counting it. Move to trash puts the rest in the trash, not away: restore it from the trash "
+             "in your file manager if you were wrong. Emptying the trash, here or with Clean all, deletes it "
+             "for good.")
+    learn = fix("docs", "arch-xdg", "Learn more")
+    found = leftovers()
+    if found is None:
+        return result(cid, cat, title, "unknown", "Could not finish checking what is installed.", why, weight=0)
+    kept = kept_leftovers()
+    items, live, live_size = [], [], 0
+    for f in found:
+        text = _leftover_text(f)
+        is_kept = f["id"] in kept
+        items.append({"id": f["id"], "kind": "leftover", "text": text, "kept": is_kept, "ignored": False})
+        if not is_kept:
+            live.append(text)
+            live_size += f["size"]
+    note = " %d kept." % (len(found) - len(live)) if len(found) > len(live) else ""
+    if live:
+        out = result(cid, cat, title, "info", "%d left behind by apps that are gone (%s).%s" % (
+            len(live), human(live_size), note), why, clean_block(live), learn, weight=0, howto=howto)
+    else:
+        out = result(cid, cat, title, "pass", ("Nothing new left behind.%s" % note) if note
+                     else "Nothing left behind.", why, fix=learn, weight=0)
+    out["items"] = items
+    return out
+
+
+def set_kept(lid, on):
+    """`vigil keep <id>` / `vigil unkeep <id>`: only Vigil's own notes change."""
+    if not re.fullmatch(r"[0-9a-f]{16}", lid):
+        return {"ok": False, "action": "", "message": "Unknown item."}
+    f = None
+    if on:
+        f = next((x for x in leftovers() or [] if x["id"] == lid), None)
+        if f is None:
+            return {"ok": False, "action": "", "message": "That item is no longer on the list."}
+    try:
+        dirfd = _state_dir()
+    except (OSError, Refused):
+        return {"ok": False, "action": "", "message": "Could not open the Vigil state folder."}
+    try:
+        _lock(dirfd)
+        current = [e for e in kept_leftovers().values() if e["id"] != lid]
+        if on:
+            current.append({"id": lid, "shown": clean(f["shown"], 200), "at": time.strftime("%Y-%m-%d")})
+        write_atomic(dirfd, KEPT_FILE, json.dumps({"schema": SCHEMA, "kept": current[-KEPT_MAX:]},
+                                                  separators=(",", ":")).encode())
+    finally:
+        os.close(dirfd)
+    return {"ok": True, "action": "", "message": "Kept. It stays where it is and Vigil stops counting it."
+            if on else "Counting it again."}
+
+
+def _trash_url(path):
+    """The trash spec's Path=: the absolute path, percent-encoded byte by byte."""
+    keep = set(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-._~")
+    return "".join(chr(b) if b in keep else "%%%02X" % b for b in os.fsencode(path))
+
+
+def move_to_trash(parts, name):
+    """Move one entry of yours into the home trash (freedesktop.org layout:
+    files/ and info/<name>.trashinfo), the way a file manager does. One
+    rename relative to held folders; a link is moved as a link, never
+    followed. Nothing is copied or deleted: on another disk it stays put."""
+    where = tuple(parts) + (name,)
+    if where == tuple(TRASH[:len(where)]) or name in ("", ".", "..") or "/" in name:
+        raise Refused("that holds the trash itself")
+    parent = _open_home_dir(list(parts))
+    try:
+        st = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if st.st_uid != os.geteuid():
+            raise Refused("it is not yours")
+        files = _open_home_dir(list(TRASH) + ["files"], create=True)
+        try:
+            info = _open_home_dir(list(TRASH) + ["info"], create=True)
+            try:
+                if os.fstat(files).st_dev != st.st_dev:
+                    raise Refused("it is on another disk than the trash, so it was left where it is")
+                base = name if len(os.fsencode(name)) <= 200 else "leftover-" + secrets.token_hex(6)
+                for n in range(100):
+                    tname = base if n == 0 else "%s.%d" % (base, n + 1)
+                    try:
+                        ifd = os.open(tname + ".trashinfo", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                                      | os.O_CLOEXEC, 0o600, dir_fd=info)
+                    except FileExistsError:
+                        continue
+                    try:
+                        os.stat(tname, dir_fd=files, follow_symlinks=False)
+                        taken = True
+                    except FileNotFoundError:
+                        taken = False
+                    if taken:
+                        os.close(ifd)
+                        os.unlink(tname + ".trashinfo", dir_fd=info)
+                        continue
+                    break
+                else:
+                    raise Refused("the trash already holds too many items of that name")
+                try:
+                    body = "[Trash Info]\nPath=%s\nDeletionDate=%s\n" % (
+                        _trash_url(os.path.join(HOME, *(tuple(parts) + (name,)))), time.strftime("%Y-%m-%dT%H:%M:%S"))
+                    os.write(ifd, body.encode("ascii"))
+                    os.fsync(ifd)
+                    os.close(ifd)
+                    ifd = None
+                    os.rename(name, tname, src_dir_fd=parent, dst_dir_fd=files)
+                except BaseException:
+                    if ifd is not None:
+                        os.close(ifd)
+                    try:
+                        os.unlink(tname + ".trashinfo", dir_fd=info)
+                    except OSError:
+                        pass
+                    raise
+                for fd in (files, info, parent):
+                    os.fsync(fd)
+            finally:
+                os.close(info)
+        finally:
+            os.close(files)
+    finally:
+        os.close(parent)
+
+
+def trash_leftovers(ids):
+    """`vigil trash <id>...`: move listed, not kept items to the trash. Each id
+    must name an item the check lists right now, so nothing that an app has
+    since claimed, or that you chose to keep, is ever moved."""
+    found = {f["id"]: f for f in leftovers() or []}
+    kept = kept_leftovers()
+    moved, problems = [], []
+    for lid in ids:
+        f = found.get(lid)
+        if f is None:
+            problems.append("one item is no longer on the list")
+            continue
+        if lid in kept:
+            problems.append("%s is kept (press Stop keeping first)" % clean(f["shown"], 80))
+            continue
+        try:
+            move_to_trash(f["parts"], f["name"])
+            moved.append(f)
+        except Refused as e:
+            problems.append("%s: %s" % (clean(f["shown"], 80), e))
+        except OSError as e:
+            problems.append("%s: %s" % (clean(f["shown"], 80), os.strerror(e.errno or 0) or "failed"))
+    if len(moved) == 1:
+        msg = "Moved %s to the trash." % clean(moved[0]["shown"], 120)
+    elif moved:
+        msg = "Moved %d items to the trash." % len(moved)
+    else:
+        msg = "Nothing was moved."
+    if problems:
+        msg += " Left where %s: %s." % ("it was" if len(problems) == 1 else "they were", "; ".join(problems[:3]))
+    if moved:
+        msg += " To put %s back, open the trash in your file manager and choose Restore." % (
+            "it" if len(moved) == 1 else "one")
+    return {"ok": bool(moved) or not problems, "action": "", "message": clean(msg)}
+
+
 _UNITS = {"B": 1, "KiB": 1024, "MiB": 1024 ** 2, "GiB": 1024 ** 3, "TiB": 1024 ** 4}
 _PACCACHE_SAVED = re.compile(r"disk space saved: ([0-9]+(?:\.[0-9]+)?) (B|KiB|MiB|GiB|TiB)\)")
 
@@ -4424,10 +4961,13 @@ def undo_available(action):
 EVIDENCE_CHECKS = {"open-ports", "persistence", "file-changes", "exposed-secrets", "malicious-packages",
                    "virus-scan", "ld-preload", "bumblebee", "scanner-arch-audit", "aur-status",
                    "omarchy-plugins", "aur-packages", "accounts", "shell-history", "old-services"}
+# Rows reviewed item by item instead (Keep on each leftover), so the row
+# itself has no Mark as reviewed.
+ITEM_REVIEWED = {"leftovers"}
 
 
 def dismissible(c):
-    return c["status"] not in ("pass", "na")
+    return c["status"] not in ("pass", "na") and c["id"] not in ITEM_REVIEWED
 
 
 # ---------------------------------------------------------------------------
@@ -5392,6 +5932,13 @@ def main(argv):
     if len(argv) == 3 and argv[1] in ("ignore", "unignore") and re.fullmatch(r"[0-9a-f]{16}", argv[2]):
         emit(set_ignored(argv[2], argv[1] == "ignore"))
         return 0
+    if len(argv) == 3 and argv[1] in ("keep", "unkeep") and re.fullmatch(r"[0-9a-f]{16}", argv[2]):
+        emit(set_kept(argv[2], argv[1] == "keep"))
+        return 0
+    if 3 <= len(argv) <= 2 + LEFTOVER_MAX and argv[1] == "trash" and len(set(argv[2:])) == len(argv) - 2 \
+            and all(re.fullmatch(r"[0-9a-f]{16}", a) for a in argv[2:]):
+        emit(trash_leftovers(argv[2:]))
+        return 0
     if len(argv) == 3 and argv[1] in ("dismiss", "undismiss") and re.fullmatch(r"[a-z0-9-]{1,40}", argv[2]):
         emit(set_dismissed(argv[2], argv[1] == "dismiss"))
         return 0
@@ -5423,7 +5970,7 @@ def main(argv):
     if len(argv) == 2 and argv[1] == "version":
         emit({"version": VERSION})
         return 0
-    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection> | vigil refresh-feeds [--force|--sources|--daily|--weekly|--full|--scan] | vigil running | vigil stop | vigil version\n")
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection> | vigil keep|unkeep <leftover> | vigil trash <leftover>... | vigil refresh-feeds [--force|--sources|--daily|--weekly|--full|--scan] | vigil running | vigil stop | vigil version\n")
     return 2
 
 

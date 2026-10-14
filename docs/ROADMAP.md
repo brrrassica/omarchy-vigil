@@ -111,7 +111,29 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.29.0 (this release): the design rules, checked against the code
+## 0.30.0 (this release): what removed apps left behind
+
+- [x] **Leftover app data** on the Care tab: settings and data in
+      `~/.config`, `~/.local/share`, `~/.local/state` and the dot-folders
+      in `~` that nothing on the computer uses any more (no package, what
+      packages provide, program, desktop entry, Flatpak, Omarchy config,
+      running program or startup file answers to the name, and nothing in
+      it changed for 30 days); Flatpak data in `~/.var/app` of apps no
+      longer installed; links in `~/.local/bin` to programs that are gone;
+      launchers in `~/.local/share/applications` that start nothing.
+      Information only: it never lowers the score or notifies.
+- [x] One line per item, each with **Move to trash** (asks first) and
+      **Keep** (Vigil's notes only; **Stop keeping** undoes it), and
+      **Move all to trash** for everything not kept. The trash is the
+      freedesktop.org trash every file manager reads, so Restore puts an
+      item back; nothing is deleted, and leftovers are never part of Clean
+      all. Before it moves anything the helper checks again that nothing
+      uses the item and that you did not keep it.
+- [ ] Later: show launchers that point to a program by name rather than
+      by path, once there is a reliable way to know the PATH your session
+      uses.
+
+## 0.29.0: the design rules, checked against the code
 
 - [x] Every confirmation card shows the exact commands Run starts, below
       the Run and Cancel buttons: each root step in full (the pkexec argv,

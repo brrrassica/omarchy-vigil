@@ -2860,3 +2860,156 @@ def test_the_confirming_rescan_keeps_file_names_out_of_its_arguments(v):
     assert not any(str(secret) in a or "tax-2026" in a for a in argv)
     assert listed == [str(secret)] and mode == 0o600
     assert not Path(v.HOME, *v.STATE_DIR, v.CONFIRM_LIST).exists()
+
+
+# --------------------------------------------------------------------------
+# Leftover app data
+
+OLD = time.time() - 400 * 86400
+
+
+def aged_tree(path, when=OLD):
+    """Set a whole tree's times to `when`, children first, without following links."""
+    path = Path(path)
+    if path.is_dir() and not path.is_symlink():
+        for child in path.iterdir():
+            aged_tree(child, when)
+    os.utime(path, (when, when), follow_symlinks=False)
+    return path
+
+
+def leftover_home(v):
+    pkg = Path(v.ROOT, "var/lib/pacman/local")
+    put(pkg / "signal-desktop-7.0-1" / "desc", "%NAME%\nsignal-desktop\n\n%PROVIDES%\nfoo-provider=1.0\n")
+    put(pkg / "visual-studio-code-bin-1.0-1" / "desc", "%NAME%\nvisual-studio-code-bin\n")
+    sysfile(v, "/usr/bin/brave", "")
+    sysfile(v, "/usr/share/applications/code.desktop",
+            "[Desktop Entry]\nExec=/usr/bin/code %F\nStartupWMClass=Code\n")
+    for rel in (".config/Signal/config.json", ".config/BraveSoftware/x", ".config/Code/User/settings.json",
+                ".config/foo-provider/rc", ".config/oldapp/rc", ".config/gtk-3.0/settings.ini",
+                ".config/hypr/hyprland.conf", ".cargo/bin/x", ".oldtool/data", ".ssh/config",
+                ".local/share/org.example.Gone/db", ".local/state/goneapp/log"):
+        homefile(v, rel, "x")
+    homefile(v, ".config/zapzap.conf", "x")
+    for rel in (".config", ".cargo", ".oldtool", ".ssh", ".local/share/org.example.Gone", ".local/state/goneapp"):
+        aged_tree(Path(v.HOME, rel))
+    homefile(v, ".config/newapp/rc", "x")                                  # changed this month: in use
+    os.symlink("/nowhere/dotfiles/stowed", os.path.join(v.HOME, ".config", "stowed"))   # a dotfile manager's link
+    homefile(v, ".bashrc", 'export PATH="$HOME/.cargo/bin:$PATH"\n')
+    homefile(v, ".var/app/com.spotify.Client/config/x", "x")                # Flatpak gone, even if recent
+    homefile(v, ".var/app/org.mozilla.firefox/x", "x")
+    Path(v.HOME, ".local/share/flatpak/app/org.mozilla.firefox").mkdir(parents=True)
+    homefile(v, ".local/bin/real", "#!/bin/sh\n")
+    os.symlink(os.path.join(v.HOME, ".local/bin/real"), os.path.join(v.HOME, ".local/bin/alive"))
+    os.symlink("/opt/gone/bin/tool", os.path.join(v.HOME, ".local/bin/dead"))
+    apps = ".local/share/applications/"
+    homefile(v, apps + "gone.desktop", "[Desktop Entry]\nName=Gone\nExec=/opt/gone/app %U\n")
+    homefile(v, apps + "spotify.desktop", "[Desktop Entry]\nExec=/usr/bin/flatpak run --branch=stable com.spotify.Client\n")
+    homefile(v, apps + "webapp.desktop", "[Desktop Entry]\nExec=omarchy-launch-webapp https://example.com\n")
+    homefile(v, apps + "firefox.desktop", "[Desktop Entry]\nExec=env A=1 flatpak run org.mozilla.firefox\n")
+
+
+def shown(c):
+    return sorted(i["text"].split(":")[0] for i in c["items"])
+
+
+def test_leftovers_lists_only_what_nothing_claims(v):
+    leftover_home(v)
+    c = v.check_leftovers()
+    assert c["status"] == "info" and c["weight"] == 0 and c["category"] == "care"
+    assert shown(c) == ["~/.config/oldapp", "~/.config/zapzap.conf", "~/.local/bin/dead",
+                        "~/.local/share/applications/gone.desktop", "~/.local/share/applications/spotify.desktop",
+                        "~/.local/share/org.example.Gone", "~/.local/state/goneapp", "~/.oldtool",
+                        "~/.var/app/com.spotify.Client"]
+    assert all(i["kind"] == "leftover" and i["kept"] is False and len(i["id"]) == 16 for i in c["items"])
+    assert c["summary"].startswith("9 left behind by apps that are gone (")
+    assert c["fix"] == {"kind": "docs", "action": "arch-xdg", "label": "Learn more"}
+    assert "restore it from the trash" in c["howto"]
+    row = next(x for x in v.audit(peek=True)["checks"] if x["id"] == "leftovers")
+    assert row["dismissible"] is False                               # reviewed item by item, with Keep
+
+
+def test_leftovers_says_so_when_nothing_is_left(v):
+    c = v.check_leftovers()
+    assert c["status"] == "pass" and c["summary"] == "Nothing left behind." and c["items"] == []
+
+
+def test_keep_and_stop_keeping_change_only_vigils_notes(v):
+    leftover_home(v)
+    item = next(i for i in v.check_leftovers()["items"] if i["text"].startswith("~/.oldtool:"))
+    assert v.set_kept(item["id"], True)["ok"] is True
+    c = v.check_leftovers()
+    assert c["summary"].startswith("8 left behind") and c["summary"].endswith(" 1 kept.")
+    assert next(i for i in c["items"] if i["id"] == item["id"])["kept"] is True
+    assert ".oldtool" not in c["detail"]
+    assert Path(v.HOME, ".oldtool/data").exists()
+    refused = v.trash_leftovers([item["id"]])
+    assert refused["ok"] is False and "is kept (press Stop keeping first)" in refused["message"]
+    assert Path(v.HOME, ".oldtool/data").exists()
+    assert v.set_kept(item["id"], False)["message"] == "Counting it again."
+    assert v.check_leftovers()["summary"].startswith("9 left behind")
+    assert v.set_kept("0" * 16, True)["ok"] is False                           # not on the list
+
+
+def test_trash_moves_into_the_freedesktop_trash(v):
+    leftover_home(v)
+    os.rename(os.path.join(v.HOME, ".config/oldapp"), os.path.join(v.HOME, ".config/old app\n%x"))
+    c = v.check_leftovers()
+    ids = {i["text"].split(":")[0]: i["id"] for i in c["items"]}
+    target = next(k for k in ids if k.startswith("~/.config/old app"))
+    out = v.trash_leftovers([ids[target], ids["~/.local/bin/dead"]])
+    assert out["ok"] is True and out["message"].startswith("Moved 2 items to the trash. To put one back")
+    trash = Path(v.HOME, ".local/share/Trash")
+    assert (trash / "files" / "old app\n%x" / "rc").read_text() == "x"
+    assert (trash / "files" / "dead").is_symlink()                             # the link moved, not its target
+    info = (trash / "info" / "old app\n%x.trashinfo").read_text()
+    assert info.startswith("[Trash Info]\nPath=%s/.config/old%%20app%%0A%%25x\nDeletionDate=" % v.HOME)
+    assert stat.S_IMODE((trash / "info" / "old app\n%x.trashinfo").stat().st_mode) == 0o600
+    assert not Path(v.HOME, ".config/old app\n%x").exists()
+    # A second item of the same name gets its own trash name.
+    homefile(v, ".config/old app\n%x/rc", "y")
+    aged_tree(Path(v.HOME, ".config/old app\n%x"))
+    again = next(i["id"] for i in v.check_leftovers()["items"] if i["text"].startswith("~/.config/old app"))
+    assert v.trash_leftovers([again])["ok"] is True
+    assert (trash / "files" / "old app\n%x.2" / "rc").read_text() == "y"
+    assert (trash / "info" / "old app\n%x.2.trashinfo").exists()
+    assert v.trash_leftovers([again])["message"].startswith("Nothing was moved. Left where it was: one item is no longer")
+
+
+def test_trash_checks_again_that_nothing_claims_it(v):
+    leftover_home(v)
+    lid = next(i["id"] for i in v.check_leftovers()["items"] if i["text"].startswith("~/.config/oldapp:"))
+    put(Path(v.ROOT, "var/lib/pacman/local/oldapp-1-1/desc"), "%NAME%\noldapp\n")     # installed again since
+    out = v.trash_leftovers([lid])
+    assert out["ok"] is False and "no longer on the list" in out["message"]
+    assert Path(v.HOME, ".config/oldapp/rc").exists()
+
+
+def test_trash_refuses_a_link_on_the_way_and_moves_nothing(v, tmp_path):
+    leftover_home(v)
+    lid = next(i["id"] for i in v.check_leftovers()["items"] if i["text"].startswith("~/.local/state/goneapp:"))
+    elsewhere = tmp_path / "elsewhere"
+    os.rename(os.path.join(v.HOME, ".local/state"), elsewhere)
+    os.symlink(elsewhere, os.path.join(v.HOME, ".local/state"))
+    v.leftovers = lambda real=v.leftovers: real() + [{"id": lid, "parts": (".local", "state"), "name": "goneapp",
+                                                      "shown": "~/.local/state/goneapp", "size": 0, "newest": 0,
+                                                      "reason": "x"}]
+    out = v.trash_leftovers([lid])
+    assert out["ok"] is False and "not a real directory" in out["message"]
+    assert (elsewhere / "goneapp" / "log").exists()
+
+
+def test_trash_and_keep_take_only_ids(v, capsys):
+    for argv in (["vigil", "trash", "../../.ssh"], ["vigil", "trash", "0" * 16, "0" * 16],
+                 ["vigil", "keep", ".config/x"], ["vigil", "unkeep"], ["vigil", "trash"]):
+        assert v.main(argv) == 2, argv
+    assert v.main(["vigil", "trash", "0" * 16, "1" * 16]) == 0
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["ok"] is False
+
+
+def test_trash_never_moves_the_folders_that_hold_the_trash(v):
+    homefile(v, ".local/share/Trash/files/keep", "x")
+    for parts, name in (((), ".local"), ((".local",), "share"), ((".local", "share"), "Trash")):
+        with pytest.raises(v.Refused):
+            v.move_to_trash(parts, name)
+    assert Path(v.HOME, ".local/share/Trash/files/keep").exists()

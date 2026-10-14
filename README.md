@@ -11,7 +11,7 @@ one panel, five pillars.
 | **Detect** | Is something bad already here? Malware hiding places, files that changed, virus scanning through [ClamUI](https://github.com/linx-systems/clamui). |
 | **Supply** | Can I trust what I installed? Known-compromised packages through Perplexity's [Bumblebee](https://github.com/perplexityai/bumblebee), known vulnerabilities, AUR packages, your other Omarchy plugins. |
 | **Privacy** | What does this machine tell the networks it joins? DNS fallback, hardware address, connectivity pings, announcements, telemetry opt-outs. |
-| **Care** | Is the system tidy? Thumbnails, trash, caches, old packages and logs. |
+| **Care** | Is the system tidy? Thumbnails, trash, caches, what removed apps left behind, old packages and logs. |
 
 Vigil keeps no threat lists of its own. Everything it checks against comes
 from the people who maintain it (the Arch security team, OSV.dev and the
@@ -28,7 +28,7 @@ needs root then asks for your password, and the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.29.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.30.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -160,7 +160,8 @@ or two), **How to fix**, and **Details**. Below that are its buttons:
   that fix: a port you opened on purpose, an unencrypted desktop that never
   leaves home. It stays in its tab, dimmed, no longer lowers the score or
   notifies, and stays reviewed through every later check and scan. **Show
-  again** undoes it.
+  again** undoes it. Leftover app data is the one exception: you review it
+  item by item with **Keep**, so the row has no Mark as reviewed.
 
 For findings that report evidence rather than a setting (open ports, startup
 files, file changes, exposed secrets, infected files, known-malicious or
@@ -263,6 +264,7 @@ lower it. A warning you mark as reviewed stops counting.
 | Thumbnail cache | Previews the file manager made of your pictures and videos | Cleared without root |
 | Trash | Files you deleted in the file manager | Emptied without root, directly in its standard folders |
 | Application caches | Files apps keep in `~/.cache` to start faster | **Clear unused** (no root), see below |
+| Leftover app data | Settings and data that apps you removed left in your home folder | **Move to trash** or **Keep**, one item at a time (no root), see below |
 | Package cache | Packages pacman downloaded | `paccache -rk2` and `paccache -ruk0` (asks for your password), see below |
 | Orphaned packages | Packages nothing needs any more | `omarchy-update-orphan-pkgs`, which asks before removing anything |
 | System logs | The system journal | `journalctl --vacuum-time=2weeks` (asks for your password) |
@@ -275,6 +277,47 @@ not change that. **Clear unused** appears once more than 1 MB has gone a
 week untouched, such as the cache of an app you stopped using. Caches in use
 are never deleted, since apps would only rebuild them. To see what takes the
 space: `du -sh ~/.cache/* | sort -h`.
+
+**Leftover app data.** When you remove an app, its settings and data stay
+in your home folder. A file's age says little here (you set an app up once
+and it reads those settings for years), so Vigil asks a different question:
+does anything on this computer still use it? A folder counts as used when
+its name matches an installed package (or what a package provides), a
+program, a desktop entry or its window class, an installed Flatpak,
+Omarchy's own configs, a running program, or a line in your startup files
+(`~/.bashrc` naming `~/.cargo/bin`, say). Folders whose names do not look
+like their app, such as `~/.mozilla` for Firefox or `~/.config/Code` for
+VS Code, are matched too. Shared folders no single app owns (`autostart`,
+`systemd`, `gtk-3.0`, `fontconfig`, `pipewire`, `hypr`, `omarchy`, ...)
+and folders that hold your keys or shell (`~/.ssh`, `~/.gnupg`,
+`~/.oh-my-zsh`, `~/.nvm`, ...) are never listed, and neither are links,
+which usually come from a dotfile manager.
+
+| Where | Listed when |
+|---|---|
+| `~/.config`, `~/.local/share`, `~/.local/state`, and the folders in `~` that start with a dot | nothing uses it, and nothing in it has changed for 30 days |
+| `~/.var/app` | its Flatpak app is no longer installed (`flatpak uninstall` keeps your data unless you ask) |
+| `~/.local/bin` | it is a link to a program that is gone |
+| `~/.local/share/applications` | the launcher starts a program that is gone, or a Flatpak that is no longer installed |
+
+The list is information: it never lowers the score or notifies. Open the
+row and go through it item by item:
+
+- **Keep** leaves it where it is: settings you want back if you install the
+  app again, or something Vigil cannot know you use. It stays in the list,
+  dimmed and marked "(kept)", and is no longer counted. **Stop keeping**
+  counts it again. Both only change Vigil's own notes, so they do not ask.
+- **Move to trash** asks first, then moves it to the trash, the same
+  trash your file manager uses. Nothing is deleted: open the trash in your
+  file manager and choose **Restore** to put it back. Emptying the trash
+  deletes it for good, and so do **Empty** on the Trash row and
+  **Clean all**, which empty the trash too.
+- **Move all to trash** does the same for every item not kept, after one
+  confirmation that lists them.
+
+Just before it moves anything, Vigil looks again: an item that something
+now uses, or that you kept, stays where it is. Leftovers are never part of
+Clean all.
 
 **Package cache.** Vigil keeps the two newest versions of each installed
 package, so a bad update can be rolled back, and frees older versions and
@@ -330,8 +373,10 @@ The panel always says which kind an action is:
    no shell. Pages come only from a fixed list in `Model.js` (Arch Wiki,
    MITRE ATT&CK, Perplexity's Bumblebee, Black Ops); nothing in the report becomes a URL.
    They change nothing, so they do not ask first.
-5. **Mark as reviewed**, **Show again** and **Not a false positive** only
-   change Vigil's own state file, so they do not ask first either.
+5. **Mark as reviewed**, **Show again**, **Not a false positive**, **Keep**
+   and **Stop keeping** only change Vigil's own notes, so they do not ask
+   first either. **Move to trash** asks first, and moves an item with one
+   rename into the trash; it never deletes anything.
 
 Vigil never runs a file from its own folder as root (root only ever runs
 `/usr/bin/bash` with one of the fixed scripts, after your password), never
@@ -438,6 +483,8 @@ servers), Flatpak and firmware updates, and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/wifi-autojoin-off` | the Stop auto-joining action | the networks it changed, so Undo puts back exactly those |
 | `~/.local/state/omarchy-vigil/checkup-db/` | `checkupdates`, as you | each daily check: its private copy of the package databases (a few MB) |
 | `~/.local/state/omarchy-vigil/ignored-detections.json` | the helper, mode 0600 | when you mark a virus detection as a false positive: the file's path, the signature name and the file's SHA-256 |
+| `~/.local/state/omarchy-vigil/kept-leftovers.json` | the helper, mode 0600 | when you press Keep on a leftover: its id and where it is |
+| `~/.local/share/Trash/files/`, `~/.local/share/Trash/info/` | the helper | only when you move a leftover to the trash: the item itself, and a `.trashinfo` file with where it came from, as every file manager writes |
 | `~/.local/state/omarchy-vigil/busy/` | the helper, mode 0700, empty | once: the folder Vigil locks so only one scan or update runs at a time |
 | `~/.local/state/omarchy-vigil/last-run.json` | the helper, mode 0600 | after each daily or update check: its date, time and whether every source updated |
 | `/usr/local/bin/bumblebee` | the Install, Update Bumblebee, Run update check or Run all button, as root | only when you install Bumblebee, or update an older one: Perplexity's program, version 0.1.2, checked against the SHA-256 in Vigil's code |
