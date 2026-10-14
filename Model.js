@@ -219,6 +219,9 @@ var PICK_SPECS = {
   plugin: { remove: "Remove", all: false, card: "remove-plugins", keep: true },
   detection: { remove: "False positive", all: false, card: "ignore", keep: false }
 }
+var MARK_LEVELS = ["high", "medium", "low"]
+
+
 var CARD_KINDS = { "trash": "leftover", "remove-orphans": "orphan", "remove-foreign": "foreign",
                    "remove-plugins": "plugin", "ignore": "detection" }
 
@@ -1283,7 +1286,21 @@ function validCheck(c) {
                                                              || it.name === "keasbeexd.vigil"))) return null
         name = it.name
       } else if (it.name !== undefined) return null
-      items.push({ id: it.id, kind: kind, text: plain(it.text, 400), name: name,
+      // The second line in parts, each with a level for its colour (high,
+      // medium, low). Shown only when the parts read exactly as that line,
+      // so colour never adds or changes a word; otherwise the plain line.
+      var marks = []
+      if (it.marks !== undefined) {
+        if (!Array.isArray(it.marks) || it.marks.length > 8) return null
+        for (var m = 0; m < it.marks.length; m++) {
+          var mk = it.marks[m]
+          if (!mk || typeof mk !== "object" || !isString(mk.text, 200) || MARK_LEVELS.indexOf(mk.level) === -1) return null
+          marks.push({ text: plain(mk.text, 200), level: mk.level })
+        }
+        var second = String(it.text).split("\n")
+        if (second.length !== 2 || marks.map(function(x) { return x.text }).join(", ") !== plain(second[1], 400)) marks = []
+      }
+      items.push({ id: it.id, kind: kind, text: plain(it.text, 400), name: name, marks: marks,
                    ignored: it.ignored, kept: kind === "detection" ? false : it.kept })
     }
   }
@@ -1705,6 +1722,18 @@ function parseReport(text) {
       apps.clamui = d.apps.clamui
     }
   }
+  // The theme's yellow and green for severity colours, as the helper read
+  // them from its colors.toml: "#rrggbb" or "".
+  var themeColors = { yellow: "", green: "" }
+  if (d.themeColors !== undefined) {
+    if (!d.themeColors || typeof d.themeColors !== "object" || Array.isArray(d.themeColors)) return null
+    for (var tc in themeColors) {
+      var cv = d.themeColors[tc]
+      if (cv === undefined) continue
+      if (typeof cv !== "string" || (cv !== "" && !/^#[0-9A-Fa-f]{6}$/.test(cv))) return null
+      themeColors[tc] = cv
+    }
+  }
   var fresh = []
   if (Array.isArray(d["new"])) {
     if (d["new"].length > 40) return null
@@ -1751,7 +1780,7 @@ function parseReport(text) {
     signaturesDue: d.signaturesDue === true,
     history: history,
     version: plain(d.version, 20), generatedAt: plain(d.generatedAt, 40),
-    score: Math.round(d.score), level: d.level, checks: checks, tools: tools, apps: apps, fresh: fresh
+    score: Math.round(d.score), level: d.level, checks: checks, tools: tools, apps: apps, themeColors: themeColors, fresh: fresh
   }
 }
 
@@ -2024,7 +2053,7 @@ if (typeof module !== "undefined") {
     SIGNATURES_SCRIPT: SIGNATURES_SCRIPT, NO_PASSWORD_STEP: NO_PASSWORD_STEP,
     SOURCE_IDS: SOURCE_IDS, DAILY_IDS: DAILY_IDS, WEEKLY_IDS: WEEKLY_IDS, cardShowsSignatures: cardShowsSignatures,
     parseProgress: parseProgress, parseRunning: parseRunning, detectionItem: detectionItem, leftoverItem: leftoverItem, leftoverIdList: leftoverIdList, leftoverTrashIds: leftoverTrashIds,
-    PICK_SPECS: PICK_SPECS, pickSpec: pickSpec, itemPickable: itemPickable, itemRemovable: itemRemovable, pickableIds: pickableIds,
+    PICK_SPECS: PICK_SPECS, MARK_LEVELS: MARK_LEVELS, pickSpec: pickSpec, itemPickable: itemPickable, itemRemovable: itemRemovable, pickableIds: pickableIds,
     itemIdList: itemIdList, removalPlan: removalPlan, sameCommands: sameCommands, removalCommands: removalCommands, REMOVE_PACKAGES_SCRIPT: REMOVE_PACKAGES_SCRIPT,
     removePluginsScript: removePluginsScript, scriptCommandText: scriptCommandText, PACKAGE_NAME: PACKAGE_NAME, PLUGIN_NAME: PLUGIN_NAME, actionStage: actionStage, actionProgress: actionProgress,
     actionOutputText: actionOutputText, progressText: progressText, lastRunRows: lastRunRows, missingLabel: missingLabel,

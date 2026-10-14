@@ -796,7 +796,7 @@ test("virus detections each carry an id for Ignore, and the card says what ignor
   const items = [{ id: "0123456789abcdef", text: "~/Games/dx11.dll\nWin.Trojan.Agent-1", ignored: false },
                  { id: "", text: "~/old.exe\nWin.X-1", ignored: false }]
   const r = parse(report({ checks: [check({ id: "virus-scan", category: "detect", items })] }))
-  assert.deepEqual(r.checks[0].items, items.map(i => Object.assign({ kind: "detection", kept: false, name: "" }, i)))
+  assert.deepEqual(r.checks[0].items, items.map(i => Object.assign({ kind: "detection", kept: false, name: "", marks: [] }, i)))
   assert.equal(parse(report()).checks[0].items.length, 0)
   const card = M.confirmation("ignore", "0123456789abcdef", r)
   assert.equal(card.title, "Mark this as a false positive?")
@@ -820,7 +820,7 @@ test("ticked leftovers go to the trash on one card that lists each, and says it 
     { id: "fedcba9876543210", kind: "leftover", text: "~/.var/app/com.spotify.Client: 1.2 GB, data of a Flatpak app that is no longer installed", kept: true, ignored: false },
     { id: "00000000000000aa", kind: "leftover", text: "~/.local/bin/old: 0 B, a link to a program that is gone", kept: false, ignored: false }]
   const r = leftoverReport(items)
-  assert.deepEqual(r.checks[0].items, items.map(i => Object.assign({ name: "" }, i)))
+  assert.deepEqual(r.checks[0].items, items.map(i => Object.assign({ name: "", marks: [] }, i)))
   assert.deepEqual(M.leftoverTrashIds(r), ["0123456789abcdef", "00000000000000aa"])     // kept ones stay
 
   const one = M.confirmation("trash", "0123456789abcdef", r, "/home/a")
@@ -1391,4 +1391,26 @@ test("false positives: several at once, on one card; none twice; never a marked 
   assert.deepEqual(card.lines.slice(0, 2), ["~/a.exe: Win.X-1", "~/b.dll: Win.Y-2"])
   assert.equal(M.confirmation("ignore", "00000000000000d1,00000000000000d1", r), null)
   assert.equal(M.confirmation("ignore", "00000000000000d3", r), null)
+})
+
+test("severity marks: checked, shown only when they read exactly as the line", () => {
+  const base = { id: "00000000000000c1", name: "acme.weather", text: "Weather (acme.weather)\nnetwork, root (sudo/pkexec)" }
+  const marks = [{ text: "network", level: "medium" }, { text: "root (sudo/pkexec)", level: "high" }]
+  let r = pickReport("omarchy-plugins", "plugin", [Object.assign({ marks }, base)])
+  assert.deepEqual(r.checks[0].items[0].marks, marks)
+  // Parts that do not read as the line are dropped, never shown.
+  r = pickReport("omarchy-plugins", "plugin", [Object.assign({ marks: [marks[0]] }, base)])
+  assert.deepEqual(r.checks[0].items[0].marks, [])
+  // A level that is not one of the three, or something that is not a list, rejects the report.
+  assert.equal(pickReport("omarchy-plugins", "plugin", [Object.assign({ marks: [{ text: "network", level: "red" }] }, base)]), null)
+  assert.equal(pickReport("omarchy-plugins", "plugin", [Object.assign({ marks: "network" }, base)]), null)
+  assert.deepEqual(pickReport("omarchy-plugins", "plugin", [base]).checks[0].items[0].marks, [])
+})
+
+test("theme colours in the report are #rrggbb or nothing", () => {
+  assert.deepEqual(parse(report()).themeColors, { yellow: "", green: "" })
+  assert.deepEqual(parse(report({ themeColors: { yellow: "#f9e2af", green: "" } })).themeColors,
+                   { yellow: "#f9e2af", green: "" })
+  for (const bad of [{ yellow: "red" }, { green: "#f9e2af; x" }, { yellow: 1 }, "x", ["#ffffff"]])
+    assert.equal(parse(report({ themeColors: bad })), null)
 })

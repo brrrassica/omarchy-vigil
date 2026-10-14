@@ -79,6 +79,17 @@ Panel {
   readonly property color warnColor: Commons.Color.accent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
+  // Severity colours for the parts of a list item (what a plugin's code can
+  // do, what ClamAV found): the theme's red (urgent), and its yellow and
+  // green, which the helper reads from the theme's colors.toml. Every Omarchy
+  // theme has them; without them, yellow falls back to the accent and green
+  // to the text colour.
+  readonly property color mediumColor: report && report.themeColors.yellow !== "" ? report.themeColors.yellow : warnColor
+  readonly property color lowColor: report && report.themeColors.green !== "" ? report.themeColors.green : foreground
+  function markColor(level) {
+    return level === "high" ? urgent : level === "medium" ? mediumColor : level === "low" ? lowColor : dim
+  }
+
   property var report: null
   property string auditBuffer: ""
   property bool auditOverflow: false
@@ -1774,17 +1785,36 @@ Panel {
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WrapAtWordBoundaryOrAnywhere
               }
+              // The lock already says it is kept (or a false positive); its
+              // tooltip says which.
               Text {
                 textFormat: Text.PlainText
-                visible: itemTexts.lines.length > 1
+                visible: itemTexts.lines.length > 1 && itemRow.modelData.marks.length === 0
                 width: parent.width
-                // The lock already says it is kept (or a false positive); its
-                // tooltip says which.
                 text: itemTexts.lines.slice(1).join(" ")
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+              }
+              // Or the same line in parts, each in its severity's colour.
+              Flow {
+                visible: itemRow.modelData.marks.length > 0
+                width: parent.width
+                Repeater {
+                  model: itemRow.modelData.marks
+                  delegate: Text {
+                    required property var modelData
+                    required property int index
+                    textFormat: Text.PlainText
+                    width: Math.min(implicitWidth, textLines.width)
+                    text: modelData.text + (index < itemRow.modelData.marks.length - 1 ? ", " : "")
+                    color: root.markColor(modelData.level)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                  }
+                }
               }
             }
             MouseArea {

@@ -1553,6 +1553,42 @@ def item_text(text):
     return "\n".join(clean(line, 199) for line in text.split("\n")[:2])
 
 
+MARK_LEVELS = ("high", "medium", "low")
+THEME_COLORS = (".local", "state", "omarchy", "current", "theme", "colors.toml")
+
+
+def theme_colors():
+    """The theme's yellow and green, for the panel's severity colours (red is
+    already Omarchy's urgent colour). Only a line that is exactly
+    `name = "#rrggbb"` counts; the file is read as text, capped, through the
+    theme link Omarchy keeps (current/theme)."""
+    try:
+        text = read_text(home_path(*THEME_COLORS), SMALL_FILE_MAX, follow=True) or ""
+    except Refused:
+        text = ""
+    out = {}
+    for name in ("yellow", "green"):
+        m = re.search(r"^[ \t]*%s[ \t]*=[ \t]*[\"']?(#[0-9A-Fa-f]{6})[\"']?[ \t]*$" % name, text, re.M)
+        out[name] = m.group(1) if m else ""
+    return out
+
+
+def add_marks(item, marks):
+    """The item's second line in parts, each with a level for its colour.
+    Only when the parts read exactly as that line, so colour never adds or
+    changes a word."""
+    lines = item["text"].split("\n")
+    if marks and len(lines) == 2 and len(marks) <= 8 and all(m["level"] in MARK_LEVELS for m in marks) \
+            and ", ".join(m["text"] for m in marks) == lines[1]:
+        item["marks"] = [{"text": m["text"], "level": m["level"]} for m in marks]
+
+
+def detection_level(signature):
+    """ClamAV's heuristic rules (and potentially-unwanted ones, if a user turned
+    them on in ClamUI) guess; every other signature matches known malware."""
+    return "medium" if signature.startswith(("Heuristics.", "PUA.")) else "high"
+
+
 def pick_items(records, kept, note_kept):
     """Items for the panel and the records still counted (not kept)."""
     items, live = [], []
@@ -1561,6 +1597,7 @@ def pick_items(records, kept, note_kept):
         item = {"id": r["id"], "kind": r["kind"], "text": item_text(r["text"]), "kept": is_kept, "ignored": False}
         if "name" in r:
             item["name"] = r["name"]
+        add_marks(item, r.get("marks"))
         items.append(item)
         if not is_kept:
             live.append(r)
@@ -2715,11 +2752,13 @@ def check_virus_scan():
     items, live = [], []
     for f in found:
         # Two lines: the file, then what ClamAV found in it.
-        text = "%s\n%s" % (clean(str(f.get("path") or "").replace("\n", "\\n"), 200),
-                            clean(str(f.get("signature") or "").replace("\n", "\\n"), 120))
+        sig = clean(str(f.get("signature") or "").replace("\n", "\\n"), 120)
+        text = "%s\n%s" % (clean(str(f.get("path") or "").replace("\n", "\\n"), 200), sig)
         did = detection_id(f)
         is_ignored = did is not None and detection_ignored(f, ignored)
-        items.append({"id": did or "", "kind": "detection", "text": text, "ignored": is_ignored})
+        item = {"id": did or "", "kind": "detection", "text": text, "ignored": is_ignored}
+        add_marks(item, [{"text": sig, "level": detection_level(sig)}] if sig else None)
+        items.append(item)
         if not is_ignored:
             live.append(text.replace("\n", ": "))
     LEGACY["complete"].add("detection")
@@ -3896,14 +3935,16 @@ def plugin_records():
         if linked:
             # A development install links to a checkout elsewhere. Vigil does
             # not follow the link, so it says so rather than reporting "clean".
-            caps, said = ["linked"], "linked from another folder (development install), not scanned"
+            caps, marks = ["linked"], [{"text": PLUGIN_LINKED, "level": "medium"}]
         else:
             caps = plugin_capabilities(base + "/" + name, budget)
-            said = ", ".join(caps) if caps else "no network, root or shell use found"
+            marks = [{"text": c, "level": PLUGIN_LEVELS.get(c, "medium")} for c in caps] \
+                or [{"text": PLUGIN_NONE, "level": "low"}]
+        said = ", ".join(m["text"] for m in marks)
         removable = bool(REMOVABLE_PLUGIN.fullmatch(name)) and ".." not in name
         recs.append({"id": item_id("plugin", name, ",".join(caps)), "legacy": legacy_id("plugin", name, ",".join(caps)),
                      "kind": "plugin", "shown": label,
-                     "name": name if removable else "", "text": label + "\n" + said,
+                     "name": name if removable else "", "text": label + "\n" + said, "marks": marks,
                      "risky": "downloads and runs code" in caps or "compiled binaries" in caps})
     LEGACY["complete"].add("plugin")
     return recs
@@ -4215,6 +4256,14 @@ PLUGIN_CAPABILITIES = [
     ("downloads and runs code", PERSISTENCE_PATTERNS[0][0]),
 ]
 PLUGIN_CODE_SUFFIXES = (".qml", ".js", ".mjs", ".py", ".sh", ".bash", ".lua")
+# How much each capability deserves a look, for the colour the panel gives
+# it: high (the theme's red) can act as root or run code nobody reviewed;
+# medium (yellow) reaches the network or runs commands; low (green) is a
+# plugin where none of these were found.
+PLUGIN_LEVELS = {"root (sudo/pkexec)": "high", "downloads and runs code": "high", "compiled binaries": "high",
+                 "network": "medium", "shell commands": "medium"}
+PLUGIN_NONE = "no network, root or shell use found"
+PLUGIN_LINKED = "linked from another folder (development install), not scanned"
 
 
 def _plugin_files(root):
@@ -5769,7 +5818,7 @@ def audit(peek=False):
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "durationMs": int((time.monotonic() - started) * 1000),
         "score": score_of(checks), "level": level, "counts": counts,
-        "checks": checks, "tools": tools, "apps": {"clamui": clamui_install()},
+        "checks": checks, "tools": tools, "apps": {"clamui": clamui_install()}, "themeColors": theme_colors(),
         "new": [], "stateSaved": False, "history": state_history(state),
         "feedsDue": running is None and (any(feed_due(n) for n in DAILY_FEEDS) or feed_due("full-scan")),
         "sources": source_status(),

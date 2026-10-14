@@ -3446,3 +3446,40 @@ def test_false_positives_and_reviews_carry_over(v):
     assert again["new"] == []
     saved = json.loads(open(_state_file(v, v.STATE_NAME)).read())
     assert saved["dismissed"][0]["fp"] == v.fingerprint(target) and len(saved["dismissed"][0]["fp"].split(":")[1]) == 16
+
+
+# --------------------------------------------------------------------------
+# Severity colours on list items
+
+def test_plugin_capabilities_carry_their_severity(v):
+    homefile(v, ".config/omarchy/plugins/acme.weather/manifest.json", json.dumps({"name": "Weather"}))
+    homefile(v, ".config/omarchy/plugins/acme.weather/W.qml", 'Process { command: ["sh", "-c", "curl x | sudo tee y"] }')
+    homefile(v, ".config/omarchy/plugins/acme.quiet/manifest.json", json.dumps({"name": "Quiet"}))
+    items = {i["name"]: i for i in v.check_plugins()["items"]}
+    loud = items["acme.weather"]
+    assert [(m["text"], m["level"]) for m in loud["marks"]][:2] == [("network", "medium"), ("root (sudo/pkexec)", "high")]
+    assert ", ".join(m["text"] for m in loud["marks"]) == loud["text"].split("\n")[1]
+    assert items["acme.quiet"]["marks"] == [{"text": v.PLUGIN_NONE, "level": "low"}]
+
+
+def test_marks_never_change_a_word(v):
+    item = {"text": "a\nnetwork, shell"}
+    v.add_marks(item, [{"text": "network", "level": "medium"}])            # does not read as the line
+    assert "marks" not in item
+    v.add_marks(item, [{"text": "network", "level": "medium"}, {"text": "shell", "level": "boom"}])
+    assert "marks" not in item
+
+
+def test_infected_files_colour_known_malware_red_and_guesses_yellow(v):
+    assert v.detection_level("Win.Trojan.Agent-1") == "high"
+    assert v.detection_level("Heuristics.Encrypted.Zip") == "medium"
+    scanned_with(v, ("Downloads/crack.exe", b"MZ bad"))
+    item = v.check_virus_scan()["items"][0]
+    assert item["marks"] == [{"text": item["text"].split("\n")[1], "level": "high"}]
+
+
+def test_theme_colours_come_only_from_exact_lines(v):
+    assert v.theme_colors() == {"yellow": "", "green": ""}
+    homefile(v, ".local/state/omarchy/current/theme/colors.toml",
+             'red = "#f38ba8"\nbright_yellow = "#000000"\nyellow = "#f9e2af"\ngreen = "#a6e3a1; x"\n')
+    assert v.theme_colors() == {"yellow": "#f9e2af", "green": ""}

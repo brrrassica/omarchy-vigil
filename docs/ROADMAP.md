@@ -227,6 +227,12 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       items are now one list, `kept.json`, for every row (an earlier
       build's `kept-leftovers.json` is read and folded in). Those rows lose
       Mark as reviewed, since Keep reviews them item by item.
+- [x] Severity colours, from the theme: each plugin capability in red
+      (root, downloads and runs code, compiled binaries), yellow (network,
+      shell commands, a linked install that was not scanned) or green
+      (none found); each infected file's signature in red (known malware)
+      or yellow (a heuristic guess). The lock alone marks a kept item or a
+      false positive, without words.
 - [x] **Keyed ids.** Every id Vigil hands the panel, puts on a command line
       or writes to its notes (kept items, false positives, reviewed and seen
       findings) is an HMAC-SHA256 under a random key made for this install
