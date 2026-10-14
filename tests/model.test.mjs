@@ -443,7 +443,7 @@ test("run cards: each lists its own schedule; Run all scans ~ but not ~/Download
   assert.equal(all.title, "Run all")
   const steps = all.lines.filter(l => /^\d+\. /.test(l)).map(l => l.replace(/^\d+\. /, "").split(/[:.]/)[0])
   assert.deepEqual(steps, ["Virus signatures (ClamAV)", "Password scan", "Arch security list", "System update lookup",
-                           "Quick check", "Firmware lookup", "Virus scan of ~"])
+                           "Firmware lookup", "Virus scan of ~"])
   assert.ok(all.lines.some(l => l.includes("notification")))
   const daily = M.confirmation("daily-check", "all", r)
   assert.equal(daily.title, "Run daily check")
@@ -505,7 +505,7 @@ test("last run: scans first, then updates, with times", () => {
     { id: "password-check", label: "Password scan (Full scan button only)", date: "", time: "", state: "never", tried: "" }] }))
   const rows = M.lastRunRows(r, new Date(2026, 9, 12, 10, 5))
   assert.deepEqual(rows.map(x => [x.label, x.value]), [
-    ["Scans", ""], ["Quick check (every row)", "ran today at 10:02"],
+    ["Scans", ""], ["Your settings and files", "read today at 10:02"],
     ["Virus scan (home folder)", "ran yesterday at 22:10"], ["Password scan (Full scan button only)", "not run yet"],
     ["Updates", ""], ["ClamAV virus signatures", "updated today at 08:00"]])
 })
@@ -890,11 +890,11 @@ test("pillar tabs head each group of rows with the check that brings it in, when
   const r = parse(report({ checks: [h("firmware"), h("firewall"), h("updates"), h("ssh-keys", "pass"), h("flatpak-apps")] }))
   const rows = M.checksFor(r, "harden")
   assert.deepEqual(rows.map(c => c.id), ["firewall", "ssh-keys", "updates", "flatpak-apps", "firmware"])
-  assert.deepEqual(rows.map((c, i) => M.rowHeading(rows, i)), ["QUICK CHECK \u00b7 EVERY 30 MINUTES", "", "DAILY CHECK", "", "WEEKLY CHECK"])
-  assert.equal(M.rowHeading(rows, 0, 30), "QUICK CHECK \u00b7 EVERY 30 MINUTES")
-  assert.equal(M.rowHeading(rows, 0, 60), "QUICK CHECK \u00b7 EVERY HOUR")
-  assert.equal(M.rowHeading(rows, 0, 120), "QUICK CHECK \u00b7 EVERY 2 HOURS")
-  assert.equal(M.rowHeading(rows, 0, 45), "QUICK CHECK \u00b7 EVERY 45 MINUTES")
+  assert.deepEqual(rows.map((c, i) => M.rowHeading(rows, i)), ["ALWAYS CURRENT", "", "DAILY CHECK", "", "WEEKLY CHECK"])
+  assert.match(M.rowHeadingNote(rows, 0, 30), /whenever you open Vigil, after every fix, and every 30 minutes\.$/)
+  assert.match(M.rowHeadingNote(rows, 0, 60), /every hour\.$/)
+  assert.match(M.rowHeadingNote(rows, 0, 120), /every 2 hours\.$/)
+  assert.equal(M.rowHeadingNote(rows, 2, 30), "")
   const one = M.checksFor(parse(report({ checks: [h("firewall"), h("ssh-keys")] })), "harden")
   assert.deepEqual(one.map((c, i) => M.rowHeading(one, i)), ["", ""])        // one group: no heading
   assert.match(M.tabIntro("detect").text, /ClamAV/)
@@ -1016,7 +1016,7 @@ test("every Last run row names a schedule line, and the helper lists them in sch
   }
 })
 
-test("tab rows: the quick check, then daily, weekly and list update rows, worst first in each", () => {
+test("tab rows: always current, then daily, weekly and list update rows, worst first in each", () => {
   const c = (id, status, weight) => ({ id, category: "detect", status, weight: weight || 1, dismissed: false })
   const r = { checks: [c("scanner-clamav", "pass"), c("firmware", "warn"), c("virus-scan", "pass"),
                        c("aur-status", "fail"), c("screen-lock", "pass"), c("firewall", "fail")] }

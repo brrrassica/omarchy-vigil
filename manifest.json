@@ -44,7 +44,7 @@
         "max": 1440,
         "step": 5,
         "defaultValue": 30,
-        "description": "How often the quick check runs in the background: it reads your settings and files on this computer, read-only, with no network, in well under a second."
+        "description": "How often Vigil reads your settings and files again in the background (it also does whenever you open the panel): read-only, no network, well under a second."
       },
       {
         "key": "notifyOnNew",

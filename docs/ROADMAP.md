@@ -141,8 +141,8 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       cards say it never counts toward the score and no run cleans
       anything.
 - [x] Every tab groups its rows under headings that say which check brings
-      them in (Quick check, with how often it runs; Daily check, Weekly
-      check, Update check),
+      them in (Always current, with when those rows are read; Daily check,
+      Weekly check, List update),
       when it has more than one. The Care tab splits **In Clean all** from
       **Not in Clean all**: Orphaned packages and Leftover app data sit at
       the bottom, under a heading and a line that say Clean all never
@@ -151,7 +151,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       Care). The Detect tab's intro no longer promises rootkit checks Vigil
       stopped running; it names what it does check.
 - [x] One naming convention. Runs are the only things called a check:
-      Quick check, Daily check, Weekly check, and the **List update** (was
+      Daily check and Weekly check, and the **List update** (was
       Update check), which downloads Vigil's lists and looks at nothing on
       your computer. Steps say what they do: a scan reads this computer
       (Virus scan of ~, Bumblebee scan, Password scan), a lookup asks a tool
@@ -162,7 +162,9 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       Virus signatures (ClamAV), Known vulnerabilities (arch-audit),
       Known-malicious packages (OSV), Known-compromised packages (Bumblebee),
       Duplicate scan schedules. Check ids stay the same, so reviews, kept
-      leftovers and false positives carry over.
+      leftovers and false positives carry over. Reading your settings and
+      files is not a run: those rows are headed **Always current**, with a
+      line saying when they are read.
 - [ ] Later: show launchers that point to a program by name rather than
       by path, once there is a reliable way to know the PATH your session
       uses.

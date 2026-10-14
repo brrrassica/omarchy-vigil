@@ -53,7 +53,7 @@ what it will install, asks once more, and then asks for your password.
 | | |
 |---|---|
 | Left-click the lighthouse | Open or close the panel |
-| Middle-click the lighthouse | Run the quick check now (no scans, no network) |
+| Middle-click the lighthouse | Read your settings and files again now (no scans, no network) |
 | `←` `→` or `1`–`6` | Switch tabs |
 | `↑` `↓`, `Enter` | Move through findings, open one |
 | `F` | Fix the selected finding (asks first) |
@@ -88,7 +88,7 @@ Last run list. The line beside the title says when Vigil last checked; on the
 other tabs it shows the score.
 
 In the pillar tabs, rows are grouped under headings that say which check
-brings them in: the **Quick check** (see below), then **Daily check**,
+brings them in: **Always current** (see below), then **Daily check**,
 **Weekly check** and **List update**. A tab
 with only one group has no headings. Rows with nothing to do (passing, not
 applicable, or marked as reviewed) are dimmed. The key hints at the bottom
@@ -96,18 +96,18 @@ show the keys of the tab you are on.
 
 ### When Vigil runs what
 
-Behind every row is the **quick check**: it reads your settings and files
-on this computer, with no network and no scanning, in about a second. It
-runs every 30 minutes (the `refreshMinutes` setting), whenever you open the
-panel, when you middle-click the lighthouse, and first in every daily check.
-Its heading in each tab says how often.
+Most rows are **always current**: Vigil reads them from your settings and
+files on this computer, with no network and no scanning, in about a second,
+whenever you open the panel, after every fix, when you middle-click the
+lighthouse, and every 30 minutes (the `refreshMinutes` setting). That is
+not a run you start, so it has no button.
 
 On top of it, Vigil has three schedules. The Overview counts down to the
 next run of each, and the Last run list names the schedule of every row.
 
 | What | When |
 |---|---|
-| **Daily check**: the quick check, a virus scan of what is new in Downloads, the check for waiting system, Omarchy and Flatpak updates, a Bumblebee scan of your packages | once a day, in the background, at low priority (the quick check also runs on its own, see above) |
+| **Daily check**: a virus scan of what is new in Downloads, the check for waiting system, Omarchy and Flatpak updates, a Bumblebee scan of your packages | once a day, in the background, at low priority |
 | **Weekly check**: the firmware lookup, then a virus scan of your whole home folder | once a week, in the background, at low priority |
 | **List update**: ClamAV's virus signatures, known vulnerabilities, malicious packages, AUR status, Bumblebee's list | once a week, in the background (without the signatures, which need your password; ClamAV's own update service keeps them current anyway) |
 | Password scan (accounts without a password) | only when you press **Run all**, since it needs your password |
@@ -162,7 +162,7 @@ cleaning happens only when you press a button on the Care tab.
 Below that, **Last run** lists when each scan last ran and when each
 list last updated, with the time: scans first, then updates. Each row names
 the schedule that runs it (daily check, weekly check, list update), in that
-order. The rows in each tab are ordered the same way: the quick check first,
+order. The rows in each tab are ordered the same way: the always-current rows first,
 then the rows of the daily check, the weekly check and the list update. Anything that failed
 or is out of date is red.
 
@@ -286,7 +286,7 @@ lower it. A warning you mark as reviewed stops counting.
 
 Care is upkeep, not security, so it is kept apart from everything else:
 its rows never count toward the score or notify you, and no daily check,
-weekly check or list update cleans anything. Vigil only measures (with the quick check);
+weekly check or list update cleans anything. Vigil only measures (whenever it reads your settings and files);
 it cleans when you press a button here. The tab shows its rows in two
 groups:
 
@@ -428,7 +428,7 @@ setting on its own.
 
 Vigil runs no service, timer or daemon of its own. While you are logged in:
 
-- **The quick check every 30 minutes** (the `refreshMinutes` setting), from
+- **Reading your settings and files every 30 minutes** (the `refreshMinutes` setting), from
   one monitor's copy only, at lowered priority. It reads files only, and every
   folder walk has a time and size limit (a few seconds; the survey for
   leftover app data has four), so even a huge home folder cannot make it
