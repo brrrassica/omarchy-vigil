@@ -126,10 +126,12 @@ command on its card. Until then, scans use what is there and say how old
 it was. The Virus signatures row also offers to turn the update service
 back on if it is off.
 
-**When a download fails**, the scan still runs with the last good list and
-says so once that list is over two days old: its row and its Last run line
-read "with the list from Oct 1", in your theme's red. A scan with no list
-at all does not run, and is tried again the next day.
+**Every scan says which list it used**: its row and its Last run line read
+"with the list from Oct 14" (or "with signatures from Oct 14"). When a
+download fails, the scan still runs with the last good list, and once the
+list it used was over two days old at the time it ran, that line turns your
+theme's red. A scan with no list at all does not run, and is tried again
+the next day.
 
 Under **Run now**, the Overview has a button for each run, and **Run all**
 for both. Under each button is when that run next happens by itself. Each
@@ -183,8 +185,8 @@ Weekly check, Run all only), in the order it runs them, with when it last
 ran. There are no lines for the lists themselves: each scan fetched its own
 right before it ran. The rows in each tab are ordered the same way: the
 always-current rows first, then the rows of the daily check and the weekly
-check. Anything that failed, is out of date, or had to use a list over
-two days old is shown in your theme's red (Omarchy's `urgent` colour, which
+check. Anything that failed, is out of date, or used a list that was over
+two days old when it ran is shown in your theme's red (Omarchy's `urgent` colour, which
 every theme sets from its own `red`).
 
 Work done outside Vigil counts too: signatures updated by ClamAV's own

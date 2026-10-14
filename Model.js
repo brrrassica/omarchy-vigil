@@ -1136,7 +1136,7 @@ function validCheck(c) {
 
 // The Last run list: every scan and lookup, grouped by the run that does it.
 // There are no rows for the lists: every scan gets its list right before it
-// runs, and says so (note) when it had to use an older one.
+// runs and says which one it used (note); old marks one over two days old.
 var SOURCE_IDS = ["pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee", "downloads-scan",
                   "firmware", "virus-scan", "password-check"]
 var SOURCE_RUNS = ["daily", "weekly", "all"]
@@ -1161,8 +1161,9 @@ function parseSources(list) {
     if (!inList(e.run, SOURCE_RUNS)) return null
     var note = e.note === undefined ? "" : e.note
     if (!isString(note, 40) || (note !== "" && !/^with (the list|signatures) from [A-Z][a-z]{2} \d{1,2}$/.test(note))) return null
+    if (e.old !== undefined && typeof e.old !== "boolean") return null
     out.push({ id: e.id, label: plain(e.label, 40), date: e.date, time: time, state: e.state, tried: e.tried, by: by,
-               run: e.run, note: note })
+               run: e.run, note: note, old: note !== "" && e.old === true })
   }
   return out
 }
@@ -1192,7 +1193,8 @@ var RUN_HEADINGS = { daily: "Daily check", weekly: "Weekly check", all: "Run all
 
 // The Overview's LAST RUN list: when your settings and files were last read,
 // then each run's scans and lookups under its name, in the order it runs them.
-// A scan that had to use a list over two days old is red (the theme's red), and says how old.
+// Each scan says which list it used; it is red (the theme's red) only when
+// that list was over two days old when it ran.
 function lastRunRows(report, now) {
   if (!report) return []
   var rows = [{ label: "Your settings and files", heading: false, problem: false,
@@ -1203,7 +1205,7 @@ function lastRunRows(report, now) {
     rows.push({ label: RUN_HEADINGS[SOURCE_RUNS[r]], value: "", heading: true, problem: false })
     for (var i = 0; i < group.length; i++)
       rows.push({ label: group[i].label, value: sourceLine(group[i], now), heading: false,
-                  problem: group[i].state === "failed" || group[i].state === "stale" || group[i].note !== "" })
+                  problem: group[i].state === "failed" || group[i].state === "stale" || group[i].old })
   }
   return rows
 }

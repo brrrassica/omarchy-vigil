@@ -1514,12 +1514,21 @@ def test_a_scan_that_used_old_signatures_says_so(v, monkeypatch):
     monkeypatch.setattr(v, "count_home_files", lambda **kw: 1)
     res = v.refresh_due_feeds(weekly_only=True)
     assert "The virus signatures are 3 days old" in res["message"] and "used them as they were" in res["message"]
-    assert {s["id"]: s for s in v.source_status()}["virus-scan"]["note"].startswith("with signatures from ")
+    row = {s["id"]: s for s in v.source_status()}["virus-scan"]
+    assert row["note"].startswith("with signatures from ") and row["old"] is True      # red in the panel
     assert ", with signatures from " in v.check_virus_scan()["summary"]
+    # Current signatures: the line still says which ones it used, but not in red.
     fresh_signatures(v)
     v.refresh_due_feeds(weekly_only=True)
-    assert {s["id"]: s for s in v.source_status()}["virus-scan"]["note"] == ""
-    assert "with signatures from" not in v.check_virus_scan()["summary"]
+    row = {s["id"]: s for s in v.source_status()}["virus-scan"]
+    assert row["note"] == "with signatures from " + time.strftime("%b %-d") and row["old"] is False
+    assert ", with signatures from " in v.check_virus_scan()["summary"]
+    # Judged when the scan ran, not now: a week-old scan with fresh signatures stays black.
+    meta = Path(v.home_path(*v.STATE_DIR, "virus-scan.json"))
+    data = json.loads(meta.read_text())
+    data["at"] = data["used"][0] = time.strftime("%Y-%m-%d", time.localtime(time.time() - 7 * 86400))
+    meta.write_text(json.dumps(data))
+    assert {s["id"]: s for s in v.source_status()}["virus-scan"]["old"] is False
 
 
 def test_no_signatures_means_no_virus_scan(v, monkeypatch):
@@ -2810,7 +2819,8 @@ def test_a_failed_list_download_scans_with_the_last_good_list(v, monkeypatch):
         "bumblebee", {"findings": [], "status": "complete", "used": ["2026-10-01", "08:00"]}))
     res = v.refresh_due_feeds(daily_only=True)
     assert scanned and "used the one from 2026-10-01" in res["message"]
-    assert {s["id"]: s for s in v.source_status()}["bumblebee"]["note"] == "with the list from Oct 1"
+    row = {s["id"]: s for s in v.source_status()}["bumblebee"]
+    assert row["note"] == "with the list from Oct 1" and row["old"] is True
     assert v.check_bumblebee()["summary"].endswith(", with the list from Oct 1).")
     # No list at all: the scan cannot run, and says why.
     os.remove(v.home_path(*v.STATE_DIR, v.BUMBLEBEE_CATALOG))

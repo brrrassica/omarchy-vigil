@@ -1932,26 +1932,32 @@ def signatures_due():
     return age is None or age > STALE_HOURS
 
 
-def _age_note(stamp, what):
-    """ "with the list from Oct 12" when a scan used something over two days old, else ""."""
-    age = _hours_since(stamp) if isinstance(stamp, (list, tuple)) and len(stamp) == 2 else None
-    if age is None or age <= STALE_HOURS:
-        return ""
+def used_note(meta, what):
+    """("with the list from Oct 12", old) for a scan's cache: which list (or
+    signatures) it used, always, and whether that list was over STALE_HOURS
+    old when the scan ran. ("", False) if the scan did not record one."""
+    stamp = meta.get("used") if isinstance(meta.get("used"), list) else None
+    if not stamp or len(stamp) != 2 or not isinstance(stamp[0], str) or not _DATE.match(stamp[0]):
+        return "", False
     try:
-        return "with %s from %s" % (what, time.strftime("%b %-d", time.strptime(stamp[0], "%Y-%m-%d")))
-    except ValueError:
-        return ""
+        text = "with %s from %s" % (what, time.strftime("%b %-d", time.strptime(stamp[0], "%Y-%m-%d")))
+        used = time.mktime(time.strptime("%s %s" % tuple(stamp), "%Y-%m-%d %H:%M"))
+        ran = time.mktime(time.strptime("%s %s" % (meta.get("at"), meta.get("time")), "%Y-%m-%d %H:%M"))
+    except (TypeError, ValueError):
+        return "", False
+    return text, (ran - used) / 3600.0 > STALE_HOURS
 
 
 def source_status():
     """When each scan and lookup last ran, for the Overview's Last run list,
     grouped by the run that does it (daily check, weekly check, Run all) and in
-    the order it runs them. A scan that had to use an old list says so."""
+    the order it runs them. Each scan says which list it used (note); old is
+    whether that list was over STALE_HOURS old when it ran (shown in red)."""
     out = []
 
-    def add(sid, run_, date_, time_, state, tried="", by="", note=""):
+    def add(sid, run_, date_, time_, state, tried="", by="", note="", old=False):
         out.append({"id": sid, "label": ITEM_NAME[sid], "run": run_, "date": date_, "time": time_, "state": state,
-                    "tried": tried, "by": by, "note": note})
+                    "tried": tried, "by": by, "note": note, "old": old})
 
     def fresh(d, days):
         age = _days_since(d)
@@ -1968,9 +1974,8 @@ def source_status():
             state = "failed"
         else:
             state = fresh(at, FEED_INTERVAL.get(name, FEED_DAYS) + FEED_RETRY_DAYS)
-        used = meta.get("used") if isinstance(meta.get("used"), list) else None
-        add(name, run_, at, tm if at else "", state, tried if state == "failed" else "",
-            note=_age_note(used, note) if note and at else "")
+        text, old = used_note(meta, note) if note and at else ("", False)
+        add(name, run_, at, tm if at else "", state, tried if state == "failed" else "", note=text, old=old)
 
     for name in DAILY_FEEDS:
         if feed_available(name):
@@ -1983,7 +1988,7 @@ def source_status():
         mine = out[-1]
         if ext[0] and _newer(ext, (mine["date"], mine["time"])) == ext and ext != (mine["date"], mine["time"]):
             out[-1] = dict(mine, date=ext[0], time=ext[1], state=fresh(ext[0], FEED_DAYS + FEED_RETRY_DAYS),
-                           tried="", by="ClamUI", note="")
+                           tried="", by="ClamUI", note="", old=False)
     d, _ = no_password_scan()
     _, t = _mtime_stamp([home_path(*STATE_DIR, NO_PASSWORD_NAME)]) if d else ("", "")
     add("password-check", "all", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
@@ -2485,8 +2490,8 @@ def check_virus_scan():
     if cache is None:
         return result(cid, cat, title, "info", "The first scan runs within a day.", why, fix=now, weight=0,
                       howto="Press Scan now to scan your home folder now, or wait for the next weekly check.")
-    old = _age_note(cache.get("used") if isinstance(cache.get("used"), list) else None, "signatures")
-    scanned = feed_when(cache).replace("checked", "scanned") + ((", " + old) if old else "")
+    used, _ = used_note(cache, "signatures")
+    scanned = feed_when(cache).replace("checked", "scanned") + ((", " + used) if used else "")
     found = current_detections()
     ignored = ignored_detections()
     items, live = [], []
@@ -3387,8 +3392,8 @@ def check_bumblebee():
     found = [f for f in cache.get("findings", []) if isinstance(f, dict)][:500] \
         if isinstance(cache.get("findings"), list) else []
     when = feed_when(cache).replace("checked", "scanned")
-    old = _age_note(cache.get("used") if isinstance(cache.get("used"), list) else None, "the list")
-    when += (", " + old) if old else ""
+    used, _ = used_note(cache, "the list")
+    when += (", " + used) if used else ""
     if found:
         lines = ["%s: %s %s %s in %s" % (clean(f.get("catalog_name"), 120), clean(f.get("ecosystem"), 30),
                                           clean(f.get("package_name"), 100), clean(f.get("version"), 40),

@@ -180,9 +180,10 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       command on its card. Run all's password scan and that update are the
       only password prompts in any run. The Virus signatures row lost its
       own Update now button: Run all is the one way to force an update.
-- [x] Lists and signatures count as old after 48 hours, not 24: only then
-      does a scan's note ("with the list from Oct 1", in the theme's red)
-      appear.
+- [x] Every scan says which list or signatures it used ("with the list
+      from Oct 14"). The line turns the theme's red only when that list was
+      over 48 hours old when the scan ran (not 24, and judged at scan time,
+      so a week-old scan with a fresh list stays as it is).
 - [x] A failed list download no longer stops a scan: it uses the last good
       list, and its row and its Last run line say "with the list from Oct 1".
       The Last run list groups every scan and lookup under the run that

@@ -528,16 +528,20 @@ test("progress lines are validated and worded", () => {
 test("last run: each run's scans under its name, with times", () => {
   const r = parse(report({ generatedAt: "2026-10-12T10:02:00+0000", sources: [
     { id: "bumblebee", label: "Bumblebee scan", run: "daily", date: "2026-10-12", time: "08:00", state: "ok", tried: "",
-      note: "with the list from Oct 9" },
-    { id: "virus-scan", label: "Virus scan of ~", run: "weekly", date: "2026-10-11", time: "22:10", state: "ok", tried: "" },
+      note: "with the list from Oct 9", old: true },
+    { id: "virus-scan", label: "Virus scan of ~", run: "weekly", date: "2026-10-11", time: "22:10", state: "ok", tried: "",
+      note: "with signatures from Oct 11", old: false },
     { id: "password-check", label: "Password scan", run: "all", date: "", time: "", state: "never", tried: "" }] }))
   const rows = M.lastRunRows(r, new Date(2026, 9, 12, 10, 5))
   assert.deepEqual(rows.map(x => [x.label, x.value]), [
     ["Your settings and files", "read today at 10:02"],
     ["Daily check", ""], ["Bumblebee scan", "ran today at 08:00, with the list from Oct 9"],
-    ["Weekly check", ""], ["Virus scan of ~", "ran yesterday at 22:10"],
+    ["Weekly check", ""], ["Virus scan of ~", "ran yesterday at 22:10, with signatures from Oct 11"],
     ["Run all only", ""], ["Password scan", "not run yet"]])
-  assert.deepEqual(rows.filter(x => x.problem).map(x => x.label), ["Bumblebee scan"])   // an old list is red
+  // Every scan says which list it used; only one over two days old is red.
+  assert.deepEqual(rows.filter(x => x.problem).map(x => x.label), ["Bumblebee scan"])
+  assert.equal(parse(report({ sources: [{ id: "bumblebee", label: "x", run: "daily", date: "", state: "never", tried: "",
+    old: "yes" }] })), null)
 })
 
 test("actions run without a terminal unless the tool asks questions", () => {
