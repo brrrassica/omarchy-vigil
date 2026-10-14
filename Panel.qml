@@ -282,13 +282,25 @@ Panel {
     cancelPending()
     if (!report) return
     if (kind === "ignore") {
-      if (Model.detectionItem(report, action)) runHelper(["ignore", action])
+      // Exactly the detections the card listed, each still listed and not marked.
+      var marked = Model.itemIdList(report, action, "detection")
+      if (marked) { runHelper(["ignore"].concat(marked)); picked = ({}) }
       return
     }
     if (kind === "trash") {
       // Exactly the items the card listed, each still a listed leftover not kept.
       var ids = Model.leftoverIdList(report, action)
       if (ids) { runHelper(["trash"].concat(ids)); picked = ({}) }
+      return
+    }
+    if (kind === "remove-orphans" || kind === "remove-foreign" || kind === "remove-plugins") {
+      // The steps rebuilt from the same ids, each still listed: the same
+      // commands the card showed.
+      var steps = Model.removalPlan(kind, action, report)
+      if (steps.length > 0 && shown && Model.sameCommands(shown.commands, steps)) {
+        startSteps(kind, shown.title.replace(/\?$/, ""), steps)
+        picked = ({})
+      }
       return
     }
     if (kind === "full-scan") {
@@ -330,10 +342,15 @@ Panel {
     var steps = Model.actionPlan(id, report.tools, root.homeDir)
     if (steps.length === 0) { setStatus("This action is not available on this system.", true); return }
     var a = Model.terminalAction(id)
+    startSteps(id, a ? a.title : "", steps)
+  }
+
+  function startSteps(id, title, steps) {
+    if (actionProc.running || steps.length === 0) return
     actionSteps = steps
     actionIndex = 0
     actionOutput = ""
-    actionTitle = a ? a.title : ""
+    actionTitle = title
     actionId = id
     actionStageNow = -1
     actionResult = null
@@ -365,14 +382,14 @@ Panel {
   }
 
   // Runs bin/vigil with a fixed verb and ids the panel already validated:
-  // `fix <helper action>`, `dismiss|undismiss <check id>`, `ignore|unignore <detection id>`,
-  // `keep|unkeep <leftover id>...`, `trash <leftover id>...`. Ids are hashes the
-  // helper made; no file name ever reaches the command line.
+  // `fix <helper action>`, `dismiss|undismiss <check id>`, `ignore|unignore <detection id>...`,
+  // `keep|unkeep <item id>...`, `trash <leftover id>...`. Ids are hashes the
+  // helper made; no file name ever reaches its command line.
   function runHelper(args) {
     if (fixProc.running || args.length < 2) return
     if (["fix", "dismiss", "undismiss", "ignore", "unignore", "keep", "unkeep", "trash"].indexOf(args[0]) === -1) return
     var hashed = ["ignore", "unignore", "keep", "unkeep", "trash"].indexOf(args[0]) !== -1
-    if (args.length !== 2 && (["trash", "keep", "unkeep"].indexOf(args[0]) === -1 || args.length > 151)) return
+    if (args.length !== 2 && (!hashed || args.length > 151)) return
     for (var i = 1; i < args.length; i++) {
       if (!/^[a-z0-9-]{1,40}$/.test(args[i])) return
       if (hashed && !/^[0-9a-f]{16}$/.test(args[i])) return
@@ -396,36 +413,47 @@ Panel {
     runHelper([on ? "dismiss" : "undismiss", check.id])
   }
 
-  // Mark one virus detection as a false positive: asks first, on the usual card.
-  function requestIgnore(item) {
-    if (!report || busy || !item || item.id === "" || item.ignored) return
-    pendingKind = "ignore"
-    pendingAction = item.id
-  }
-
-  function requestUnignore(item) {
-    if (!report || busy || !item || item.id === "" || !item.ignored) return
-    runHelper(["unignore", item.id])
-  }
-
-  // Leftovers of apps that are gone: tick the ones you want to act on, then
-  // Trash selected or Keep selected (or Trash all, Keep all). Trashing asks
-  // first; keeping only changes Vigil's own notes, so it does not.
-  property var picked: ({})                 // leftover id -> true, while ticked
-  readonly property var pickedIds: report === null ? []
-    : Model.leftoverTrashIds(report).filter(function(id) { return root.picked[id] === true })
+  // Pick lists (leftovers, orphaned and foreign packages, other plugins,
+  // infected files): tick the items you want to act on, then the row's
+  // buttons act on just those; with nothing ticked, Trash all, Remove all and
+  // Keep all act on every item you could tick. Removing, trashing and marking
+  // a false positive ask first, on the usual card; keeping only changes
+  // Vigil's own notes, so it does not. A kept item or a false positive shows
+  // a lock: clicking it counts the item again.
+  property var picked: ({})                 // item id -> true, while ticked
 
   function togglePicked(item) {
-    if (!item || item.kind !== "leftover" || item.kept) return
+    if (!Model.itemPickable(item)) return
     var next = Object.assign({}, picked)
     if (next[item.id]) delete next[item.id]
     else next[item.id] = true
     picked = next
   }
 
-  function requestTrashIds(ids) {
-    if (!report || busy || ids.length === 0 || ids.length > 150) return
-    pendingKind = "trash"
+  // What a row's buttons act on: its ticked items (or, for "all", every one
+  // you could tick), only those the button can take.
+  function pickedIn(check, removing) {
+    if (!check) return []
+    return check.items.filter(function(it) {
+      return (removing ? Model.itemRemovable(it) : Model.itemPickable(it)) && root.picked[it.id] === true
+    }).map(function(it) { return it.id })
+  }
+  function allIn(check, removing) {
+    if (!check) return []
+    return check.items.filter(function(it) { return removing ? Model.itemRemovable(it) : Model.itemPickable(it) })
+      .map(function(it) { return it.id })
+  }
+
+  function requestRemoveIds(check, ids) {
+    var spec = Model.pickSpec(check)
+    if (!report || busy || !spec || ids.length === 0 || ids.length > 150) return
+    if (spec.card !== "trash" && spec.card !== "ignore"
+        && Model.confirmation(spec.card, ids.join(","), report, homeDir) === null) {
+      setStatus(spec.card === "remove-plugins" ? "This needs Omarchy's omarchy-plugin-remove, which was not found."
+                                               : "This needs pkexec, which was not found.", true)
+      return
+    }
+    pendingKind = spec.card
     pendingAction = ids.join(",")
   }
 
@@ -435,9 +463,11 @@ Panel {
     picked = ({})
   }
 
-  function setKept(item, on) {
-    if (!report || busy || !item || item.kind !== "leftover" || item.kept === on) return
-    runHelper([on ? "keep" : "unkeep", item.id])
+  // The lock: count a kept item, or a false positive, again.
+  function unlock(item) {
+    if (!report || busy || !item || item.id === "") return
+    if (item.kind === "detection" && item.ignored) runHelper(["unignore", item.id])
+    else if (item.kind !== "detection" && item.kept) runHelper(["unkeep", item.id])
   }
 
   function requestUndo(check) {
@@ -1527,8 +1557,11 @@ Panel {
     readonly property bool undoable: check !== null && root.report !== null && check.undo.action !== ""
       && Model.canRun({ kind: "terminal", action: check.undo.action }, root.report.tools, root.report.apps)
     readonly property bool reviewable: check !== null && (check.dismissible || check.dismissed)
-    readonly property bool trashable: check !== null && check.items.some(function(it) {
-      return it.kind === "leftover" && !it.kept })
+    // A pick list: its buttons, and how many of its items are ticked.
+    readonly property var pick: Model.pickSpec(check)
+    readonly property bool pickable: pick !== null && check.items.some(function(it) { return Model.itemPickable(it) })
+    readonly property var removeIds: root.pickedIn(check, true)
+    readonly property var keepIdsNow: root.pickedIn(check, false)
     signal clicked()
 
     hasCursor: selected
@@ -1669,32 +1702,32 @@ Panel {
         font.pixelSize: Style.font.caption
         wrapMode: Text.WrapAnywhere
       }
-      // One line per item. A detection has False positive (or Not a false
-      // positive). A leftover has a box to tick for Trash selected and Keep
-      // selected below (clicking its text ticks it too); a kept one has Stop
-      // keeping instead.
+      // A pick list, one item per line: a box to tick, then the item on two
+      // lines (what it is, then more about it). A kept item or a false
+      // positive shows a lock instead of the box, and sits at the bottom;
+      // clicking the lock counts it again. Clicking an item's text ticks it.
       Repeater {
         model: row.expanded && row.check !== null ? row.check.items : []
         delegate: Row {
           id: itemRow
           required property var modelData
-          readonly property bool leftover: modelData.kind === "leftover"
-          readonly property bool pickable: leftover && !modelData.kept
+          readonly property bool pickable: Model.itemPickable(modelData)
+          readonly property bool locked: modelData.kept || modelData.ignored
           readonly property bool isPicked: pickable && root.picked[modelData.id] === true
-          readonly property bool quiet: modelData.ignored || modelData.kept
           width: parent ? parent.width : 0
           spacing: Style.space(8)
           Button {
             id: pickBox
-            // A small box, level with the item's first line. A kept item keeps
-            // the box's space (empty), so every item lines up.
-            visible: itemRow.leftover
+            // A small box, level with the item's first line. An item that has
+            // no id (nothing can be done with it) keeps the box's space, empty,
+            // so every item lines up.
+            visible: !itemRow.locked
             opacity: itemRow.pickable ? 1 : 0
             anchors.top: parent.top
             width: Style.space(14)
             height: Style.space(14)
             text: itemRow.isPicked ? "\u2713" : ""
-            tooltipText: itemRow.isPicked ? "Unselect" : "Select, then Trash selected or Keep selected below"
+            tooltipText: itemRow.isPicked ? "Unselect" : "Select, then use the buttons below"
             selected: itemRow.isPicked
             bordered: true
             horizontalPadding: 0
@@ -1705,33 +1738,49 @@ Panel {
             enabled: itemRow.pickable && !root.busy && root.pending === null
             onClicked: root.togglePicked(itemRow.modelData)
           }
-          // A leftover reads as two lines: where and how big, then why and
-          // since when. A detection is one line.
+          Button {
+            id: lockBox
+            // The lock (Nerd Font, which Omarchy ships), in the box's place.
+            visible: itemRow.locked
+            anchors.top: parent.top
+            width: Style.space(14)
+            height: Style.space(14)
+            text: "\uf023"
+            tooltipText: itemRow.modelData.ignored ? "Marked as a false positive. Click to count it again"
+                                                   : "Kept. Click to stop keeping it and count it again"
+            horizontalPadding: 0
+            verticalPadding: 0
+            fontSize: Style.font.caption
+            foreground: root.dim
+            fontFamily: root.fontFamily
+            enabled: !root.busy && root.pending === null
+            onClicked: root.unlock(itemRow.modelData)
+          }
           Item {
             id: itemTexts
             readonly property var lines: String(itemRow.modelData.text).split("\n")
-            width: itemRow.width - itemButtons.width - itemRow.spacing
-              - (pickBox.visible ? pickBox.width + itemRow.spacing : 0)
+            width: itemRow.width - pickBox.width - itemRow.spacing
             height: textLines.implicitHeight
-            anchors.verticalCenter: itemRow.leftover ? undefined : parent.verticalCenter
-            opacity: itemRow.quiet ? 0.6 : 1
+            opacity: itemRow.locked ? 0.6 : 1
             Column {
               id: textLines
               width: parent.width
               Text {
                 textFormat: Text.PlainText
                 width: parent.width
-                text: itemTexts.lines[0] + (itemRow.modelData.ignored ? "  (false positive)" : "")
-                color: itemRow.leftover || itemRow.isPicked ? root.foreground : root.dim
+                text: itemTexts.lines[0]
+                color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WrapAtWordBoundaryOrAnywhere
               }
               Text {
                 textFormat: Text.PlainText
-                visible: itemTexts.lines.length > 1
+                visible: itemTexts.lines.length > 1 || itemRow.locked
                 width: parent.width
-                text: itemTexts.lines.slice(1).join(" ") + (itemRow.modelData.kept ? "  (kept)" : "")
+                text: itemTexts.lines.slice(1).join(" ")
+                  + (itemRow.modelData.kept ? (itemTexts.lines.length > 1 ? " \u00b7 " : "") + "kept"
+                     : itemRow.modelData.ignored ? (itemTexts.lines.length > 1 ? " \u00b7 " : "") + "false positive" : "")
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -1745,58 +1794,39 @@ Panel {
               onClicked: root.togglePicked(itemRow.modelData)
             }
           }
-          Row {
-            id: itemButtons
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Style.space(6)
-            Button {
-              visible: itemRow.leftover && itemRow.modelData.kept
-              text: "Stop keeping"
-              tooltipText: "Count it again, so you can move it to the trash"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              enabled: !root.busy && root.pending === null
-              onClicked: root.setKept(itemRow.modelData, false)
-            }
-            Button {
-              visible: !itemRow.leftover && itemRow.modelData.id !== ""
-              text: itemRow.modelData.ignored ? "Not a false positive" : "False positive"
-              tooltipText: itemRow.modelData.ignored ? "Count this detection again"
-                                                     : "The file is safe and ClamAV is wrong. Only if you are sure; it comes back if the file changes"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              enabled: !root.busy && root.pending === null
-              onClicked: itemRow.modelData.ignored ? root.requestUnignore(itemRow.modelData)
-                                                   : root.requestIgnore(itemRow.modelData)
-            }
-          }
         }
       }
       Flow {
-        visible: row.expanded && (row.runnable || row.undoable || row.reviewable || row.trashable)
+        visible: row.expanded && (row.runnable || row.undoable || row.reviewable || row.pickable)
         width: parent.width
         spacing: Style.space(8)
-        // Leftovers: with nothing ticked these act on every item not kept
-        // (Trash all, Keep all); once you tick some, on just those.
+        // A pick list's buttons act on the ticked items. With nothing ticked,
+        // Trash all, Remove all (orphans only) and Keep all act on every item
+        // you could tick; the rest wait for a tick.
         Button {
-          visible: row.trashable
-          text: root.pickedIds.length > 0 ? "Trash selected (" + root.pickedIds.length + ")" : "Trash all"
-          tooltipText: "Asks first, listing each item. You can restore them from the trash; items you keep stay"
+          readonly property int count: row.removeIds.length
+          visible: row.pickable
+          text: row.pick === null ? ""
+            : count > 0 ? row.pick.remove + " selected (" + count + ")"
+            : row.pick.all ? row.pick.remove + " all" : row.pick.remove + " selected"
+          tooltipText: row.pick === null ? ""
+            : count === 0 && !row.pick.all ? "Tick the items first"
+            : "Asks first, listing each item and the exact command"
           foreground: root.foreground
           fontFamily: root.fontFamily
           bordered: true
-          enabled: !root.busy && root.pending === null
-          onClicked: root.requestTrashIds(root.pickedIds.length > 0 ? root.pickedIds
-                                                                    : Model.leftoverTrashIds(root.report))
+          enabled: !root.busy && root.pending === null && row.pick !== null && (count > 0 || row.pick.all)
+          onClicked: root.requestRemoveIds(row.check, count > 0 ? row.removeIds : root.allIn(row.check, true))
         }
         Button {
-          visible: row.trashable
-          text: root.pickedIds.length > 0 ? "Keep selected (" + root.pickedIds.length + ")" : "Keep all"
-          tooltipText: "Leave them where they are; Vigil stops counting them"
+          readonly property int count: row.keepIdsNow.length
+          visible: row.pickable && row.pick !== null && row.pick.keep
+          text: count > 0 ? "Keep selected (" + count + ")" : "Keep all"
+          tooltipText: "Leave them as they are; Vigil stops counting them and locks them at the bottom of the list"
           foreground: root.foreground
           fontFamily: root.fontFamily
           enabled: !root.busy && root.pending === null
-          onClicked: root.keepIds(root.pickedIds.length > 0 ? root.pickedIds : Model.leftoverTrashIds(root.report))
+          onClicked: root.keepIds(count > 0 ? row.keepIdsNow : root.allIn(row.check, false))
         }
         Button {
           visible: row.runnable && !(row.check !== null && row.check.dismissed)

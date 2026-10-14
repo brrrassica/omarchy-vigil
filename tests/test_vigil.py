@@ -12,6 +12,7 @@ import os
 import re
 import stat
 import struct
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -2296,7 +2297,8 @@ def test_ignore_one_detection_keeps_the_others(v):
     c = v.check_virus_scan()
     assert c["status"] == "fail" and c["summary"].startswith("1 infected file.") and "1 marked as a false positive" in c["summary"]
     assert "dx11.dll" not in c["detail"] and "crack.exe" in c["detail"]
-    assert [i["ignored"] for i in c["items"]] == [True, False]
+    # A false positive goes to the bottom of the list.
+    assert [(i["id"], i["ignored"]) for i in c["items"]] == [(ids[1], False), (ids[0], True)]
     assert v.feed_findings()[0].startswith("1 infected file in")
     v.set_ignored(ids[1], True)
     c = v.check_virus_scan()
@@ -3017,7 +3019,7 @@ def test_keep_and_stop_keeping_change_only_vigils_notes(v):
     assert ".oldtool" not in c["detail"]
     assert Path(v.HOME, ".oldtool/data").exists()
     refused = v.trash_leftovers([item["id"]])
-    assert refused["ok"] is False and "is kept (press Stop keeping first)" in refused["message"]
+    assert refused["ok"] is False and "is kept (click its lock first)" in refused["message"]
     assert Path(v.HOME, ".oldtool/data").exists()
     assert v.set_kept(item["id"], False)["message"] == "Counting it again."
     assert v.check_leftovers()["summary"].startswith("9 left behind")
@@ -3124,7 +3126,9 @@ def test_system_logs_are_tidy_under_500_mb(v):
 def test_keep_and_stop_keeping_take_several_at_once(v, capsys):
     leftover_home(v)
     ids = [i["id"] for i in v.check_leftovers()["items"]][:3]
-    assert v.set_kept(ids, True)["message"] == "Kept 3 items. They stay where they are and Vigil stops counting them."
+    assert v.set_kept(ids, True)["message"] == ("Kept 3 items. They stay where they are, locked at the bottom of "
+                                                "the list, and Vigil stops counting them.")
+    assert [i["kept"] for i in v.check_leftovers()["items"]][-3:] == [True, True, True]
     assert sum(i["kept"] for i in v.check_leftovers()["items"]) == 3
     assert v.set_kept(ids[:2], False)["message"] == "Counting 2 items again."
     assert v.main(["vigil", "keep"] + ids) == 0
@@ -3142,3 +3146,167 @@ def test_a_leftover_reads_as_two_lines_and_a_name_cannot_add_one(v):
     assert texts["~/.var/app/com.spotify.Client"].split("\n")[1] == "data of a Flatpak app that is no longer installed"
     evil = texts["~/.config/evil\\nno installed app"]                       # escaped, still two lines
     assert evil.count("\n") == 1
+
+
+# --------------------------------------------------------------------------
+# Pick lists: orphaned and foreign packages, other plugins
+
+QI = """Name            : {name}
+Version         : {ver}
+Description     : {desc}
+Depends On      : glibc  libfoo
+                  libbar
+Installed Size  : 1.50 MiB
+
+"""
+
+
+def pacman_info(v, flags, *pkgs):
+    v.TRUSTED |= {v.ROOT + "/usr/bin/pacman"}
+    v.COMMANDS[("/usr/bin/pacman", "-Q%si" % flags)] = (0, "".join(QI.format(name=n, ver=ver, desc=d)
+                                                                  for n, ver, d in pkgs))
+
+
+def test_orphans_are_listed_one_item_each(v):
+    pacman_info(v, "dt", ("python-old", "1.0-1", "An old library"), ("libunused", "2.3-4", "None"))
+    c = v.check_orphans()
+    assert c["status"] == "info" and c["summary"] == "2 orphaned packages."
+    assert [(i["kind"], i["name"], i["text"]) for i in c["items"]] == [
+        ("orphan", "python-old", "python-old · 1.0-1 · 1.50 MiB\nAn old library"),
+        ("orphan", "libunused", "libunused · 2.3-4 · 1.50 MiB\nno description")]
+    assert v.add_help(dict(c))["fix"] == {"kind": "docs", "action": "arch-orphans", "label": "Learn more"}
+    assert c["id"] in v.ITEM_REVIEWED                              # reviewed item by item (Keep)
+    assert v.set_kept(c["items"][0]["id"], True)["ok"] is True
+    c = v.check_orphans()
+    assert c["summary"] == "1 orphaned package. 1 kept."
+    # A kept package goes to the bottom, with its lock.
+    assert [(i["name"], i["kept"]) for i in c["items"]] == [("libunused", False), ("python-old", True)]
+    v.set_kept(c["items"][0]["id"], True)
+    assert v.check_orphans()["status"] == "pass"
+
+
+def test_no_orphans_and_odd_names(v):
+    v.TRUSTED |= {v.ROOT + "/usr/bin/pacman"}
+    v.COMMANDS[("/usr/bin/pacman", "-Qdti")] = (1, "")             # pacman says nothing, exit 1: none
+    assert v.check_orphans()["summary"] == "None."
+    # Only names Arch allows reach the list (and so the remove command).
+    pacman_info(v, "dt", ("-rf", "1", "x"), (".hidden", "1", "x"), ("ok-name", "1", "x"))
+    assert [i["name"] for i in v.check_orphans()["items"]] == ["ok-name"]
+
+
+def test_foreign_packages_say_what_the_aur_said(v):
+    pacman_info(v, "m", ("yay", "12.0-1", "Yet another yogurt"), ("old-thing", "0.1-1", "Gone"))
+    v.save_feed("aur", {"checked": 2, "gone": ["old-thing"], "official": [], "orphans": []})
+    c = v.check_foreign_packages()
+    assert c["status"] == "info" and c["summary"] == "2 packages from outside the official repositories."
+    assert c["items"][1]["text"] == "old-thing · 0.1-1 · 1.50 MiB\nGone; no longer in the AUR"
+    assert c["items"][0]["kind"] == "foreign" and "Mark as reviewed" not in json.dumps(c)
+    for i in c["items"]:
+        v.set_kept(i["id"], True)
+    c = v.check_foreign_packages()
+    assert c["status"] == "pass" and c["summary"] == "Every foreign package is one you kept. 2 kept."
+
+
+def test_plugins_are_listed_and_a_new_capability_counts_again(v):
+    homefile(v, ".config/omarchy/plugins/acme.weather/manifest.json", json.dumps({"name": "Weather"}))
+    c = v.check_plugins()
+    item = c["items"][0]
+    assert item["kind"] == "plugin" and item["name"] == "acme.weather"
+    assert item["text"].startswith("Weather (acme.weather)\n")
+    v.set_kept(item["id"], True)
+    assert v.check_plugins()["status"] == "pass"
+    # The kept id covers what the code can do: new capabilities, new id.
+    assert v.item_id("plugin", "acme.weather", "network") != item["id"]
+
+
+def test_a_plugin_id_omarchy_would_refuse_cannot_be_removed(v):
+    os.makedirs(os.path.join(v.HOME, ".config/omarchy/plugins/odd name"))
+    item = v.check_plugins()["items"][0]
+    assert item["name"] == "" and item["text"].startswith("odd name\n")
+
+
+def test_kept_items_read_the_old_leftovers_file_then_fold_it_in(v):
+    leftover_home(v)
+    lid = v.check_leftovers()["items"][0]["id"]
+    dirfd = v._state_dir()
+    try:
+        v.write_atomic(dirfd, v.KEPT_LEGACY, json.dumps({"schema": v.SCHEMA, "kept": [{"id": lid}]}).encode())
+    finally:
+        os.close(dirfd)
+    assert lid in v.kept_items()
+    pacman_info(v, "dt", ("python-old", "1.0-1", "x"))
+    v.set_kept(v.check_orphans()["items"][0]["id"], True)
+    state = os.path.join(v.HOME, *v.STATE_DIR)
+    assert not os.path.exists(os.path.join(state, v.KEPT_LEGACY))
+    assert lid in v.kept_items() and len(v.kept_items()) == 2
+
+
+def test_keep_refuses_what_no_list_shows(v):
+    pacman_info(v, "dt", ("python-old", "1.0-1", "x"))
+    assert v.set_kept(["0" * 16], True)["ok"] is False
+    assert v.set_kept(v.item_id("orphan", "python-old"), True)["ok"] is True
+
+
+def test_false_positive_takes_several(v):
+    scanned_with(v, ("Games/a.dll", b"MZ a"), ("Games/b.dll", b"MZ b"), ("Downloads/c.exe", b"MZ c"))
+    ids = [i["id"] for i in v.check_virus_scan()["items"]]
+    out = v.set_ignored(ids[:2] + ["0" * 16], True)
+    assert out["message"] == "Marked 2 files as false positives. Each comes back if it changes. 1 is no longer in the last scan."
+    c = v.check_virus_scan()
+    assert [i["ignored"] for i in c["items"]] == [False, True, True]
+    assert v.set_ignored(ids[:2], False)["message"] == "Counting 2 detections again."
+
+
+def test_main_takes_several_ids_for_false_positives(v, capsys):
+    assert v.main(["vigil", "ignore", "0" * 16, "1" * 16]) == 0
+    assert v.main(["vigil", "ignore", "0" * 16, "0" * 16]) == 2                # duplicates: refused
+    assert v.main(["vigil", "ignore"] + ["%016x" % n for n in range(151)]) == 2  # too many
+
+
+def _model_js_string(name):
+    src = (REPO / "Model.js").read_text()
+    m = re.search(r'^var %s = (".*")$' % name, src, re.M)
+    return json.loads(m.group(1))
+
+
+def test_name_rules_match_the_panel(v):
+    src = (REPO / "Model.js").read_text()
+    assert "var PACKAGE_NAME = /^%s$/" % v.REMOVABLE_PACKAGE.pattern in src
+    assert "var PLUGIN_NAME = /^%s$/" % v.REMOVABLE_PLUGIN.pattern in src
+
+
+def test_the_package_remove_script_checks_every_name_again(tmp_path):
+    # The panel's root script, with pacman swapped for a fake that lists two
+    # orphans and records what it was asked to remove.
+    fake = tmp_path / "pacman"
+    log = tmp_path / "log"
+    fake.write_text('#!/bin/bash\ncase "$1" in -Qdtq) printf "python-old\\nlibgone\\n" ;; -Qmq) echo yay ;; '
+                    '*) echo "$@" >> %s ;; esac\n' % log)
+    fake.chmod(0o755)
+    script = _model_js_string("REMOVE_PACKAGES_SCRIPT").replace("/usr/bin/pacman", str(fake))
+
+    def run_it(*args):
+        p = subprocess.run(["/bin/bash", "-c", script, "vigil-remove"] + list(args), capture_output=True, text=True)
+        return p.returncode, p.stdout
+
+    for bad in (["orphans", "-rf"], ["orphans", ".x"], ["orphans", "a b"], ["orphans", "python-old", "yay"],
+                ["foreign", "python-old"], ["other", "python-old"], ["orphans"]):
+        rc, out = run_it(*bad)
+        assert rc == 2 and not log.exists(), (bad, out)
+    rc, out = run_it("orphans", "python-old", "libgone")
+    assert rc == 0 and log.read_text() == "-Rns --noconfirm -- python-old libgone\n"
+
+
+def test_the_plugin_remove_script_refuses_odd_ids_before_removing_any(tmp_path):
+    src = (REPO / "Model.js").read_text()
+    m = re.search(r'function removePluginsScript\(dir\) \{\n  return (".*?") \+ dir \+ (".*?")\n\}', src, re.S)
+    log = tmp_path / "log"
+    (tmp_path / "omarchy-plugin-remove").write_text('#!/bin/bash\necho "$@" >> %s\n' % log)
+    (tmp_path / "omarchy-plugin-remove").chmod(0o755)
+    script = json.loads(m.group(1)) + str(tmp_path) + json.loads(m.group(2))
+    for bad in (["ok.one", "../x"], ["keasbeexd.vigil"], ["-x"], ["a..b"], [""]):
+        p = subprocess.run(["/bin/bash", "-c", script, "vigil-remove-plugins"] + bad, capture_output=True, text=True)
+        assert p.returncode == 2 and not log.exists(), bad
+    p = subprocess.run(["/bin/bash", "-c", script, "vigil-remove-plugins", "acme.weather", "dev_tool-2"],
+                       capture_output=True, text=True)
+    assert p.returncode == 0 and log.read_text() == "acme.weather --yes\ndev_tool-2 --yes\n"

@@ -356,7 +356,7 @@ function careReport(extra = {}) {
       care("thumbnails", "Thumbnail cache", "12.0 MB.", "helper", "clean-thumbnails"),
       care("trash", "Trash", "Empty.", null),
       care("pacman-cache", "Package cache", "3.1 GB.", "terminal", "clean-pacman-cache"),
-      care("orphans", "Orphaned packages", "2 orphaned packages.", "terminal", "clean-orphans"),
+      care("orphans", "Orphaned packages", "2 orphaned packages.", "docs", "arch-orphans"),
       care("journal", "System logs", "Logs take up 400M.", "terminal", "clean-journal"),
       check()
     ]
@@ -793,10 +793,10 @@ test("with the Vigil weekly scan off, other schedules are not offered for hand-o
 })
 
 test("virus detections each carry an id for Ignore, and the card says what ignoring means", () => {
-  const items = [{ id: "0123456789abcdef", text: "~/Games/dx11.dll: Win.Trojan.Agent-1", ignored: false },
-                 { id: "", text: "~/old.exe: Win.X-1", ignored: false }]
+  const items = [{ id: "0123456789abcdef", text: "~/Games/dx11.dll\nWin.Trojan.Agent-1", ignored: false },
+                 { id: "", text: "~/old.exe\nWin.X-1", ignored: false }]
   const r = parse(report({ checks: [check({ id: "virus-scan", category: "detect", items })] }))
-  assert.deepEqual(r.checks[0].items, items.map(i => Object.assign({ kind: "detection", kept: false }, i)))
+  assert.deepEqual(r.checks[0].items, items.map(i => Object.assign({ kind: "detection", kept: false, name: "" }, i)))
   assert.equal(parse(report()).checks[0].items.length, 0)
   const card = M.confirmation("ignore", "0123456789abcdef", r)
   assert.equal(card.title, "Mark this as a false positive?")
@@ -820,7 +820,7 @@ test("ticked leftovers go to the trash on one card that lists each, and says it 
     { id: "fedcba9876543210", kind: "leftover", text: "~/.var/app/com.spotify.Client: 1.2 GB, data of a Flatpak app that is no longer installed", kept: true, ignored: false },
     { id: "00000000000000aa", kind: "leftover", text: "~/.local/bin/old: 0 B, a link to a program that is gone", kept: false, ignored: false }]
   const r = leftoverReport(items)
-  assert.deepEqual(r.checks[0].items, items)
+  assert.deepEqual(r.checks[0].items, items.map(i => Object.assign({ name: "" }, i)))
   assert.deepEqual(M.leftoverTrashIds(r), ["0123456789abcdef", "00000000000000aa"])     // kept ones stay
 
   const one = M.confirmation("trash", "0123456789abcdef", r, "/home/a")
@@ -1302,4 +1302,93 @@ test("run cards show the helper's root steps exactly as the helper starts them",
   assert.equal(clean.length, 1)
   assert.equal(clean[0].text, M.actionPlan("clean-system", TOOLS, "/home/marc")[0].argv.slice(0, -1).join(" ")
     + "\n" + M.actionPlan("clean-system", TOOLS, "/home/marc")[0].argv[5])
+})
+
+// ---------------------------------------------------------------------------
+// Pick lists: orphaned and foreign packages, plugins, infected files
+
+function pickReport(id, kind, items, tools = { pkexec: "/usr/bin", "omarchy-plugin-remove": "/usr/share/omarchy/bin" }) {
+  return parse(report({ tools, checks: [check({ id, category: id === "orphans" ? "care" : "supply", status: "info",
+    weight: 0, items: items.map(i => Object.assign({ kind, ignored: false, kept: false }, i)) })] }))
+}
+
+test("orphans: remove on a card that lists each and shows the exact root command", () => {
+  const r = pickReport("orphans", "orphan", [
+    { id: "00000000000000a1", name: "python-old", text: "python-old · 1.0-1 · 1.50 MiB\nAn old library" },
+    { id: "00000000000000a2", name: "libgone", text: "libgone · 2-1 · 10 KiB\nno description" },
+    { id: "00000000000000a3", name: "kept-one", text: "kept-one · 1-1\nx", kept: true }])
+  assert.deepEqual(M.pickSpec(r.checks[0]), { remove: "Remove", all: true, card: "remove-orphans", keep: true })
+  assert.deepEqual(M.pickableIds(r, "orphan"), ["00000000000000a1", "00000000000000a2"])
+  const card = M.confirmation("remove-orphans", "00000000000000a1,00000000000000a2", r, "/home/a")
+  assert.equal(card.title, "Remove 2 packages?")
+  assert.deepEqual(card.lines.slice(0, 2), ["python-old · 1.0-1 · 1.50 MiB", "libgone · 2-1 · 10 KiB"])
+  assert.ok(card.lines.some(l => /removes nothing/.test(l)))
+  assert.equal(card.commands.length, 1)
+  assert.match(card.commands[0].who, /As root, through pkexec/)
+  const steps = M.removalPlan("remove-orphans", "00000000000000a1,00000000000000a2", r)
+  assert.deepEqual(steps[0].argv, ["/usr/bin/pkexec", "/usr/bin/bash", "-c", M.REMOVE_PACKAGES_SCRIPT, "vigil-remove",
+                                   "orphans", "python-old", "libgone"])
+  assert.equal(card.commands[0].text, "/usr/bin/pkexec /usr/bin/bash -c \"$SCRIPT\" vigil-remove orphans python-old libgone"
+                                     + "\nwhere $SCRIPT is:\n" + M.REMOVE_PACKAGES_SCRIPT)
+  assert.ok(M.sameCommands(card.commands, steps))
+  assert.equal(M.removalPlan("remove-orphans", "00000000000000a3", r).length, 0)       // kept: not removable
+  assert.equal(M.confirmation("remove-orphans", "00000000000000a3", r), null)
+  assert.equal(M.confirmation("remove-foreign", "00000000000000a1", r), null)          // wrong list
+  // No pkexec: no card that promises a removal it cannot run.
+  const none = pickReport("orphans", "orphan", [{ id: "00000000000000a1", name: "x", text: "x" }], {})
+  assert.equal(M.confirmation("remove-orphans", "00000000000000a1", none), null)
+})
+
+test("package and plugin names that could reach a command are checked", () => {
+  for (const name of ["-rf", ".hidden", "a b", "a;b", "", "x".repeat(101)])
+    assert.equal(pickReport("orphans", "orphan", [{ id: "00000000000000a1", name, text: "x" }]), null)
+  for (const name of ["../x", "a..b", "-x", "keasbeexd.vigil", "a/b"])
+    assert.equal(pickReport("omarchy-plugins", "plugin", [{ id: "00000000000000a1", name, text: "x" }]), null)
+  // A plugin whose id Omarchy would refuse is listed, and can be kept, but not removed.
+  const r = pickReport("omarchy-plugins", "plugin", [{ id: "00000000000000a1", name: "", text: "odd name\nx" }])
+  assert.equal(M.itemRemovable(r.checks[0].items[0]), false)
+  assert.equal(M.itemPickable(r.checks[0].items[0]), true)
+  // One kind per list.
+  assert.equal(parse(report({ checks: [check({ items: [
+    { id: "00000000000000a1", kind: "orphan", name: "a", text: "a", kept: false, ignored: false },
+    { id: "00000000000000a2", kind: "leftover", text: "b", kept: false, ignored: false }] })] })), null)
+})
+
+test("foreign packages: no Remove all, and the card says how to get one back", () => {
+  const r = pickReport("aur-packages", "foreign", [{ id: "00000000000000b1", name: "yay", text: "yay · 12-1\nAUR helper" }])
+  assert.equal(M.pickSpec(r.checks[0]).all, false)
+  const card = M.confirmation("remove-foreign", "00000000000000b1", r)
+  assert.equal(card.title, "Remove this package?")
+  assert.ok(card.lines.some(l => /install it again the way you first did/.test(l)))
+  assert.equal(M.removalPlan("remove-foreign", "00000000000000b1", r)[0].argv[5], "foreign")
+})
+
+test("plugins: Omarchy's own remover, as you, once per plugin", () => {
+  const r = pickReport("omarchy-plugins", "plugin", [
+    { id: "00000000000000c1", name: "acme.weather", text: "Weather (acme.weather)\nnetwork" },
+    { id: "00000000000000c2", name: "dev.tool", text: "dev.tool\nlinked" }])
+  const steps = M.removalPlan("remove-plugins", "00000000000000c1,00000000000000c2", r)
+  assert.equal(steps.length, 1)
+  assert.equal(steps[0].asRoot, false)
+  assert.deepEqual(steps[0].argv.slice(3), ["vigil-remove-plugins", "acme.weather", "dev.tool"])
+  assert.match(steps[0].argv[2], /\/usr\/share\/omarchy\/bin\/omarchy-plugin-remove "\$id" --yes/)
+  assert.match(steps[0].argv[2], /keasbeexd\.vigil\) echo 'Refused/)
+  const card = M.confirmation("remove-plugins", "00000000000000c1", r)
+  assert.equal(card.title, "Remove this plugin?")
+  assert.ok(card.lines.some(l => /git clone\) is deleted/.test(l)))
+  assert.match(card.commands[0].who, /As you, no password/)
+  const missing = pickReport("omarchy-plugins", "plugin", [{ id: "00000000000000c1", name: "a", text: "a" }], { pkexec: "/usr/bin" })
+  assert.equal(M.confirmation("remove-plugins", "00000000000000c1", missing), null)
+})
+
+test("false positives: several at once, on one card; none twice; never a marked one", () => {
+  const r = pickReport("virus-scan", "detection", [
+    { id: "00000000000000d1", text: "~/a.exe\nWin.X-1" }, { id: "00000000000000d2", text: "~/b.dll\nWin.Y-2" },
+    { id: "00000000000000d3", text: "~/c.dll\nWin.Z-3", ignored: true }])
+  assert.equal(M.pickSpec(r.checks[0]).keep, false)
+  const card = M.confirmation("ignore", "00000000000000d1,00000000000000d2", r)
+  assert.equal(card.title, "Mark 2 files as false positives?")
+  assert.deepEqual(card.lines.slice(0, 2), ["~/a.exe: Win.X-1", "~/b.dll: Win.Y-2"])
+  assert.equal(M.confirmation("ignore", "00000000000000d1,00000000000000d1", r), null)
+  assert.equal(M.confirmation("ignore", "00000000000000d3", r), null)
 })

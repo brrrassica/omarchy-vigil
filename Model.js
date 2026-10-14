@@ -140,7 +140,10 @@ function confirmation(kind, id, report, home) {
   card.commands = kind === "terminal" ? actionCommands(id, tools, home)
     : kind === "clean-all" && cleanAllPlan(report).system ? actionCommands("clean-system", tools, home)
     : kind === "daily-check" || kind === "weekly-check" || kind === "full-scan" ? runCommands(kind, report)
+    : kind === "remove-orphans" || kind === "remove-foreign" || kind === "remove-plugins" ? removalCommands(kind, id, report)
     : []
+  // A remove card with nothing it could run would promise what it cannot do.
+  if (CARD_KINDS[kind] && kind !== "trash" && kind !== "ignore" && card.commands.length === 0) return null
   return card
 }
 
@@ -184,6 +187,8 @@ function confirmationText(kind, id, report) {
   if (kind === "clean-all") return cleanAllConfirmation(report)
   if (kind === "ignore") return ignoreConfirmation(id, report)
   if (kind === "trash") return trashConfirmation(id, report)
+  if (kind === "remove-orphans" || kind === "remove-foreign") return removePackagesConfirmation(kind, id, report)
+  if (kind === "remove-plugins") return removePluginsConfirmation(id, report)
   if (kind === "full-scan") return fullScanConfirmation(report)
   if (kind === "daily-check") return dailyConfirmation(report)
   if (kind === "weekly-check") return weeklyConfirmation(report)
@@ -201,8 +206,45 @@ function confirmationText(kind, id, report) {
   return { title: a.title, lines: lines }
 }
 
-// Find one item of a check in the report by its id: a virus detection
-// ("detection") or a leftover of an app that is gone ("leftover").
+// ---- Pick lists
+// Leftover app data, orphaned packages, AUR and other foreign packages, other
+// Omarchy plugins and infected files list one item each, with a box to tick.
+// Each kind has its own remove button (with or without an "all" variant) and,
+// but for infected files, Keep. A kept item, or a detection marked as a false
+// positive, shows a lock instead of the box and sits at the bottom of the list.
+var PICK_SPECS = {
+  leftover: { remove: "Trash", all: true, card: "trash", keep: true },
+  orphan: { remove: "Remove", all: true, card: "remove-orphans", keep: true },
+  foreign: { remove: "Remove", all: false, card: "remove-foreign", keep: true },
+  plugin: { remove: "Remove", all: false, card: "remove-plugins", keep: true },
+  detection: { remove: "False positive", all: false, card: "ignore", keep: false }
+}
+var CARD_KINDS = { "trash": "leftover", "remove-orphans": "orphan", "remove-foreign": "foreign",
+                   "remove-plugins": "plugin", "ignore": "detection" }
+
+// Names that may reach a command: Arch's package names, and the plugin ids
+// omarchy-plugin-remove takes (never Vigil's own). Must match REMOVABLE_PACKAGE
+// and REMOVABLE_PLUGIN in bin/vigil, and the checks in the remove scripts.
+var PACKAGE_NAME = /^[A-Za-z0-9@_+][A-Za-z0-9@._+-]{0,99}$/
+var PLUGIN_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/
+
+function pickSpec(check) {
+  if (!check || !check.items || check.items.length === 0) return null
+  return PICK_SPECS[check.items[0].kind] || null
+}
+
+// An item you can tick: listed with an id, not kept, not a false positive.
+function itemPickable(item) {
+  return !!item && item.id !== "" && !item.kept && !item.ignored
+}
+
+// What the remove button acts on: a package or detection always; a plugin
+// only when its id is one omarchy-plugin-remove takes.
+function itemRemovable(item) {
+  return itemPickable(item) && (item.kind !== "plugin" || item.name !== "")
+}
+
+// Find one item in the report by its id and kind.
 function findItem(report, id, kind) {
   if (!report || typeof id !== "string" || !/^[0-9a-f]{16}$/.test(id)) return null
   for (var i = 0; i < report.checks.length; i++) {
@@ -215,16 +257,42 @@ function findItem(report, id, kind) {
 function detectionItem(report, id) { return findItem(report, id, "detection") }
 function leftoverItem(report, id) { return findItem(report, id, "leftover") }
 
-// The leftovers Move all to trash would move: every listed item not kept.
-function leftoverTrashIds(report) {
+// The ids of every item of one kind you could tick right now.
+function pickableIds(report, kind) {
   if (!report || !report.checks) return []
   var out = []
   for (var i = 0; i < report.checks.length; i++) {
     var items = report.checks[i].items || []
     for (var j = 0; j < items.length; j++)
-      if (items[j].kind === "leftover" && !items[j].kept) out.push(items[j].id)
+      if (items[j].kind === kind && itemPickable(items[j])) out.push(items[j].id)
   }
   return out
+}
+function leftoverTrashIds(report) { return pickableIds(report, "leftover") }
+
+// The items a list of ids names ("id,id,..." as a card's action), or null
+// unless every one is a listed item of that kind you could remove now, at
+// most 150, none twice.
+function itemIdList(report, ids, kind) {
+  if (typeof ids !== "string" || ids.length > 150 * 17) return null
+  var list = ids.split(",")
+  if (list.length === 0 || list.length > 150) return null
+  var seen = Object.create(null)
+  for (var i = 0; i < list.length; i++) {
+    var item = findItem(report, list[i], kind)
+    if (!item || !itemRemovable(item) || seen[list[i]]) return null
+    seen[list[i]] = true
+  }
+  return list
+}
+function leftoverIdList(report, ids) { return itemIdList(report, ids, "leftover") }
+
+// The first line of each item, at most 40, for a card.
+function itemLines(report, list, kind) {
+  var lines = []
+  for (var i = 0; i < list.length && i < 40; i++) lines.push(findItem(report, list[i], kind).text.split("\n")[0])
+  if (list.length > 40) lines.push("… and " + (list.length - 40) + " more")
+  return lines
 }
 
 var TRASH_LINES = [
@@ -233,21 +301,6 @@ var TRASH_LINES = [
   "If you install the app again, it starts with fresh settings unless you restore this first.",
   "Technical: renames it into ~/.local/share/Trash/files and records where it came from in ~/.local/share/Trash/info, the freedesktop.org trash every file manager reads. Nothing is copied or deleted. Vigil checks again that no installed app uses it before it moves anything."]
 
-// The leftovers a list of ids names ("id,id,..." as the card's action), or
-// null unless every one is a listed leftover you have not kept, at most 150.
-function leftoverIdList(report, ids) {
-  if (typeof ids !== "string" || ids.length > 150 * 17) return null
-  var list = ids.split(",")
-  if (list.length === 0 || list.length > 150) return null
-  var seen = Object.create(null)
-  for (var i = 0; i < list.length; i++) {
-    var item = leftoverItem(report, list[i])
-    if (!item || item.kept || seen[list[i]]) return null
-    seen[list[i]] = true
-  }
-  return list
-}
-
 // The card for Trash selected and Trash all: every item it moves, then what
 // the trash means.
 function trashConfirmation(ids, report) {
@@ -255,22 +308,114 @@ function trashConfirmation(ids, report) {
   if (!list) return null
   if (list.length === 1)
     return { title: "Move this to the trash?", lines: [leftoverItem(report, list[0]).text].concat(TRASH_LINES) }
-  var lines = []
-  for (var i = 0; i < list.length && i < 40; i++) lines.push(leftoverItem(report, list[i]).text)
-  if (list.length > 40) lines.push("… and " + (list.length - 40) + " more")
+  var lines = itemLines(report, list, "leftover")
   lines.push("Everything else on the list stays where it is.")
   return { title: "Move " + list.length + " items to the trash?", lines: lines.concat(TRASH_LINES) }
 }
 
-function ignoreConfirmation(id, report) {
-  var item = detectionItem(report, id)
-  if (!item || item.ignored) return null
-  return { title: "Mark this as a false positive?", lines: [
-    item.text,
-    "A false positive is a safe file ClamAV mistakes for a virus. Only mark it if you are sure, for example a game or app file you got from its official source.",
-    "Not sure? Open ClamUI: it can look the file up on VirusTotal, where many virus scanners check it.",
-    "Vigil stops counting this file only while it stays exactly as it is now. If it ever changes, Vigil reports it again.",
-    "Technical: records the SHA-256 of this file in ~/.local/state/omarchy-vigil/ignored-detections.json"] }
+function ignoreConfirmation(ids, report) {
+  var list = itemIdList(report, ids, "detection")
+  if (!list) return null
+  var one = list.length === 1
+  var lines = one ? [detectionItem(report, list[0]).text.replace("\n", ": ")]
+                  : list.slice(0, 40).map(function(id) { return detectionItem(report, id).text.replace("\n", ": ") })
+  if (list.length > 40) lines.push("… and " + (list.length - 40) + " more")
+  return { title: one ? "Mark this as a false positive?" : "Mark " + list.length + " files as false positives?",
+           lines: lines.concat([
+    "A false positive is a safe file ClamAV mistakes for a virus. Only mark " + (one ? "it" : "them")
+      + " if you are sure, for example a game or app file you got from its official source.",
+    "Not sure? Open ClamUI: it can look a file up on VirusTotal, where many virus scanners check it.",
+    "Vigil stops counting " + (one ? "this file" : "each file") + " only while it stays exactly as it is now. If it ever changes, Vigil reports it again.",
+    "To count " + (one ? "it" : "one") + " again, click its lock.",
+    "Technical: records the SHA-256 of " + (one ? "this file" : "each file") + " in ~/.local/state/omarchy-vigil/ignored-detections.json"]) }
+}
+
+// Removing packages: one root step through pkexec, a constant script that
+// gets the list's name and the package names as arguments. As root it checks
+// each name again (Arch's name rules) and that pacman still lists it as an
+// orphan or a foreign package, and removes nothing unless every one passes.
+var REMOVE_PACKAGES_SCRIPT = "echo VIGIL-STEP 0\nexport LC_ALL=C\nlist=$1; shift\n[ $# -gt 0 ] || { echo 'Nothing to remove.'; exit 2; }\ncase \"$list\" in\n  orphans) listed=$(/usr/bin/pacman -Qdtq) ;;\n  foreign) listed=$(/usr/bin/pacman -Qmq) ;;\n  *) echo 'Unknown list.'; exit 2 ;;\nesac\nfor n in \"$@\"; do\n  case \"$n\" in\n    ''|[!A-Za-z0-9@_+]*|*[!A-Za-z0-9@._+-]*) echo 'Refused: that is not a package name, so nothing was removed.'; exit 2 ;;\n  esac\n  printf '%s\\n' \"$listed\" | /usr/bin/grep -qxF -- \"$n\" || { echo \"$n is no longer on the list, so nothing was removed.\"; exit 2; }\ndone\n/usr/bin/pacman -Rns --noconfirm -- \"$@\" 2>&1\n"
+
+// Removing plugins: Omarchy's own omarchy-plugin-remove, as you, once per
+// plugin. The script checks each id the way that tool does (and never
+// removes Vigil itself) before it runs anything.
+function removePluginsScript(dir) {
+  return "for id in \"$@\"; do\n  case \"$id\" in\n    ''|[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*|*..*|keasbeexd.vigil) echo 'Refused: that is not a plugin id.'; exit 2 ;;\n  esac\ndone\nfor id in \"$@\"; do\n  " + dir + "/omarchy-plugin-remove \"$id\" --yes 2>&1 || exit 1\ndone\n"
+}
+
+// The steps that remove what a card lists, or [] when they cannot run here.
+function removalPlan(kind, ids, report) {
+  var itemKind = CARD_KINDS[kind]
+  if (kind !== "remove-orphans" && kind !== "remove-foreign" && kind !== "remove-plugins") return []
+  var list = itemIdList(report, ids, itemKind)
+  if (!list) return []
+  var names = list.map(function(id) { return findItem(report, id, itemKind).name })
+  if (kind === "remove-plugins") {
+    var dir = toolDir(report.tools, "omarchy-plugin-remove")
+    if (dir === "" || !names.every(function(n) { return PLUGIN_NAME.test(n) && n.indexOf("..") === -1 && n !== "keasbeexd.vigil" }))
+      return []
+    return [{ argv: [BASH, "-c", removePluginsScript(dir), "vigil-remove-plugins"].concat(names), asRoot: false }]
+  }
+  if (toolDir(report.tools, "pkexec") === "" || !names.every(function(n) { return PACKAGE_NAME.test(n) })) return []
+  return [{ argv: [PKEXEC, BASH, "-c", REMOVE_PACKAGES_SCRIPT, "vigil-remove",
+                   kind === "remove-orphans" ? "orphans" : "foreign"].concat(names), asRoot: true }]
+}
+
+// A step whose script is followed by arguments, for the card: the command
+// line with the script's place marked, then the script exactly as passed.
+function scriptCommandText(argv) {
+  var at = argv.indexOf("-c") + 1
+  return argv.slice(0, at).concat(["\"$SCRIPT\""], argv.slice(at + 1)).join(" ") + "\nwhere $SCRIPT is:\n" + argv[at]
+}
+
+// True when a card's commands are exactly these steps' commands: what you
+// confirmed is what runs.
+function sameCommands(commands, steps) {
+  if (!Array.isArray(commands) || commands.length !== steps.length) return false
+  for (var i = 0; i < steps.length; i++)
+    if (!commands[i] || commands[i].text !== scriptCommandText(steps[i].argv)) return false
+  return true
+}
+
+function removalCommands(kind, ids, report) {
+  return removalPlan(kind, ids, report).map(function(step) {
+    return { who: step.asRoot ? "As root, through pkexec (Omarchy asks for your password):" : "As you, no password:",
+             text: scriptCommandText(step.argv) }
+  })
+}
+
+var PACKAGE_LINES = [
+  "pacman removes each package, the dependencies only it needed (-s) and the settings files it saved in /etc (-n). Your own files in your home folder stay.",
+  "If another package still needs one of these, pacman refuses and removes nothing.",
+  "Omarchy asks for your password. As root, Vigil first checks again that each one is still on this list; if one is not, nothing is removed.",
+  "Technical: sudo pacman -Rns --noconfirm -- <the packages above>"]
+
+function removePackagesConfirmation(kind, ids, report) {
+  var itemKind = CARD_KINDS[kind]
+  var list = itemIdList(report, ids, itemKind)
+  if (!list) return null
+  var one = list.length === 1
+  var lines = itemLines(report, list, itemKind)
+  if (itemKind === "orphan")
+    lines.push("Nothing installed needs " + (one ? "it" : "these") + ": " + (one ? "it was" : "they were")
+               + " installed for something you have since removed.")
+  else
+    lines.push((one ? "It comes" : "These come") + " from the AUR or another source outside the official repositories. "
+               + "To get " + (one ? "it" : "one") + " back, install it again the way you first did.")
+  if (!one) lines.push("Everything else on the list stays installed.")
+  return { title: one ? "Remove this package?" : "Remove " + list.length + " packages?", lines: lines.concat(PACKAGE_LINES) }
+}
+
+function removePluginsConfirmation(ids, report) {
+  var list = itemIdList(report, ids, "plugin")
+  if (!list) return null
+  var one = list.length === 1
+  var lines = itemLines(report, list, "plugin")
+  if (!one) lines.push("Every other plugin stays.")
+  return { title: one ? "Remove this plugin?" : "Remove " + list.length + " plugins?", lines: lines.concat([
+    "Omarchy's own omarchy-plugin-remove does it, as you, no password: it switches the plugin off, then removes its folder from ~/.config/omarchy/plugins.",
+    "A plugin installed with omarchy plugin add (a git clone) is deleted; add it again to get it back. A linked development install is only unlinked. Any other folder is moved to a backup next to it (.<id>.bak.<date>).",
+    "Technical: omarchy-plugin-remove <id> --yes, once for each plugin above"]) }
 }
 
 var VIGIL_MARK = "# Written by Vigil (keasbeexd.vigil). Delete this file to undo."
@@ -324,10 +469,10 @@ function undoDropIn(name, path, afterText, after) {
 // How an action runs. Most run without a terminal: "root" ones through pkexec,
 // so Omarchy's own password dialog asks, "user" ones as you; the panel shows
 // what they printed. Only tools that ask you questions as they go (Omarchy's
-// updater and setup wizards, the orphan review, choosing an SSH passphrase)
+// updater and setup wizards, choosing an SSH passphrase)
 // keep a terminal.
 var TERMINAL_ONLY = ["update", "update-firmware", "fido2", "undo-fido2", "fingerprint", "undo-fingerprint", "sudo-passwordless-off",
-                     "docker-group-off", "clean-orphans", "ssh-passphrase"]
+                     "docker-group-off", "ssh-passphrase"]
 var USER_MODE = ["allow-idle", "restart", "run-arch-audit", "show-ld-preload", "show-plugins", "screen-lock-default",
                  "hand-over-schedules", "undo-schedules", "update-flatpaks", "wifi-autojoin-off", "undo-wifi-autojoin"]
 var PKEXEC = "/usr/bin/pkexec"
@@ -759,13 +904,6 @@ var TERMINAL_ACTIONS = {
     run: PACCACHE_RUN
   },
 
-  "clean-orphans": {
-    title: "Review leftover packages",
-    what: ["Lists packages that were installed only for something you have since removed,",
-           "and asks before removing any.",
-           "Technical: runs the Omarchy command omarchy-update-orphan-pkgs"],
-    tool: "omarchy-update-orphan-pkgs", args: ""
-  },
   "show-listeners": {
     title: "Show which programs accept network connections",
     what: ["Lists each open port and the program behind it. Changes nothing.",
@@ -964,7 +1102,8 @@ var DOCS = {
   "arch-users": "https://wiki.archlinux.org/title/Users_and_groups",
   "attack-history": "https://attack.mitre.org/techniques/T1070/003/",
   "arch-xdg": "https://wiki.archlinux.org/title/XDG_Base_Directory",
-  "arch-clamav": "https://wiki.archlinux.org/title/ClamAV"
+  "arch-clamav": "https://wiki.archlinux.org/title/ClamAV",
+  "arch-orphans": "https://wiki.archlinux.org/title/Pacman/Tips_and_tricks#Removing_unused_packages_(orphans)"
 }
 
 function docsUrl(id) {
@@ -1073,7 +1212,7 @@ function cleanAllConfirmation(report) {
   var lines = plan.items.slice(0)
   if (plan.user) lines.push("Files are cleared right away. The trash cannot be restored; caches rebuild themselves.")
   if (plan.system) lines.push("For the package cache and logs, Omarchy asks for your password once.")
-  lines.push("Orphaned packages and leftover app data are left out: they deserve a look, so review them one by one at the bottom of this tab.")
+  lines.push("Orphaned packages and leftover app data are left out: they deserve a look, so tick what to remove or keep in their own rows at the bottom of this tab.")
   return { title: "Clean all", lines: lines }
 }
 
@@ -1120,8 +1259,10 @@ function validCheck(c) {
     if (!isString(c.dismissedAt, 10) || !/^\d{4}-\d{2}-\d{2}$/.test(c.dismissedAt)) return null
     dismissedAt = c.dismissedAt
   }
-  // One line per item, each with its own buttons: a virus detection (False
-  // positive) or a leftover of an app that is gone (Move to trash, Keep).
+  // A pick list: one item per line, all of one kind (see PICK_SPECS). A
+  // detection can be a false positive (ignored); any other item can be kept.
+  // Packages and plugins carry the name a remove command would get, checked
+  // against the names Arch and Omarchy allow.
   var items = []
   if (c.items !== undefined) {
     if (!Array.isArray(c.items) || c.items.length > 500) return null
@@ -1129,12 +1270,21 @@ function validCheck(c) {
       var it = c.items[k]
       if (!it || typeof it !== "object" || typeof it.ignored !== "boolean" || !isString(it.text, 400)
           || typeof it.id !== "string" || (it.id !== "" && !/^[0-9a-f]{16}$/.test(it.id))) return null
-      var leftover = it.kind === "leftover"
-      if (it.kind !== undefined && !leftover) return null
-      if (leftover && (it.id === "" || typeof it.kept !== "boolean" || it.ignored)) return null
-      if (!leftover && it.kept !== undefined) return null
-      items.push({ id: it.id, kind: leftover ? "leftover" : "detection", text: plain(it.text, 400),
-                   ignored: it.ignored, kept: leftover ? it.kept : false })
+      var kind = it.kind === undefined ? "detection" : it.kind
+      if (!Object.prototype.hasOwnProperty.call(PICK_SPECS, kind) || (k > 0 && kind !== items[0].kind)) return null
+      if (kind === "detection" ? (it.kept !== undefined && it.kept !== false)
+                               : (it.id === "" || typeof it.kept !== "boolean" || it.ignored)) return null
+      var name = ""
+      if (kind === "orphan" || kind === "foreign") {
+        if (!isString(it.name, 100) || !PACKAGE_NAME.test(it.name)) return null
+        name = it.name
+      } else if (kind === "plugin") {
+        if (!isString(it.name, 100) || (it.name !== "" && (!PLUGIN_NAME.test(it.name) || it.name.indexOf("..") !== -1
+                                                             || it.name === "keasbeexd.vigil"))) return null
+        name = it.name
+      } else if (it.name !== undefined) return null
+      items.push({ id: it.id, kind: kind, text: plain(it.text, 400), name: name,
+                   ignored: it.ignored, kept: kind === "detection" ? false : it.kept })
     }
   }
   return {
@@ -1645,7 +1795,7 @@ var CHECK_SCHEDULE = { "virus-scan": 1.5, "updates": 1, "flatpak-apps": 1, "bumb
 // Care tab, under their own heading.
 var CARE_SEPARATE = ["orphans", "leftovers"]
 var CARE_SEPARATE_HEADING = "NOT IN CLEAN ALL"
-var CARE_SEPARATE_NOTE = "Removing packages, or settings you may want back, deserves a look. Clean all never touches these: review them one by one."
+var CARE_SEPARATE_NOTE = "Removing packages, or settings you may want back, deserves a look. Clean all never touches these: tick what to remove or keep in each row."
 
 function separateFromCleanAll(check) {
   return !!check && check.category === "care" && inList(check.id, CARE_SEPARATE)
@@ -1873,7 +2023,10 @@ if (typeof module !== "undefined") {
     BUMBLEBEE_INSTALL: BUMBLEBEE_INSTALL, BUMBLEBEE_VERSION: BUMBLEBEE_VERSION,
     SIGNATURES_SCRIPT: SIGNATURES_SCRIPT, NO_PASSWORD_STEP: NO_PASSWORD_STEP,
     SOURCE_IDS: SOURCE_IDS, DAILY_IDS: DAILY_IDS, WEEKLY_IDS: WEEKLY_IDS, cardShowsSignatures: cardShowsSignatures,
-    parseProgress: parseProgress, parseRunning: parseRunning, detectionItem: detectionItem, leftoverItem: leftoverItem, leftoverIdList: leftoverIdList, leftoverTrashIds: leftoverTrashIds, actionStage: actionStage, actionProgress: actionProgress,
+    parseProgress: parseProgress, parseRunning: parseRunning, detectionItem: detectionItem, leftoverItem: leftoverItem, leftoverIdList: leftoverIdList, leftoverTrashIds: leftoverTrashIds,
+    PICK_SPECS: PICK_SPECS, pickSpec: pickSpec, itemPickable: itemPickable, itemRemovable: itemRemovable, pickableIds: pickableIds,
+    itemIdList: itemIdList, removalPlan: removalPlan, sameCommands: sameCommands, removalCommands: removalCommands, REMOVE_PACKAGES_SCRIPT: REMOVE_PACKAGES_SCRIPT,
+    removePluginsScript: removePluginsScript, scriptCommandText: scriptCommandText, PACKAGE_NAME: PACKAGE_NAME, PLUGIN_NAME: PLUGIN_NAME, actionStage: actionStage, actionProgress: actionProgress,
     actionOutputText: actionOutputText, progressText: progressText, lastRunRows: lastRunRows, missingLabel: missingLabel,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,
     SYSCTL_LINES: SYSCTL_LINES

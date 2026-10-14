@@ -1361,22 +1361,131 @@ def check_ld_preload():
     return result(cid, cat, title, "pass", "Nothing is preloaded system-wide.", why, weight=3)
 
 
+# --- Pick lists ---------------------------------------------------------------
+# Leftover app data, orphaned packages, AUR and other foreign packages, other
+# Omarchy plugins and infected files are listed one item each, with a box to
+# tick. Keeping an item (or marking a detection as a false positive) changes
+# only Vigil's own notes: it stays on the list, with a lock and last, and stops
+# counting. Removing is always the panel's job, on a card that shows the exact
+# command first; the helper only lists.
+
+REMOVABLE_PACKAGE = re.compile(r"[A-Za-z0-9@_+][A-Za-z0-9@._+-]{0,99}")   # Arch's package name rules
+REMOVABLE_PLUGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")         # omarchy-plugin-remove's ids
+PICK_MAX = 150
+
+
+def item_id(kind, *parts):
+    """A short stable id for one item of a pick list."""
+    return hashlib.sha256("\0".join((kind,) + parts).encode("utf-8", "surrogateescape")).hexdigest()[:16]
+
+
+def quiet_last(items):
+    """Kept items and false positives go to the bottom; the rest keep their order."""
+    return sorted(items, key=lambda i: bool(i.get("kept") or i.get("ignored")))
+
+
+def _pacman_info(flags):
+    """[{name, version, description, size}] from `pacman -Q<flags>i`, or None
+    when pacman could not answer. Only names Arch allows are listed."""
+    rc, out = run(["/usr/bin/pacman", "-Q" + flags + "i"], timeout=10, limit=4 * 1024 * 1024)
+    if rc is None or (rc != 0 and out.strip()):
+        return None
+    blocks, cur = [], {}
+    for line in out.splitlines():
+        if not line.strip():
+            if cur:
+                blocks.append(cur)
+            cur = {}
+            continue
+        m = re.match(r"([A-Za-z][A-Za-z ]*?)\s*:\s?(.*)$", line)
+        if m and not line[0].isspace():
+            cur[m.group(1)] = m.group(2).strip()
+    if cur:
+        blocks.append(cur)
+    out = []
+    for b in blocks[:2000]:
+        name = b.get("Name", "")
+        if not REMOVABLE_PACKAGE.fullmatch(name):
+            continue
+        desc = b.get("Description", "")
+        out.append({"name": name, "version": clean(b.get("Version", ""), 60),
+                    "description": "" if desc in ("", "None") else clean(desc, 160),
+                    "size": clean(b.get("Installed Size", ""), 20)})
+    return out
+
+
+def _package_records(kind, flags, extra=None):
+    """Pick-list records for packages, or None."""
+    if not is_trusted_executable(sys_path("/usr/bin/pacman")):
+        return None
+    pkgs = _pacman_info(flags)
+    if pkgs is None:
+        return None
+    recs = []
+    for p in pkgs:
+        head = " \u00b7 ".join(x for x in (p["name"], p["version"], p["size"]) if x)
+        tail = "; ".join(x for x in (p["description"], (extra or {}).get(p["name"], "")) if x)
+        recs.append({"id": item_id(kind, p["name"]), "kind": kind, "name": p["name"], "shown": p["name"],
+                     "text": head + "\n" + (tail or "no description")})
+    return recs
+
+
+def orphan_records():
+    return _package_records("orphan", "dt")
+
+
+def foreign_records():
+    """Foreign packages, each with what the last AUR lookup said about it."""
+    cache = feed_cache("aur") or {}
+    said = {}
+    for key, words in (("gone", "no longer in the AUR"), ("official", "now in the official repositories"),
+                       ("orphans", "no maintainer in the AUR")):
+        v = cache.get(key)
+        for n in v if isinstance(v, list) else []:
+            if isinstance(n, str):
+                said[n] = words
+    return _package_records("foreign", "m", said)
+
+
+def pick_items(records, kept, note_kept):
+    """Items for the panel and the lines still counted (not kept)."""
+    items, live = [], []
+    for r in records:
+        is_kept = r["id"] in kept
+        item = {"id": r["id"], "kind": r["kind"], "text": r["text"], "kept": is_kept, "ignored": False}
+        if "name" in r:
+            item["name"] = r["name"]
+        items.append(item)
+        if not is_kept:
+            live.append(r)
+    n = len(records) - len(live)
+    return quiet_last(items), live, (note_kept % n if n else "")
+
+
 @check
 def check_foreign_packages():
     cid, cat, title = "aur-packages", "supply", "AUR and other foreign packages"
     why = ("Packages from the AUR are written by volunteers and are not checked by Arch, and "
            "malicious ones have happened.")
-    tool = "/usr/bin/pacman"
-    if not is_trusted_executable(sys_path(tool)):
+    howto = ("Remove what you no longer use: tick it, then Remove selected (it asks first and shows the exact "
+             "command). Keep what you trust: it stays installed and on the list, with a lock, and Vigil stops "
+             "counting it.")
+    if not is_trusted_executable(sys_path("/usr/bin/pacman")):
         return result(cid, cat, title, "na", "pacman is not available.", why, weight=0)
-    rc, out = run([tool, "-Qmq"], timeout=8, limit=CMD_MAX)
-    if rc is None:
+    recs = foreign_records()
+    if recs is None:
         return result(cid, cat, title, "unknown", "Could not list foreign packages.", why, weight=0)
-    names = [clean(n, 80) for n in out.split()][:2000]
-    if not names:
+    if not recs:
         return result(cid, cat, title, "pass", "Every installed package comes from the official repositories.", why, weight=0)
-    return result(cid, cat, title, "info", "%d package%s from outside the official repositories." % (
-        len(names), "" if len(names) == 1 else "s"), why, clean_block(names), weight=0)
+    items, live, note = pick_items(recs, kept_items(), " %d kept.")
+    if live:
+        out = result(cid, cat, title, "info", "%d package%s from outside the official repositories.%s" % (
+            len(live), "" if len(live) == 1 else "s", note), why,
+            clean_block([r["text"].replace("\n", ", ") for r in live]), weight=0, howto=howto)
+    else:
+        out = result(cid, cat, title, "pass", "Every foreign package is one you kept.%s" % note, why, weight=0)
+    out["items"] = items
+    return out
 
 
 SCANNERS = [
@@ -2496,12 +2605,14 @@ def check_virus_scan():
     ignored = ignored_detections()
     items, live = [], []
     for f in found:
-        text = "%s: %s" % (clean(f.get("path"), 200), clean(f.get("signature"), 120))
+        # Two lines: the file, then what ClamAV found in it.
+        text = "%s\n%s" % (clean(str(f.get("path") or "").replace("\n", "\\n"), 200),
+                            clean(str(f.get("signature") or "").replace("\n", "\\n"), 120))
         did = detection_id(f)
         is_ignored = did is not None and detection_ignored(f, ignored)
-        items.append({"id": did or "", "text": text, "ignored": is_ignored})
+        items.append({"id": did or "", "kind": "detection", "text": text, "ignored": is_ignored})
         if not is_ignored:
-            live.append(text)
+            live.append(text.replace("\n", ": "))
     n_ignored = len(found) - len(live)
     note = " %d marked as a false positive." % n_ignored if n_ignored else ""
     odd = [clean(x, 200) for x in cache.get("oddNames", []) if isinstance(x, str)][:20] \
@@ -2512,7 +2623,7 @@ def check_virus_scan():
             fix=now, weight=1,
             howto="Normal programs never name files like this; it is a trick to confuse virus scanners. "
                   "Look at where these files came from, and delete them if you do not know them.")
-        out["items"] = items
+        out["items"] = quiet_last(items)
         return out
     if live:
         handoff = fix("app", "open-clamui", "Open ClamUI to quarantine them") if clamui_install() else now
@@ -2521,10 +2632,10 @@ def check_virus_scan():
             why, clean_block(live), handoff, weight=3,
             howto="Do not open these files. Quarantine or delete them in ClamUI; if you downloaded them "
                   "on purpose, get them again from the official site. Only if you are sure a file is safe "
-                  "(for example a game file ClamAV mistakes for malware), press False positive next to it.")
+                  "(for example a game file ClamAV mistakes for malware), tick it and press False positive selected.")
     else:
         out = result(cid, cat, title, "pass", "No infected files. %s.%s" % (scanned, note), why, fix=now, weight=3)
-    out["items"] = items
+    out["items"] = quiet_last(items)
     return out
 
 
@@ -2666,27 +2777,38 @@ def _current_detection(did):
     return None
 
 
-def set_ignored(did, on):
-    """`vigil ignore <id>` / `vigil unignore <id>` for one detection of the last scan."""
-    if not re.fullmatch(r"[0-9a-f]{16}", did):
+def set_ignored(dids, on):
+    """`vigil ignore <id>...` / `vigil unignore <id>...` for detections of the last scan.
+    Marking takes only detections listed now whose file Vigil could read."""
+    dids = [dids] if isinstance(dids, str) else list(dids)
+    if not dids or not all(re.fullmatch(r"[0-9a-f]{16}", x) for x in dids):
         return {"ok": False, "action": "", "message": "Unknown detection."}
-    f = _current_detection(did) if on else None
-    if on and f is None:
-        return {"ok": False, "action": "", "message": "That detection is no longer in the last scan."}
+    marked, unread = [], 0
     if on:
-        key, digest = _file_identity(detection_file(f))
-        if digest is None:
-            return {"ok": False, "action": "", "message": "Could not read the file, so it was not ignored."}
+        current_found = {detection_id(f): f for f in current_detections()}
+        if not any(x in current_found for x in dids):
+            return {"ok": False, "action": "", "message": "That detection is no longer in the last scan."
+                    if len(dids) == 1 else "Those detections are no longer in the last scan."}
+        for did in dids:
+            f = current_found.get(did)
+            if f is None:
+                continue
+            key, digest = _file_identity(detection_file(f))
+            if digest is None:
+                unread += 1
+                continue
+            marked.append({"id": did, "file": detection_file(f), "signature": f["signature"], "sha256": digest,
+                           "stat": key, "at": time.strftime("%Y-%m-%d")})
+        if not marked:
+            return {"ok": False, "action": "", "message": "Could not read the file, so it was not marked."
+                    if len(dids) == 1 else "Could not read the files, so none was marked."}
     try:
         dirfd = _state_dir()
     except (OSError, Refused):
         return {"ok": False, "action": "", "message": "Could not open the Vigil state folder."}
     try:
         _lock(dirfd)
-        current = [e for e in ignored_detections().values() if e["id"] != did]
-        if on:
-            current.append({"id": did, "file": detection_file(f), "signature": f["signature"], "sha256": digest,
-                            "stat": key, "at": time.strftime("%Y-%m-%d")})
+        current = [e for e in ignored_detections().values() if e["id"] not in dids] + marked
         write_atomic(dirfd, IGNORED_FILE, json.dumps({"schema": SCHEMA, "ignored": current[-IGNORED_MAX:]},
                                                      separators=(",", ":")).encode())
     finally:
@@ -2695,8 +2817,19 @@ def set_ignored(did, on):
     c = next((x for x in audit(peek=True)["checks"] if x["id"] == "virus-scan"), None)
     if c is not None and c["status"] in ("fail", "warn"):
         mark_seen(fingerprint(c))
-    return {"ok": True, "action": "", "message": "Marked as a false positive. It comes back if the file changes." if on
-            else "Counting it again."}
+    n = len(marked) if on else len(dids)
+    if not on:
+        msg = "Counting it again." if n == 1 else "Counting %d detections again." % n
+    elif n == 1:
+        msg = "Marked as a false positive. It comes back if the file changes."
+    else:
+        msg = "Marked %d files as false positives. Each comes back if it changes." % n
+    left = len(dids) - n - unread if on else 0
+    if unread:
+        msg += " %d could not be read, so %s not marked." % (unread, "it was" if unread == 1 else "they were")
+    if left > 0:
+        msg += " %d %s no longer in the last scan." % (left, "is" if left == 1 else "are")
+    return {"ok": True, "action": "", "message": msg}
 
 
 # --- Waiting updates and firmware --------------------------------------------
@@ -3585,17 +3718,43 @@ def check_plugins():
     why = ("Omarchy plugins run inside the desktop shell with everything your account can reach, "
            "and they are not sandboxed. Vigil reads each one's code without running it; "
            "downloading and running code, or shipping compiled binaries, deserve a closer look.")
+    howto = ("Remove a plugin you no longer use: tick it, then Remove selected (it asks first and shows the "
+             "exact command, Omarchy's own omarchy-plugin-remove). Keep one you have looked at and trust: it "
+             "stays on the list, with a lock, and Vigil stops counting it until its code gains a new capability.")
+    recs = plugin_records()
+    if not recs:
+        return result(cid, cat, title, "pass", "No other third-party plugins are installed.", why, weight=0)
+    items, live, note = pick_items(recs, kept_items(), " %d kept.")
+    lines = [r["text"].replace("\n", ": ") for r in live]
+    if not live:
+        out = result(cid, cat, title, "pass", "Every other plugin is one you kept.%s" % note, why, weight=0)
+        out["items"] = items
+        return out
+    summary = "%d third-party plugin%s installed." % (len(live), "" if len(live) == 1 else "s")
+    risky = sum(1 for r in live if r["risky"])
+    if risky:
+        summary += " %d download%s and run%s code or ship%s binaries." % (
+            risky, "s" if risky == 1 else "", "s" if risky == 1 else "", "s" if risky == 1 else "")
+    out = result(cid, cat, title, "info", summary + note, why, clean_block(lines), weight=0, howto=howto)
+    out["items"] = items
+    return out
+
+
+def plugin_records():
+    """One record per other plugin: its name, then what its code can do. The
+    id covers what it can do, so a plugin you kept that gains a capability is
+    counted again."""
     base = home_path(".config", "omarchy", "plugins")
     names = [n for n in list_dir(base, 200) if not n.startswith(".") and n != PLUGIN_ID]
     budget = [8 * 1024 * 1024, time.monotonic() + 3.0]
-    lines, risky = [], 0
+    recs = []
     for name in names[:100]:
-        label = clean(name, 80)
+        label = clean(name.replace("\n", "\\n"), 80)
         try:
             text = read_text(base + "/" + name + "/manifest.json", SMALL_FILE_MAX, follow=True)
             m = json.loads(text) if text else None
             if isinstance(m, dict) and isinstance(m.get("name"), str):
-                label = "%s (%s)" % (clean(m["name"], 60), clean(name, 80))
+                label = "%s (%s)" % (clean(m["name"].replace("\n", " "), 60), label)
         except (Refused, ValueError, OSError):
             pass
         try:
@@ -3605,20 +3764,15 @@ def check_plugins():
         if linked:
             # A development install links to a checkout elsewhere. Vigil does
             # not follow the link, so it says so rather than reporting "clean".
-            lines.append(label + ": linked from another folder (development install), not scanned")
-            continue
-        caps = plugin_capabilities(base + "/" + name, budget)
-        if "downloads and runs code" in caps or "compiled binaries" in caps:
-            risky += 1
-        lines.append(label + (": " + ", ".join(caps) if caps else ": no network, root or shell use found"))
-    if not lines:
-        return result(cid, cat, title, "pass", "No other third-party plugins are installed.", why, weight=0)
-    summary = "%d third-party plugin%s installed." % (len(lines), "" if len(lines) == 1 else "s")
-    if risky:
-        return result(cid, cat, title, "info", summary + " %d download%s and run%s code or ship%s binaries." % (
-            risky, "s" if risky == 1 else "", "s" if risky == 1 else "", "s" if risky == 1 else ""),
-            why, clean_block(lines), weight=0)
-    return result(cid, cat, title, "info", summary, why, clean_block(lines), weight=0)
+            caps, said = ["linked"], "linked from another folder (development install), not scanned"
+        else:
+            caps = plugin_capabilities(base + "/" + name, budget)
+            said = ", ".join(caps) if caps else "no network, root or shell use found"
+        removable = bool(REMOVABLE_PLUGIN.fullmatch(name)) and ".." not in name
+        recs.append({"id": item_id("plugin", name, ",".join(caps)), "kind": "plugin", "shown": label,
+                     "name": name if removable else "", "text": label + "\n" + said,
+                     "risky": "downloads and runs code" in caps or "compiled binaries" in caps})
+    return recs
 
 
 # --- Phase 4: secrets, known-bad packages, file changes, plugin code --------
@@ -4302,14 +4456,15 @@ def check_user_cache():
 # a program, a desktop entry, a Flatpak, Omarchy's own config set, a running
 # process, or a startup file that names it. Only what nothing claims, and
 # nothing has changed for a month, is listed. It is information, never a
-# problem: each item can be kept (Vigil stops listing it) or moved to the
-# trash, one at a time, never deleted.
+# problem: each item can be kept (it stays listed, locked, and Vigil stops
+# counting it) or moved to the trash, never deleted.
 
 LEFTOVER_DAYS = 30
 LEFTOVER_MAX = 150
 LEFTOVER_SECONDS = 4.0
-KEPT_FILE = "kept-leftovers.json"
-KEPT_MAX = 500
+KEPT_FILE = "kept.json"                 # every pick list's kept items
+KEPT_LEGACY = "kept-leftovers.json"     # 0.30's file, leftovers only: read, then folded into kept.json
+KEPT_MAX = 1000
 
 # (key, folder under home, what is listed there)
 LEFTOVER_ROOTS = (
@@ -4640,20 +4795,22 @@ def leftovers():
             size, newest, whole = _tree_stats(path, deadline + WALK_MAX_SECONDS)
             if kind in ("names", "dotdirs") and (not whole or newest >= cutoff):
                 continue                    # changed this month, or too big to be sure: still in use
-            found.append({"id": leftover_id(key, name), "parts": parts, "name": name,
+            found.append({"id": leftover_id(key, name), "kind": "leftover", "parts": parts, "name": name,
                           "shown": "~/" + "/".join(parts + (name,)), "size": size,
                           "newest": newest, "reason": reason})
     found.sort(key=lambda f: (-f["size"], f["shown"]))
     return found[:LEFTOVER_MAX]
 
 
-def kept_leftovers():
-    data = _state_json(KEPT_FILE)
-    entries = data.get("kept") if isinstance(data, dict) else None
+def kept_items():
+    """id -> entry of everything you kept, on any pick list."""
     out = {}
-    for e in (entries if isinstance(entries, list) else [])[:KEPT_MAX]:
-        if isinstance(e, dict) and isinstance(e.get("id"), str) and re.fullmatch(r"[0-9a-f]{16}", e["id"]):
-            out[e["id"]] = e
+    for name in (KEPT_LEGACY, KEPT_FILE):
+        data = _state_json(name)
+        entries = data.get("kept") if isinstance(data, dict) else None
+        for e in (entries if isinstance(entries, list) else [])[:KEPT_MAX]:
+            if isinstance(e, dict) and isinstance(e.get("id"), str) and re.fullmatch(r"[0-9a-f]{16}", e["id"]):
+                out[e["id"]] = e
     return out
 
 
@@ -4673,14 +4830,14 @@ def check_leftovers():
            "Flatpak or startup file uses and nothing has changed for a month, in ~/.config, ~/.local/share, "
            "~/.local/state, ~/.var/app, ~/.local/bin, your launchers and the folders in ~ that start with a dot.")
     howto = ("Keep what you want to hold on to (settings you would want back if you reinstall an app): it "
-             "stays where it is and Vigil stops counting it. Move to trash puts the rest in the trash, not away: restore it from the trash "
-             "in your file manager if you were wrong. Emptying the trash, here or with Clean all, deletes it "
-             "for good.")
+             "stays where it is, locked at the bottom of the list, and Vigil stops counting it. Trash puts the "
+             "rest in the trash, not away: restore it from the trash in your file manager if you were wrong. "
+             "Emptying the trash, here or with Clean all, deletes it for good.")
     learn = fix("docs", "arch-xdg", "Learn more")
     found = leftovers()
     if found is None:
         return result(cid, cat, title, "unknown", "Could not finish checking what is installed.", why, weight=0)
-    kept = kept_leftovers()
+    kept = kept_items()
     items, live, live_size = [], [], 0
     for f in found:
         text = _leftover_text(f)
@@ -4696,17 +4853,29 @@ def check_leftovers():
     else:
         out = result(cid, cat, title, "pass", ("Nothing new left behind.%s" % note) if note
                      else "Nothing left behind.", why, fix=learn, weight=0)
-    out["items"] = items
+    out["items"] = quiet_last(items)
     return out
+
+
+def listed_items(wanted):
+    """id -> record of the pick-list items listed right now, looking only as
+    far as it takes to find every wanted id."""
+    found = {}
+    for source in (orphan_records, foreign_records, plugin_records, leftovers):
+        for r in source() or []:
+            found[r["id"]] = r
+        if all(x in found for x in wanted):
+            break
+    return found
 
 
 def set_kept(lids, on):
     """`vigil keep <id>...` / `vigil unkeep <id>...`: only Vigil's own notes change.
-    Keeping takes only ids the check lists right now."""
+    Keeping takes only ids a pick list shows right now."""
     lids = [lids] if isinstance(lids, str) else list(lids)
     if not lids or not all(re.fullmatch(r"[0-9a-f]{16}", x) for x in lids):
         return {"ok": False, "action": "", "message": "Unknown item."}
-    listed = {x["id"]: x for x in leftovers() or []} if on else {}
+    listed = listed_items(lids) if on else {}
     if on:
         lids = [x for x in lids if x in listed]
         if not lids:
@@ -4717,18 +4886,23 @@ def set_kept(lids, on):
         return {"ok": False, "action": "", "message": "Could not open the Vigil state folder."}
     try:
         _lock(dirfd)
-        current = [e for e in kept_leftovers().values() if e["id"] not in lids]
+        current = [e for e in kept_items().values() if e["id"] not in lids]
         if on:
-            current += [{"id": x, "shown": clean(listed[x]["shown"], 200), "at": time.strftime("%Y-%m-%d")}
-                        for x in lids]
+            current += [{"id": x, "kind": listed[x].get("kind", "leftover"), "shown": clean(listed[x]["shown"], 200),
+                         "at": time.strftime("%Y-%m-%d")} for x in lids]
         write_atomic(dirfd, KEPT_FILE, json.dumps({"schema": SCHEMA, "kept": current[-KEPT_MAX:]},
                                                   separators=(",", ":")).encode())
+        try:
+            os.unlink(KEPT_LEGACY, dir_fd=dirfd)         # now folded into kept.json
+        except FileNotFoundError:
+            pass
     finally:
         os.close(dirfd)
     n = len(lids)
     if on:
-        msg = ("Kept. It stays where it is and Vigil stops counting it." if n == 1 else
-               "Kept %d items. They stay where they are and Vigil stops counting them." % n)
+        msg = ("Kept. It stays where it is, locked at the bottom of the list, and Vigil stops counting it."
+               if n == 1 else "Kept %d items. They stay where they are, locked at the bottom of the list, "
+               "and Vigil stops counting them." % n)
     else:
         msg = "Counting it again." if n == 1 else "Counting %d items again." % n
     return {"ok": True, "action": "", "message": msg}
@@ -4810,7 +4984,7 @@ def trash_leftovers(ids):
     must name an item the check lists right now, so nothing that an app has
     since claimed, or that you chose to keep, is ever moved."""
     found = {f["id"]: f for f in leftovers() or []}
-    kept = kept_leftovers()
+    kept = kept_items()
     moved, problems = [], []
     for lid in ids:
         f = found.get(lid)
@@ -4818,7 +4992,7 @@ def trash_leftovers(ids):
             problems.append("one item is no longer on the list")
             continue
         if lid in kept:
-            problems.append("%s is kept (press Stop keeping first)" % clean(f["shown"], 80))
+            problems.append("%s is kept (click its lock first)" % clean(f["shown"], 80))
             continue
         try:
             move_to_trash(f["parts"], f["name"])
@@ -4892,17 +5066,25 @@ def check_orphans():
     cid, cat, title = "orphans", "care", "Orphaned packages"
     why = ("Packages that were installed as dependencies of something you have since removed. They still "
            "get updates and still count as installed software.")
-    tool = "/usr/bin/pacman"
-    if not is_trusted_executable(sys_path(tool)):
+    howto = ("Remove all, or tick some and Remove selected: it asks first, lists each package and shows the exact "
+             "command (pacman -Rns, behind your password). Keep a package you want: it stays installed and on "
+             "the list, with a lock, and Vigil stops counting it.")
+    if not is_trusted_executable(sys_path("/usr/bin/pacman")):
         return result(cid, cat, title, "na", "pacman is not available.", why, weight=0)
-    rc, out = run([tool, "-Qdtq"], timeout=8, limit=CMD_MAX)
-    if rc is None:
+    recs = orphan_records()
+    if recs is None:
         return result(cid, cat, title, "unknown", "Could not list orphaned packages.", why, weight=0)
-    names = out.split()
-    if not names:
+    if not recs:
         return result(cid, cat, title, "pass", "None.", why, weight=0)
-    return result(cid, cat, title, "info", "%d orphaned package%s." % (len(names), "" if len(names) == 1 else "s"),
-                  why, clean_block(names), fix("terminal", "clean-orphans", "Review and remove"), weight=0)
+    items, live, note = pick_items(recs, kept_items(), " %d kept.")
+    if live:
+        out = result(cid, cat, title, "info", "%d orphaned package%s.%s" % (
+            len(live), "" if len(live) == 1 else "s", note), why,
+            clean_block([r["text"].replace("\n", ", ") for r in live]), weight=0, howto=howto)
+    else:
+        out = result(cid, cat, title, "pass", "Only ones you kept.%s" % note, why, weight=0)
+    out["items"] = items
+    return out
 
 
 @check
@@ -4994,10 +5176,10 @@ def undo_available(action):
 # something new turns up, the finding comes back.
 EVIDENCE_CHECKS = {"open-ports", "persistence", "file-changes", "exposed-secrets", "malicious-packages",
                    "virus-scan", "ld-preload", "bumblebee", "scanner-arch-audit", "aur-status",
-                   "omarchy-plugins", "aur-packages", "accounts", "shell-history", "old-services"}
-# Rows reviewed item by item instead (Keep on each leftover), so the row
-# itself has no Mark as reviewed.
-ITEM_REVIEWED = {"leftovers"}
+                   "accounts", "shell-history", "old-services"}
+# Rows reviewed item by item instead (Keep on each item of a pick list), so
+# the row itself has no Mark as reviewed.
+ITEM_REVIEWED = {"leftovers", "orphans", "aur-packages", "omarchy-plugins"}
 
 
 def dismissible(c):
@@ -5261,9 +5443,10 @@ CHECK_HELP = {
     "ld-preload": ("If you did not set this up, look at the file (Show file). Do not delete it blindly: get "
                    "help first, because something may be hiding in every program.",
                    ("terminal", "show-ld-preload", "Show file")),
-    "aur-packages": ("Keep only the ones you recognise and still use; remove the rest with "
-                     "omarchy pkg drop <name>.",
+    "aur-packages": ("Remove what you no longer use (tick it, then Remove selected); keep what you trust.",
                      ("docs", "arch-aur", "Learn more")),
+    "orphans": ("Remove them (Remove all, or tick some and Remove selected); keep one you want installed.",
+                ("docs", "arch-orphans", "Learn more")),
     "flatpak-apps": ("The daily check looks for Flatpak updates; Daily check under Run now also installs those for your own apps. The Arch Wiki explains Flatpak.",
                      ("docs", "arch-flatpak", "Learn more")),
     "firmware": ("The weekly check looks for firmware updates. The Arch Wiki explains fwupd and LVFS.",
@@ -5273,7 +5456,7 @@ CHECK_HELP = {
                    ("terminal", "install-clamui", "Install ClamUI")),
     "bumblebee": ("Bumblebee runs with the daily check. Perplexity explains what it checks and how its list "
                   "is kept.", ("docs", "bumblebee", "Learn more")),
-    "omarchy-plugins": ("Nothing to fix. Remove plugins you do not use with omarchy plugin remove <id>.",
+    "omarchy-plugins": ("Remove plugins you do not use (tick them, then Remove selected); keep the ones you trust.",
                         ("terminal", "show-plugins", "List plugins")),
     "accounts": ("Get help before changing accounts; a mistake can lock you out.",
                  ("docs", "arch-users", "Learn more")),
@@ -5300,7 +5483,8 @@ def tidy(c):
     add_help(c)
     c.setdefault("howto", "")
     for k in ("title", "summary", "why", "howto"):
-        c[k] = clean(c[k], 400 if k in ("why", "howto") else STR_MAX)
+        # The panel's own limits (Model.js MAX_STR), so nothing is cut short.
+        c[k] = clean(c[k], 800 if k in ("why", "howto") else 400 if k == "summary" else STR_MAX)
     c["detail"] = clean(c["detail"], 3000) if "\n" not in c["detail"] else "\n".join(
         clean(x, STR_MAX) for x in c["detail"].splitlines()[:LIST_MAX + 1])
     return c
@@ -5345,8 +5529,9 @@ def audit(peek=False):
                  "omarchy-remove-security-fido2", "omarchy-setup-security-fingerprint",
                  "omarchy-remove-security-fingerprint",
                  "omarchy-sudo-passwordless", "omarchy-remove-security-sudoless-docker", "omarchy-update",
-                 "omarchy-pkg-add", "omarchy-update-orphan-pkgs", "omarchy-toggle-idle", "omarchy-shell-config",
-                 "omarchy-plugin-list", "omarchy-plugin-disable", "omarchy-plugin-enable", "xdg-open", "pkexec"):
+                 "omarchy-pkg-add", "omarchy-toggle-idle", "omarchy-shell-config",
+                 "omarchy-plugin-list", "omarchy-plugin-disable", "omarchy-plugin-enable", "omarchy-plugin-remove",
+                 "xdg-open", "pkexec"):
         p = find_tool(name)
         tools[name] = p.rsplit("/", 1)[0] if p else ""
     running = run_in_progress()
@@ -5960,14 +6145,15 @@ def main(argv):
     if len(argv) == 3 and argv[1] == "fix" and re.fullmatch(r"[a-z][a-z0-9-]{0,31}", argv[2]):
         emit(run_fix(argv[2]))
         return 0
-    if len(argv) == 3 and argv[1] in ("ignore", "unignore") and re.fullmatch(r"[0-9a-f]{16}", argv[2]):
-        emit(set_ignored(argv[2], argv[1] == "ignore"))
+    if 3 <= len(argv) <= 2 + PICK_MAX and argv[1] in ("ignore", "unignore") \
+            and len(set(argv[2:])) == len(argv) - 2 and all(re.fullmatch(r"[0-9a-f]{16}", a) for a in argv[2:]):
+        emit(set_ignored(argv[2:], argv[1] == "ignore"))
         return 0
-    if 3 <= len(argv) <= 2 + LEFTOVER_MAX and argv[1] in ("keep", "unkeep") \
+    if 3 <= len(argv) <= 2 + PICK_MAX and argv[1] in ("keep", "unkeep") \
             and len(set(argv[2:])) == len(argv) - 2 and all(re.fullmatch(r"[0-9a-f]{16}", a) for a in argv[2:]):
         emit(set_kept(argv[2:], argv[1] == "keep"))
         return 0
-    if 3 <= len(argv) <= 2 + LEFTOVER_MAX and argv[1] == "trash" and len(set(argv[2:])) == len(argv) - 2 \
+    if 3 <= len(argv) <= 2 + PICK_MAX and argv[1] == "trash" and len(set(argv[2:])) == len(argv) - 2 \
             and all(re.fullmatch(r"[0-9a-f]{16}", a) for a in argv[2:]):
         emit(trash_leftovers(argv[2:]))
         return 0
@@ -6005,7 +6191,7 @@ def main(argv):
     if len(argv) == 2 and argv[1] == "version":
         emit({"version": VERSION})
         return 0
-    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection> | vigil keep|unkeep <leftover>... | vigil trash <leftover>... | vigil refresh-feeds [--force|--daily|--weekly|--full|--scan] [--signatures] | vigil running | vigil stop | vigil version\n")
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection>... | vigil keep|unkeep <item>... | vigil trash <leftover>... | vigil refresh-feeds [--force|--daily|--weekly|--full|--scan] [--signatures] | vigil running | vigil stop | vigil version\n")
     return 2
 
 
