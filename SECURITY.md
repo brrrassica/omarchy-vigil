@@ -11,9 +11,10 @@ Please report privately, not in a public issue or pull request:
   [Security tab](https://github.com/keasbeexd/omarchy-vigil/security/advisories/new)
   of this repository (private vulnerability reporting).
 
-Include what you found, how to reproduce it, and which version (`vigil
-version`, or the commit) you tested. A proof of concept helps; please do not
-test against anyone's machine but your own.
+Include what you found, how to reproduce it, and which version (shown at the
+end of the panel's key hints, such as "Vigil 0.30.0", or the commit) you
+tested. A proof of concept helps; please do not test against anyone's
+machine but your own.
 
 You can expect an acknowledgement within a week. Fixes for confirmed issues
 are released as soon as they are ready, with an advisory that credits you

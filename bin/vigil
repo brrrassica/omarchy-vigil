@@ -22,7 +22,7 @@ Rules this file keeps (they follow the marketplace review guidance):
   AUR and Perplexity's Bumblebee lists). Each scan gets its list right
   before it runs; ClamAV's own update service keeps the virus signatures
   current. Nothing it downloads is ever run.
-- If the plugin is removed while a scan or update runs, it stops within
+- If the plugin is removed while a run is going, it stops within
   seconds (plugin_removed), so removal leaves nothing running.
 - Every child process is an absolute path, runs in its own session with a
   minimal environment, has a hard deadline, and has its output capped at the
@@ -305,7 +305,7 @@ def _kill_group(proc):
 
 def plugin_removed():
     """True once this helper's own file is gone, which is what removing the
-    plugin does. A scan or update that is running then stops within seconds,
+    plugin does. A run that is going then stops within seconds,
     instead of running on to its deadline with no panel left to stop it."""
     return not os.path.exists(SELF)
 
@@ -317,7 +317,7 @@ def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False, env=N
     byte budget, stderr discarded. Overflow and timeout both return None.
     With `on_line`, each output line is handed to it as it arrives and only
     the lines it returns True for are kept (and counted against `limit`).
-    During a scan or update (the run lock is held), it also looks every few
+    During a run (the run lock is held), it also looks every few
     seconds whether the plugin was removed, and if so stops the program.
     """
     if not argv or not argv[0].startswith("/") or STOP["on"]:
@@ -6297,7 +6297,7 @@ def _on_stop(signum, frame):
 
 
 def stop_run():
-    """`vigil stop`: stop the scan or update that holds the run lock, whoever
+    """`vigil stop`: stop the run that holds the run lock, whoever
     started it. Only processes recorded by that run, still running as you with
     the start time recorded, are signalled."""
     if run_in_progress() is None:
@@ -6333,7 +6333,7 @@ def stop_run():
 
 
 def take_run_lock():
-    """One scan or update at a time, across panels, monitors and shell
+    """One run at a time, across panels, monitors and shell
     restarts: an exclusive flock on a directory of our own (no lock file to
     plant a link at). The kernel drops it when the last process holding it
     ends. The programs a run starts (clamscan, Bumblebee, the scanners)
@@ -6354,7 +6354,7 @@ def take_run_lock():
 
 
 def run_in_progress():
-    """What a scan or update started elsewhere is doing, or None if none runs."""
+    """What a run started elsewhere is doing, or None if none runs."""
     try:
         fd = _open_home_dir(list(STATE_DIR) + [BUSY_DIR])
     except (OSError, Refused):

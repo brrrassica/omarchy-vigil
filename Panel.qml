@@ -120,7 +120,7 @@ Panel {
 
   readonly property var visibleChecks: tab === "overview" ? [] : Model.checksFor(report, tab)
   readonly property bool busy: auditProc.running || fixProc.running || actionProc.running
-  // A scan or update this copy did not start (another monitor's, or one left
+  // A run this copy did not start (another monitor's, or one left
   // running when the shell restarted). The helper allows one at a time.
   property var otherRun: null
   readonly property bool runElsewhere: !feedProc.running && otherRun !== null
@@ -585,7 +585,7 @@ Panel {
     }
   }
 
-  // Stop: `vigil stop` stops whichever scan or update holds the lock, this
+  // Stop: `vigil stop` stops whichever run holds the lock, this
   // copy's own or one left from before a shell restart.
   property bool stopRequested: false
   function stopRun() {

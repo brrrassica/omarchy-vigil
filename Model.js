@@ -1509,7 +1509,7 @@ function parseProgress(line) {
            fraction: Math.min(1, fraction) }
 }
 
-// A scan or update started elsewhere (another monitor, or before the shell
+// A run started elsewhere (another monitor, or before the shell
 // restarted): its progress, step 0 when it has not said yet, null when none
 // runs, undefined when the value is not valid.
 function parseRunningValue(r) {
