@@ -1,6 +1,8 @@
 # Vigil - Security Suite
 
-![Vigil: A security suite right in your Omarchy Bar.](preview.png)
+<img src="docs/lighthouse.svg" width="96" alt="Vigil's lighthouse, in 16 EGA colours">
+
+![Vigil in a Turbo Pascal-style screen: the panel's Overview beside its program listing](preview.png)
 
 A security suite for [Omarchy](https://omarchy.org): one lighthouse in the bar,
 one panel, five pillars.
