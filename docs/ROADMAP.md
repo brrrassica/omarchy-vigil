@@ -150,6 +150,19 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 - [x] Key hints show the keys of the tab you are on (C for Clean all on
       Care). The Detect tab's intro no longer promises rootkit checks Vigil
       stopped running; it names what it does check.
+- [x] One naming convention. Runs are the only things called a check:
+      Quick check, Daily check, Weekly check, and the **List update** (was
+      Update check), which downloads Vigil's lists and looks at nothing on
+      your computer. Steps say what they do: a scan reads this computer
+      (Virus scan of ~, Bumblebee scan, Password scan), a lookup asks a tool
+      (System update lookup, Flatpak update lookup, Firmware lookup), and
+      lists are downloaded (Virus signatures, Arch security list, OSV malware
+      list). Rows name what is examined, with the tool in brackets: System
+      updates, Flatpak updates, Firmware updates, Infected files (ClamAV),
+      Virus signatures (ClamAV), Known vulnerabilities (arch-audit),
+      Known-malicious packages (OSV), Known-compromised packages (Bumblebee),
+      Duplicate scan schedules. Check ids stay the same, so reviews, kept
+      leftovers and false positives carry over.
 - [ ] Later: show launchers that point to a program by name rather than
       by path, once there is a reliable way to know the PATH your session
       uses.

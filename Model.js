@@ -165,7 +165,7 @@ function actionCommands(id, tools, home) {
 
 // The run cards' root steps, exactly as the helper starts them: the ClamAV
 // signatures and a Bumblebee update behind one password prompt (each only when
-// it applies), and in Run all the password check. The rest runs as you.
+// it applies), and in Run all the password scan. The rest runs as you.
 function runCommands(kind, report) {
   if (!report || toolDir(report.tools, "pkexec") === "") return []
   var signatures = report.sources.some(function(s) { return s.id === "signatures" })
@@ -175,7 +175,7 @@ function runCommands(kind, report) {
     out.push({ who: "As root, through pkexec (Omarchy asks for your password):",
                text: commandText([PKEXEC, BASH, "-c", rootUpdatesScript(signatures, bumblebee)]) })
   if (kind === "full-scan")
-    out.push({ who: "As root, through pkexec, for the password check (only account names are kept):",
+    out.push({ who: "As root, through pkexec, for the password scan (only account names are kept):",
                text: commandText([PKEXEC, BASH, "-c", NO_PASSWORD_STEP]) })
   return out
 }
@@ -395,7 +395,7 @@ var OLD_SERVICES = ["telnet.socket", "rsh.socket", "rlogin.socket", "ftpd.servic
 // Installs or updates Bumblebee, as root: the pinned BUMBLEBEE_VERSION, the
 // download capped in bytes and checked against the SHA-256 written in the
 // helper, installed only as a regular file, and never run as root. The helper runs
-// the same script in Run update check. Must equal BUMBLEBEE_SCRIPT in bin/vigil
+// the same script in Run list update. Must equal BUMBLEBEE_SCRIPT in bin/vigil
 // (a test checks).
 var BUMBLEBEE_VERSION = "0.1.2"
 var BUMBLEBEE_INSTALL = "set -o pipefail\nv=0.1.2\ncase \"$(/usr/bin/uname -m)\" in x86_64) a=amd64; want=53b080cf3ddb692b0c4e5492ef4785b4c54daf1624fcd0fcba3958116a0be8d9 ;; aarch64) a=arm64; want=cb641a1023b12cd7b1411ebef5c7d426f7ecd81770a15a85873c5334a0e6b74d ;; *) echo 'Bumblebee has no build for this computer.'; exit 0 ;; esac\nt=$(/usr/bin/mktemp -d); trap '/usr/bin/rm -rf \"$t\"' EXIT\nf=\"bumblebee_${v}_linux_${a}.tar.gz\"\n/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 180 --max-filesize 67108864 -- \"https://github.com/perplexityai/bumblebee/releases/download/v${v}/$f\" | /usr/bin/head -c 67108865 > \"$t/$f\" || { echo 'Bumblebee could not be downloaded.'; exit 1; }\nif [ \"$(/usr/bin/stat -c %s \"$t/$f\")\" -gt 67108864 ]; then echo 'The Bumblebee download was too large, so it was not installed.'; exit 1; fi\nhave=$(/usr/bin/sha256sum \"$t/$f\" | /usr/bin/cut -d' ' -f1)\nif [ \"$have\" != \"$want\" ]; then echo \"Bumblebee $v did not match the checksum Vigil has for it, so it was not installed.\"; exit 1; fi\n/usr/bin/tar --no-same-owner --no-same-permissions -xzf \"$t/$f\" -C \"$t\" bumblebee\nif [ ! -f \"$t/bumblebee\" ] || [ -L \"$t/bumblebee\" ]; then echo 'Bumblebee was not a plain program file, so it was not installed.'; exit 1; fi\nif [ -f /usr/local/bin/bumblebee ] && [ ! -L /usr/local/bin/bumblebee ] && /usr/bin/cmp -s \"$t/bumblebee\" /usr/local/bin/bumblebee; then echo \"Bumblebee $v is already installed.\"; exit 0; fi\n/usr/bin/install -D -o root -g root -m 0755 \"$t/bumblebee\" /usr/local/bin/bumblebee\necho \"Bumblebee $v is installed.\"\n"
@@ -640,7 +640,7 @@ var TERMINAL_ACTIONS = {
     title: "Update Bumblebee",
     what: ["Installs Bumblebee " + BUMBLEBEE_VERSION + " from Perplexity, the version this Vigil was reviewed with.",
            "It is installed only if it matches the checksum written into Vigil.",
-           "Update check under Run now on the Overview does this too, behind the same password prompt.",
+           "List update under Run now on the Overview does this too, behind the same password prompt.",
            "Technical: release archive over HTTPS, size-capped, SHA-256 checked, installed as root to /usr/local/bin/bumblebee"],
     run: BUMBLEBEE_INSTALL
   },
@@ -1204,7 +1204,7 @@ function sourceLine(src, now) {
 }
 
 function lastRunLine(run, now) {
-  if (!run || run.at === "") return "No update yet. It runs within a day, or press Update check under Run now."
+  if (!run || run.at === "") return "No update yet. It runs within a day, or press List update under Run now."
   var time = run.at.substring(11, 16)
   return "Last update " + relativeDay(run.at, now) + " at " + time
     + (run.ok ? ". Every source refreshed." : ". Some sources did not refresh; Vigil tries again tomorrow.")
@@ -1269,13 +1269,13 @@ function scheduleLines(report, autoUpdate, now, refreshMinutes) {
   var nextCheck = checked ? new Date(checked.getTime() + (refreshMinutes || 30) * 60000) : null
   var out = []
   // What each one runs is in the Last run list, where every row names its
-  // schedule ("daily check", "weekly check", "update check").
+  // schedule ("daily check", "weekly check", "list update").
   var d = countdown(report.nextDaily, now, nextCheck)
   if (d !== "") out.push("Next daily check: " + d)
   var f = countdown(report.nextFullScan, now, nextCheck)
   if (f !== "") out.push("Next weekly check: " + f)
   var u = countdown(report.nextUpdate, now, nextCheck)
-  if (u !== "") out.push("Next update check: " + u)
+  if (u !== "") out.push("Next list update: " + u)
   if (report.lastRun && report.lastRun.at !== "" && !report.lastRun.ok)
     out.push("The last update could not reach every source; Vigil tries again tomorrow.")
   return out
@@ -1325,7 +1325,7 @@ function heroMeta(report, tab, checking, now) {
 // The key hints at the bottom, for the tab you are on.
 function keyHints(tab, version) {
   var keys = ["\u2190 \u2192 or 1\u20136 tabs"]
-  if (tab === "overview") keys.push("R run all", "U update check")
+  if (tab === "overview") keys.push("R run all", "U list update")
   else keys.push("\u2191 \u2193 rows", "Enter details", "F fix", "D reviewed")
   if (tab === "care") keys.push("C clean all")
   return keys.join(" \u00b7 ") + (version ? " \u00b7 Vigil " + version : "")
@@ -1428,14 +1428,14 @@ function runLines(report, ids) {
   }
   var what = {
     "settings": "Quick check: every row in every tab, from your settings and files (a second or so).",
-    "downloads-scan": "ClamAV scan of ~/Downloads: what is new there since the last scan.",
-    "pending-updates": "System update check: waiting system and Omarchy updates (nothing is installed).",
-    "flatpak": "Flatpak update check, and the updates for your own Flatpak apps (no password).",
+    "downloads-scan": "Virus scan of ~/Downloads: what is new there since the last scan.",
+    "pending-updates": "System update lookup: waiting system and Omarchy updates (nothing is installed).",
+    "flatpak": "Flatpak update lookup, and the updates for your own Flatpak apps (no password).",
     "bumblebee": "Bumblebee scan: your npm, Bun and other packages against the Bumblebee list.",
-    "virus-scan": "ClamAV scan of ~: your whole home folder, Downloads included. This can take a while.",
-    "firmware": "Firmware check: firmware updates for this computer, from LVFS.",
-    "password-check": "Password check: every account has a password. Omarchy asks for your password.",
-    "signatures": "ClamAV signatures. Omarchy asks for your password, because ClamAV keeps them in a system folder.",
+    "virus-scan": "Virus scan of ~: your whole home folder, Downloads included. This can take a while.",
+    "firmware": "Firmware lookup: firmware updates for this computer, from LVFS.",
+    "password-check": "Password scan: every account has a password. Omarchy asks for your password.",
+    "signatures": "Virus signatures (ClamAV). Omarchy asks for your password, because ClamAV keeps them in a system folder.",
     "arch-audit": "Arch security list: known holes in your packages, from the Arch security team.",
     "osv": "OSV malware list: malicious npm and Bun packages, from OSV.dev.",
     "aur": "AUR package status: whether your AUR packages are still maintained.",
@@ -1453,7 +1453,7 @@ var DAILY_IDS = ["pending-updates", "flatpak", "bumblebee", "downloads-scan", "s
 var WEEKLY_IDS = ["firmware", "virus-scan"]
 var DONE_LINE = "The panel shows the progress, and you get a notification when it is done."
 
-// Run update check: the lists Vigil checks against, and the one step that asks.
+// Run list update: the lists Vigil checks against, and the one step that asks.
 function updateConfirmation(report) {
   if (!report) return null
   var lines = runLines(report, UPDATE_IDS)
@@ -1461,7 +1461,7 @@ function updateConfirmation(report) {
   else lines.unshift("Downloads the latest of everything Vigil checks against:")
   lines.push("No scan runs. " + DONE_LINE)
   lines.push("Technical: wake clamav-freshclam (pkexec), arch-audit --upgradable, osv-scanner, an AUR lookup and Perplexity threat_intel, both with curl")
-  return { title: "Run update check", lines: lines }
+  return { title: "Run list update", lines: lines }
 }
 
 // Run daily check: light work, no password.
@@ -1480,16 +1480,16 @@ function weeklyConfirmation(report) {
     .concat(lines).concat(["No password needed. You can close this panel. " + DONE_LINE]) }
 }
 
-// Run all: the update check, the daily check and the weekly check, plus the
-// password check. The scan of your home folder covers Downloads, so Downloads
+// Run all: the list update, the daily check and the weekly check, plus the
+// password scan. The scan of your home folder covers Downloads, so Downloads
 // is not scanned twice. The steps that ask for your password come first.
 function fullScanConfirmation(report) {
   if (!report) return null
   var ids = UPDATE_IDS.slice(0, 1).concat(["password-check"]).concat(UPDATE_IDS.slice(1))
     .concat(DAILY_IDS.filter(function(id) { return id !== "downloads-scan" })).concat(WEEKLY_IDS)
-  return { title: "Run all", lines: ["Runs the update check, the daily check and the weekly check, in this order:"]
+  return { title: "Run all", lines: ["Runs the list update, the daily check and the weekly check, in this order:"]
     .concat(runLines(report, ids))
-    .concat(["The ClamAV scan of ~ includes Downloads, so ~/Downloads is not scanned twice.", CARE_RUN_LINE,
+    .concat(["The virus scan of ~ includes Downloads, so ~/Downloads is not scanned twice.", CARE_RUN_LINE,
              "Omarchy asks for your password at the start, up to twice. " + DONE_LINE]) }
 }
 
@@ -1658,7 +1658,7 @@ function withSettings(report, autoUpdate) {
 }
 
 // The schedule each tab row belongs to: 1 daily check, 2 weekly check,
-// 3 update check. Every other row comes from the quick check (0), which runs
+// 3 list update. Every other row comes from the quick check (0), which runs
 // with every check, the daily one included.
 var CHECK_SCHEDULE = { "virus-scan": 1, "updates": 1, "flatpak-apps": 1, "bumblebee": 1, "firmware": 2,
                        "scanner-arch-audit": 3, "malicious-packages": 3, "aur-status": 3,
@@ -1676,8 +1676,8 @@ function separateFromCleanAll(check) {
 }
 
 // Which group a row belongs to on its tab, in the order the tab shows them:
-// settings (checked all the time), then what the daily, weekly and update
-// checks bring in; on the Care tab, what Clean all covers, then what it
+// the quick check, then what the daily check, the weekly check and the list
+// update bring in; on the Care tab, what Clean all covers, then what it
 // leaves alone.
 function rowGroup(c) {
   if (separateFromCleanAll(c)) return 100
@@ -1694,7 +1694,7 @@ function quickCheckHeading(refreshMinutes) {
   return "QUICK CHECK \u00b7 " + every
 }
 
-var GROUP_HEADINGS = { 0: "QUICK CHECK", 1: "DAILY CHECK", 2: "WEEKLY CHECK", 3: "UPDATE CHECK", 100: CARE_SEPARATE_HEADING }
+var GROUP_HEADINGS = { 0: "QUICK CHECK", 1: "DAILY CHECK", 2: "WEEKLY CHECK", 3: "LIST UPDATE", 100: CARE_SEPARATE_HEADING }
 
 // The heading above a row, or "": at the start of each group, on tabs that
 // have more than one. The Care tab names its groups for Clean all.
@@ -1721,7 +1721,7 @@ function checksFor(report, category) {
   for (var i = 0; i < report.checks.length; i++)
     if (report.checks[i].category === category) out.push(report.checks[i])
   // Grouped like the Last run list: the quick check first, then
-  // the daily check, weekly check, update check and ClamAV's own updates.
+  // the daily check, weekly check, list update and ClamAV's own updates.
   // Within a group, worst first; reviewed warnings sort after the
   // information rows, just above "pass".
   // On the Care tab, what Clean all leaves alone comes last.
@@ -1854,7 +1854,7 @@ function tabCounts(report, tab) {
 }
 
 var CARE_NOTE = "Care is separate from security: it never counts toward the score, and the checks above never clean anything. Vigil cleans only when you press a button on the Care tab."
-var CARE_TAB_NOTE = "Separate from security: not part of the score or of the daily, weekly and update checks. Nothing is cleaned until you press a button."
+var CARE_TAB_NOTE = "Separate from security: not part of the score, the daily check, the weekly check or the list update. Nothing is cleaned until you press a button."
 var CARE_RUN_LINE = "Nothing on the Care tab is cleaned: that happens only when you press a button there."
 
 function categoryLabel(category) {

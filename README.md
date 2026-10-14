@@ -59,7 +59,7 @@ what it will install, asks once more, and then asks for your password.
 | `F` | Fix the selected finding (asks first) |
 | `D` | Mark the selected finding as reviewed, or show it again |
 | `R` or `S` | Run all (asks first) |
-| `U` | Update check (asks first) |
+| `U` | List update (asks first) |
 | `C` | On the Care tab: Clean all |
 | `Esc` | Cancel a confirmation, or close |
 
@@ -89,7 +89,7 @@ other tabs it shows the score.
 
 In the pillar tabs, rows are grouped under headings that say which check
 brings them in: the **Quick check** (see below), then **Daily check**,
-**Weekly check** and **Update check**. A tab
+**Weekly check** and **List update**. A tab
 with only one group has no headings. Rows with nothing to do (passing, not
 applicable, or marked as reviewed) are dimmed. The key hints at the bottom
 show the keys of the tab you are on.
@@ -108,9 +108,9 @@ next run of each, and the Last run list names the schedule of every row.
 | What | When |
 |---|---|
 | **Daily check**: the quick check, a virus scan of what is new in Downloads, the check for waiting system, Omarchy and Flatpak updates, a Bumblebee scan of your packages | once a day, in the background, at low priority (the quick check also runs on its own, see above) |
-| **Weekly check**: the firmware check, then a virus scan of your whole home folder | once a week, in the background, at low priority |
-| **Update check**: ClamAV's virus signatures, known vulnerabilities, malicious packages, AUR status, Bumblebee's list | once a week, in the background (without the signatures, which need your password; ClamAV's own update service keeps them current anyway) |
-| Password check (accounts without a password) | only when you press **Run all**, since it needs your password |
+| **Weekly check**: the firmware lookup, then a virus scan of your whole home folder | once a week, in the background, at low priority |
+| **List update**: ClamAV's virus signatures, known vulnerabilities, malicious packages, AUR status, Bumblebee's list | once a week, in the background (without the signatures, which need your password; ClamAV's own update service keeps them current anyway) |
+| Password scan (accounts without a password) | only when you press **Run all**, since it needs your password |
 | Cleaning (Care) | only when you ask; Vigil only measures sizes by itself |
 
 Under **Run now**, the Overview has a button for each schedule, and one for
@@ -119,18 +119,18 @@ asks first, on a card that lists exactly what it runs:
 
 - **Daily check** runs the daily check now. No password. Pressed, it
   also installs updates for your own Flatpak apps.
-- **Weekly check** runs the weekly check now: the firmware check, then a
+- **Weekly check** runs the weekly check now: the firmware lookup, then a
   virus scan of your whole home folder (skipping caches, game libraries,
   `node_modules` and `.git` folders, at low priority). It can take a while;
   a notification says when it is done.
-- **Update check** (or `U`) downloads the latest of everything Vigil
+- **List update** (or `U`) downloads the latest of everything Vigil
   checks against: ClamAV's virus signatures first (Omarchy asks for your
   password, since they live in a system folder), then the lists of known
   security holes, malicious packages, AUR status and Bumblebee's list, and
   updates an older Bumblebee to the version Vigil pins (behind the same
   password prompt). No scan runs.
-- **Run all** (`R` or `S`) runs the update check, then the daily check, then
-  the weekly check, plus the password check. The two password prompts come
+- **Run all** (`R` or `S`) runs the list update, then the daily check, then
+  the weekly check, plus the password scan. The two password prompts come
   first, while you are at the screen. The virus scan of your home folder
   includes Downloads, so Run all does not scan Downloads twice.
 
@@ -161,9 +161,9 @@ cleaning happens only when you press a button on the Care tab.
 
 Below that, **Last run** lists when each scan last ran and when each
 list last updated, with the time: scans first, then updates. Each row names
-the schedule that runs it (daily check, weekly check, update check), in that
+the schedule that runs it (daily check, weekly check, list update), in that
 order. The rows in each tab are ordered the same way: the quick check first,
-then the rows of the daily, weekly and update checks. Anything that failed
+then the rows of the daily check, the weekly check and the list update. Anything that failed
 or is out of date is red.
 
 Work done outside Vigil counts too: the virus signatures row includes
@@ -212,7 +212,7 @@ settings:
 |---|---|---|
 | `refreshMinutes` | `30` | How often to check in the background (5 to 1440). |
 | `notifyOnNew` | `true` | One desktop notification when a check that was fine starts failing. It only says how many. |
-| `autoUpdate` | `true` | Run the daily, weekly and update checks by themselves (see [When Vigil runs what](#when-vigil-runs-what) and [Where the data comes from](#where-the-data-comes-from)). Off means they run only when you press a Run button. |
+| `autoUpdate` | `true` | Run the daily check, the weekly check and the list update by themselves (see [When Vigil runs what](#when-vigil-runs-what) and [Where the data comes from](#where-the-data-comes-from)). Off means they run only when you press a Run button. |
 
 ## What Vigil checks
 
@@ -256,7 +256,7 @@ lower it. A warning you mark as reviewed stops counting.
 | System-wide preload | Fails if `/etc/ld.so.preload` loads anything; rootkits use it to hide. |
 | Changes to important files | Records a fingerprint of accounts, PAM, SSH settings, `~/.ssh/authorized_keys`, system and user services, autostart entries and your startup files, and lists anything changed, added or removed since. Changes that match exactly what a package update shipped (from pacman's own records) are not reported, nor are system users that packages add. Changes to who can log in or what runs at start are warnings; changes to your own shell files are information. **Accept these changes** records the current state as the new normal. |
 | Virus scan | ClamAV scans your home folder in each weekly check, and every day what is new in Downloads, as you, with signatures ClamAV keeps current. Infected files are listed with **Open ClamUI** to quarantine them. If ClamAV is wrong about a file you know is safe (a game's DLL, say), press **False positive** next to it: Vigil records that exact file's SHA-256 and stops counting it, and reports it again if the file ever changes. **Not a false positive** counts it again. Only ClamAV's published signatures count; its guess-based "potentially unwanted" rules stay off. |
-| Scans scheduled twice | Finds other apps that repeat what Vigil already runs: a scheduled scan in ClamUI whose folders are all inside your home folder, and the older Bumblebee plugin (once Vigil runs Bumblebee itself). **Let Vigil run them** turns those off the way you would in each app: ClamUI's timer and its own Scheduled scans setting, and `omarchy plugin disable` for the plugin. Undo turns back on exactly what it turned off. A ClamUI schedule that also covers folders outside your home folder (Arch or Flatpak ClamUI: they share one timer, so ClamUI is then left alone entirely), and the Security Scan plugin (it runs AUR-Malware, which Vigil does not), are listed but left on. Nothing is offered when Vigil's background checks are off. |
+| Duplicate scan schedules | Finds other apps that repeat what Vigil already runs: a scheduled scan in ClamUI whose folders are all inside your home folder, and the older Bumblebee plugin (once Vigil runs Bumblebee itself). **Let Vigil run them** turns those off the way you would in each app: ClamUI's timer and its own Scheduled scans setting, and `omarchy plugin disable` for the plugin. Undo turns back on exactly what it turned off. A ClamUI schedule that also covers folders outside your home folder (Arch or Flatpak ClamUI: they share one timer, so ClamUI is then left alone entirely), and the Security Scan plugin (it runs AUR-Malware, which Vigil does not), are listed but left on. Nothing is offered when Vigil's background checks are off. |
 | ClamUI | Vigil hands virus scanning to [ClamUI](https://github.com/linx-systems/clamui): file and folder scans, scheduled scans, USB drive scans and quarantine. When it is installed, **Open ClamUI** starts it; otherwise Vigil installs it from the Arch repositories (`clamui`), so the Omarchy update keeps it current, and it uses the system's ClamAV. A ClamUI you installed from Flathub keeps working. |
 | ClamAV virus engine | Whether ClamAV is installed and its signatures keep themselves up to date. Vigil turns on ClamAV's own update service (`clamav-freshclam`) when it installs ClamAV or ClamUI, and offers to if it is off. |
 
@@ -264,7 +264,7 @@ lower it. A warning you mark as reviewed stops counting.
 
 | Check | What it does |
 |---|---|
-| Known-compromised packages | Runs Perplexity's [Bumblebee](https://github.com/perplexityai/bumblebee) in each daily check. It checks your packages, lockfiles, editor and browser extensions and MCP configs against the compromised releases Perplexity tracks, and reads files only. **Install** downloads Bumblebee 0.1.2, the version this Vigil was reviewed with, installs it only if it matches the SHA-256 written in Vigil's code, and puts it in `/usr/local/bin/bumblebee` (owned by root). Vigil never fetches a newer Bumblebee by itself: a newer version arrives with a Vigil update. When the installed one is older, the row offers **Update Bumblebee**, and **Update check** installs it behind its one password prompt. |
+| Known-compromised packages | Runs Perplexity's [Bumblebee](https://github.com/perplexityai/bumblebee) in each daily check. It checks your packages, lockfiles, editor and browser extensions and MCP configs against the compromised releases Perplexity tracks, and reads files only. **Install** downloads Bumblebee 0.1.2, the version this Vigil was reviewed with, installs it only if it matches the SHA-256 written in Vigil's code, and puts it in `/usr/local/bin/bumblebee` (owned by root). Vigil never fetches a newer Bumblebee by itself: a newer version arrives with a Vigil update. When the installed one is older, the row offers **Update Bumblebee**, and **List update** installs it behind its one password prompt. |
 | Known-malicious npm and Bun packages | Runs [osv-scanner](https://github.com/google/osv-scanner) over your AUR build folders (`~/.cache/yay`, `~/.cache/paru`) and global npm, Bun, mise and pnpm installs, against [OSV.dev](https://osv.dev), which includes the [OpenSSF Malicious Packages](https://github.com/ossf/malicious-packages) reports. This is how the 2026 Atomic Arch AUR attack (which pulled malware in with `bun install`) and the npm worms that run on Bun are caught. Only confirmed malware (`MAL-` entries) counts; ordinary vulnerabilities in development dependencies are left out. |
 | Known vulnerabilities | Installs arch-audit, which uses the Arch security team's tracker, and lists only the problems an update fixes. |
 | AUR package status | Asks the AUR about your AUR packages: which have left the AUR, which are now in the official repositories, and which have no maintainer (most 2026 AUR attacks took over such orphans). Information only, since packages leave the AUR for ordinary reasons too. |
@@ -285,8 +285,8 @@ lower it. A warning you mark as reviewed stops counting.
 ### Care
 
 Care is upkeep, not security, so it is kept apart from everything else:
-its rows never count toward the score or notify you, and no daily, weekly or
-update check cleans anything. Vigil only measures (with the quick check);
+its rows never count toward the score or notify you, and no daily check,
+weekly check or list update cleans anything. Vigil only measures (with the quick check);
 it cleans when you press a button here. The tab shows its rows in two
 groups:
 
@@ -434,8 +434,8 @@ Vigil runs no service, timer or daemon of its own. While you are logged in:
   leftover app data has four), so even a huge home folder cannot make it
   slow. Other monitors check only when you open their
   panel.
-- **The background checks** (the daily check, and the weekly and update
-  checks once a week each) at low priority; the virus scans themselves run
+- **The background runs** (the daily check, and the weekly check and list
+  update once a week each) at low priority; the virus scans themselves run
   at the lowest (`nice -n 19`). A background run starts at most once every
   six hours, whatever happens to it, so a run that keeps failing can never
   restart in a loop.
@@ -456,10 +456,10 @@ Vigil keeps no threat lists of its own.
 | What | Maintained by | How it stays current |
 |---|---|---|
 | Virus signatures | ClamAV (Cisco Talos) | ClamAV's own `clamav-freshclam` service, several times a day |
-| Known vulnerabilities in Arch packages | Arch Linux security team | arch-audit, once a week (and **Update check**) |
-| Known-malicious npm, Bun and other packages | OSV.dev and the OpenSSF Malicious Packages project | osv-scanner, once a week (and **Update check**) |
-| AUR package status | the AUR | AUR lookup, once a week (and **Update check**) |
-| Known-compromised packages, extensions and MCP configs | Perplexity (Bumblebee's `threat_intel` catalogs) | downloaded from Perplexity's repository once a week (and **Update check**); Bumblebee scans in each daily check |
+| Known vulnerabilities in Arch packages | Arch Linux security team | arch-audit, once a week (and **List update**) |
+| Known-malicious npm, Bun and other packages | OSV.dev and the OpenSSF Malicious Packages project | osv-scanner, once a week (and **List update**) |
+| AUR package status | the AUR | AUR lookup, once a week (and **List update**) |
+| Known-compromised packages, extensions and MCP configs | Perplexity (Bumblebee's `threat_intel` catalogs) | downloaded from Perplexity's repository once a week (and **List update**); Bumblebee scans in each daily check |
 | Waiting system and Omarchy updates | Arch Linux and Omarchy package repositories | `checkupdates`, once a day (and **Daily check**) |
 | Waiting Flatpak updates | Flathub, or whichever Flatpak remotes you added | `flatpak remote-ls --updates`, once a day (and **Daily check**) |
 | Firmware updates | LVFS (hardware makers publish there) | fwupd, once a week (and **Weekly check**) |
@@ -483,7 +483,7 @@ hand:
   have updates.
 - **Weekly**: `fwupdmgr refresh` downloads firmware information from LVFS
   (fwupd.org).
-- **Update check, weekly**: `arch-audit` downloads the Arch security tracker
+- **List update, weekly**: `arch-audit` downloads the Arch security tracker
   from security.archlinux.org; `osv-scanner` sends the names and versions of
   the packages in your AUR build folders and global npm and Bun installs to
   OSV.dev (run by Google), never file contents; Vigil asks
@@ -503,14 +503,14 @@ servers), Flatpak and firmware updates, and `omarchy-update`.
 |---|---|---|
 | `~/.local/state/omarchy-vigil/state.json` | the helper, mode 0600 | every check: which findings you have already seen, which you marked as reviewed, and one score per day for 30 days |
 | `~/.local/state/omarchy-vigil/baseline.json` | the helper, mode 0600 | first check, and when you accept file changes: fingerprints (not contents) of the watched files |
-| `~/.local/state/omarchy-vigil/arch-audit.json` | the helper, mode 0600 | in each update check: package names and severities an update fixes |
-| `~/.local/state/omarchy-vigil/osv.json` | the helper, mode 0600 | in each update check: known-malicious packages found, if any, and which folders were checked |
-| `~/.local/state/omarchy-vigil/aur.json` | the helper, mode 0600 | in each update check: names of AUR packages that left the AUR or have no maintainer |
+| `~/.local/state/omarchy-vigil/arch-audit.json` | the helper, mode 0600 | in each list update: package names and severities an update fixes |
+| `~/.local/state/omarchy-vigil/osv.json` | the helper, mode 0600 | in each list update: known-malicious packages found, if any, and which folders were checked |
+| `~/.local/state/omarchy-vigil/aur.json` | the helper, mode 0600 | in each list update: names of AUR packages that left the AUR or have no maintainer |
 | `~/.local/state/omarchy-vigil/virus-scan.json` | the helper, mode 0600 | in each weekly check and on Scan now: names of infected files found in your home folder, if any, and how many files were scanned |
 | `~/.local/state/omarchy-vigil/no-password.txt` | the helper, mode 0600 | each Run all: names of accounts with an empty password, usually none |
 | `~/.local/state/omarchy-vigil/full-scan.json` | the helper, mode 0600 | after each weekly check, automatic or not: its date and time, for the countdown |
-| `~/.local/state/omarchy-vigil/bumblebee-catalog.json` | the helper, mode 0600 | in each update check: Perplexity's list of compromised packages, for Bumblebee |
-| `~/.local/state/omarchy-vigil/bumblebee-list.json` | the helper, mode 0600 | in each update check: when Bumblebee's list was last downloaded |
+| `~/.local/state/omarchy-vigil/bumblebee-catalog.json` | the helper, mode 0600 | in each list update: Perplexity's list of compromised packages, for Bumblebee |
+| `~/.local/state/omarchy-vigil/bumblebee-list.json` | the helper, mode 0600 | in each list update: when Bumblebee's list was last downloaded |
 | `~/.local/state/omarchy-vigil/signatures.json` | the helper, mode 0600 | when Vigil updates ClamAV's signatures: the date and time |
 | `~/.local/state/omarchy-vigil/bumblebee.json` | the helper, mode 0600 | each daily check: the compromised packages Bumblebee found, if any |
 | `~/.local/state/omarchy-vigil/progress.json` | the helper, mode 0600 | during a scan or update: its current step, so a panel that did not start it can show it |
@@ -528,8 +528,8 @@ servers), Flatpak and firmware updates, and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/kept-leftovers.json` | the helper, mode 0600 | when you press Keep on a leftover: its id and where it is |
 | `~/.local/share/Trash/files/`, `~/.local/share/Trash/info/` | the helper | only when you move a leftover to the trash: the item itself, and a `.trashinfo` file with where it came from, as every file manager writes |
 | `~/.local/state/omarchy-vigil/busy/` | the helper, mode 0700, empty | once: the folder Vigil locks so only one scan or update runs at a time |
-| `~/.local/state/omarchy-vigil/last-run.json` | the helper, mode 0600 | after each daily or update check: its date, time and whether every source updated |
-| `/usr/local/bin/bumblebee` | the Install, Update Bumblebee, Update check or Run all button, as root | only when you install Bumblebee, or update an older one: Perplexity's program, version 0.1.2, checked against the SHA-256 in Vigil's code |
+| `~/.local/state/omarchy-vigil/last-run.json` | the helper, mode 0600 | after each daily check or list update: its date, time and whether every source updated |
+| `/usr/local/bin/bumblebee` | the Install, Update Bumblebee, List update or Run all button, as root | only when you install Bumblebee, or update an older one: Perplexity's program, version 0.1.2, checked against the SHA-256 in Vigil's code |
 | `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` | the helper | only when you set the opt-out variables |
 | `/etc/sysctl.d/90-omarchy-vigil.conf` | a script action, as root | only when you apply the kernel settings |
 | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf` | a script action, as root | only when you turn LLMNR off |

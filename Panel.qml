@@ -169,12 +169,12 @@ Panel {
 
   // Runs `bin/vigil refresh-feeds` in the background. With no mode (the
   // background run) the helper runs only what is due and retries failures the
-  // next day. The buttons: "sources" (Run update check), "daily" (Run daily
+  // next day. The buttons: "sources" (Run list update), "daily" (Run daily
   // check), "weekly" (Run weekly check), "full" (Run all); "scan" is the
   // virus scan of the home folder alone (its row's Scan now button).
   readonly property var feedFlags: ({ sources: "--sources", daily: "--daily", weekly: "--weekly", full: "--full",
                                       scan: "--scan" })
-  readonly property var feedTitles: ({ sources: "Run update check", daily: "Run daily check",
+  readonly property var feedTitles: ({ sources: "Run list update", daily: "Run daily check",
                                        weekly: "Run weekly check", full: "Run all", scan: "Virus scan" })
   function refreshFeeds(mode) {
     if (feedProc.running || runElsewhere) return
@@ -188,10 +188,10 @@ Panel {
     feedProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, "refresh-feeds"]
       .concat(feedForced ? [feedFlags[mode]] : [])
     feedProc.running = true
-    // The update check takes minutes; anything that scans files can take hours.
+    // The list update takes minutes; anything that scans files can take hours.
     feedDeadline.interval = mode === "sources" ? 3600000 : 4 * 3600000
     feedDeadline.restart()
-    if (mode === "sources") setStatus("Update check started. Omarchy may ask for your password first.", false)
+    if (mode === "sources") setStatus("List update started. Omarchy may ask for your password first.", false)
     else if (mode === "full") setStatus("Run all started. Omarchy may ask for your password first; after that you can close this panel.", false)
     else if (mode === "daily") setStatus("Daily check started.", false)
     else if (mode === "weekly") setStatus("Weekly check started. You can close this panel; you get a notification when it is done.", false)
@@ -1165,22 +1165,22 @@ Panel {
               RunCell {
                 id: runDaily; kind: "daily-check"; mode: "daily"; label: "Daily check"
                 caption: runStrip.captions.daily; width: naturalWidth + runStrip.spare
-                tip: "Now: ClamAV scan of ~/Downloads, System update check, Flatpak update check, Bumblebee scan, quick check"
+                tip: "Now: Virus scan of ~/Downloads, System update lookup, Flatpak update lookup, Bumblebee scan, quick check"
               }
               RunCell {
                 id: runWeekly; kind: "weekly-check"; mode: "weekly"; label: "Weekly check"
                 caption: runStrip.captions.weekly; width: naturalWidth + runStrip.spare
-                tip: "Now: Firmware check and ClamAV scan of ~ (your whole home folder)"
+                tip: "Now: Firmware lookup and Virus scan of ~ (your whole home folder)"
               }
               RunCell {
-                id: runUpdate; kind: "update-sources"; mode: "sources"; label: "Update check"
+                id: runUpdate; kind: "update-sources"; mode: "sources"; label: "List update"
                 caption: runStrip.captions.update; width: naturalWidth + runStrip.spare
-                tip: "Now: ClamAV signatures and every list Vigil checks against. No scan"
+                tip: "Now: virus signatures and every list Vigil checks against. No scan"
               }
               RunCell {
                 id: runAll; kind: "full-scan"; mode: "full"; label: "Run all"; primary: true
                 caption: runStrip.captions.all; width: naturalWidth + runStrip.spare
-                tip: "Now: the update, daily and weekly checks, plus the password check"
+                tip: "Now: the list update, the daily check and the weekly check, plus the password scan"
               }
             }
             // While an update or scan runs: what it is doing, and how far along.

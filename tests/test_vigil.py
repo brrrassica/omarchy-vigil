@@ -1254,7 +1254,7 @@ def test_aur_refresh_failure_is_retried(v):
 
 
 # --------------------------------------------------------------------------
-# Virus scan, Run update check, Run all and their schedules
+# Virus scan, Run list update, Run all and their schedules
 
 def scan_argv(v):
     return tuple(v._clamscan_argv(v.HOME))
@@ -1472,12 +1472,12 @@ def test_last_run_list_scans_then_updates_with_times(v):
     assert [s["id"] for s in v.source_status()] == ["password-check"]       # always offered
     v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan", v.ROOT + "/usr/bin/arch-audit"}
     got = [(s["id"], s["label"], s["state"]) for s in v.source_status()]
-    # In schedule order: daily check, weekly check, update check.
-    assert got == [("downloads-scan", "ClamAV scan of ~/Downloads (daily check)", "never"),
-                   ("virus-scan", "ClamAV scan of ~ (weekly check)", "never"),
-                   ("password-check", "Password check (Run all only)", "never"),
-                   ("signatures", "ClamAV signatures (update check)", "never"),
-                   ("arch-audit", "Arch security list (update check)", "never")]
+    # In schedule order: daily check, weekly check, list update.
+    assert got == [("downloads-scan", "Virus scan of ~/Downloads (daily check)", "never"),
+                   ("virus-scan", "Virus scan of ~ (weekly check)", "never"),
+                   ("password-check", "Password scan (Run all only)", "never"),
+                   ("signatures", "Virus signatures (list update)", "never"),
+                   ("arch-audit", "Arch security list (list update)", "never")]
     assert all(len(s["label"]) <= 40 for s in v.source_status())          # the panel's limit
     v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
     v.run_fix("arch-audit-refresh")
@@ -1628,7 +1628,7 @@ def test_password_check_uses_omarchys_password_dialog(v):
     assert c["status"] == "fail" and "No password: ghost" in c["detail"]
     v.COMMANDS[tuple(v.NO_PASSWORD_ARGV)] = (126, "")                     # dialog cancelled
     res = v.refresh_due_feeds(full=True)
-    assert "The password check was skipped" in res["message"] and "tries again" not in res["message"]
+    assert "The password scan was skipped" in res["message"] and "tries again" not in res["message"]
     assert v.no_password_scan()[1] == ["ghost"]                           # last result kept
 
 
@@ -1641,7 +1641,7 @@ def test_weekly_run_never_asks_for_a_password(v):
 
 def test_full_scan_says_when_the_password_check_cannot_run(v):
     res = v.refresh_due_feeds(full=True)                                  # no pkexec here
-    assert res["message"].endswith("The password check could not run: pkexec is missing.")
+    assert res["message"].endswith("The password scan could not run: pkexec is missing.")
 
 
 def test_remove_secret_lines(v):
@@ -1839,8 +1839,8 @@ def test_full_scan_runs_bumblebee_before_the_long_virus_scan(v, capsys, monkeypa
     clamscan_ok(v)
     v.refresh_due_feeds(full=True)
     steps = [json.loads(l)["progress"]["doing"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
-    assert steps.index("Bumblebee scan") < steps.index("ClamAV scan of ~")
-    assert steps[-1] == "ClamAV scan of ~"
+    assert steps.index("Bumblebee scan") < steps.index("Virus scan of ~")
+    assert steps[-1] == "Virus scan of ~"
 
 
 # --------------------------------------------------------------------------
@@ -1882,12 +1882,12 @@ def test_a_run_started_elsewhere_shows_in_the_report(v):
     try:
         assert v.run_in_progress() == {"step": 0, "of": 0, "doing": "", "done": 0, "total": 0}
         put(Path(v.HOME, ".local/state/omarchy-vigil/progress.json"), json.dumps({"progress": {
-            "step": 2, "of": 3, "doing": "ClamAV scan of ~", "done": 5, "total": 10}}))
-        assert v.run_in_progress()["doing"] == "ClamAV scan of ~"
+            "step": 2, "of": 3, "doing": "Virus scan of ~", "done": 5, "total": 10}}))
+        assert v.run_in_progress()["doing"] == "Virus scan of ~"
         report = v.audit(peek=True)
         assert report["running"]["step"] == 2 and report["feedsDue"] is False
         for bad in ({"doing": "rm -rf ~"}, {"step": 4}, {"step": True}, {"done": -1}, {"of": 99, "step": 50}):
-            body = dict({"step": 2, "of": 3, "doing": "ClamAV scan of ~", "done": 5, "total": 10}, **bad)
+            body = dict({"step": 2, "of": 3, "doing": "Virus scan of ~", "done": 5, "total": 10}, **bad)
             put(Path(v.HOME, ".local/state/omarchy-vigil/progress.json"), json.dumps({"progress": body}))
             assert v.run_in_progress()["step"] == 0, bad
     finally:
@@ -2123,7 +2123,7 @@ def test_stop_ends_a_program_left_behind_by_a_killed_run(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# Scans scheduled twice
+# Duplicate scan schedules
 
 def other_schedules(v):
     return next(c for c in v.audit(peek=True)["checks"] if c["id"] == "other-schedules")
@@ -2400,7 +2400,7 @@ def test_full_scan_checks_firmware_before_the_virus_scan(v, capsys, monkeypatch)
     clamscan_ok(v)
     v.refresh_due_feeds(full=True)
     steps = [json.loads(l)["progress"]["doing"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
-    assert steps.index("Firmware check") < steps.index("ClamAV scan of ~")
+    assert steps.index("Firmware lookup") < steps.index("Virus scan of ~")
     v.PROGRESS["on"] = False
 
 
@@ -2408,12 +2408,12 @@ def test_daily_check_checks_for_waiting_updates(v, capsys):
     updates_tools(v)
     v.COMMANDS[("/usr/bin/checkupdates", "--nocolor")] = (2, "")
     v.PROGRESS["on"] = True
-    v.refresh_due_feeds(sources_only=True)                                 # the update check: lists only
+    v.refresh_due_feeds(sources_only=True)                                 # the list update: lists only
     steps = [json.loads(l)["progress"]["doing"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
-    assert "System update check" not in steps
+    assert "System update lookup" not in steps
     v.refresh_due_feeds(daily_only=True)
     steps = [json.loads(l)["progress"]["doing"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
-    assert "System update check" in steps
+    assert "System update lookup" in steps
     v.PROGRESS["on"] = False
     assert any(s["id"] == "pending-updates" and s["state"] == "ok" for s in v.source_status())
 
@@ -2465,7 +2465,7 @@ def test_progress_shares_give_the_virus_scan_most_of_the_bar(v, capsys, monkeypa
     v.COMMANDS[("/usr/bin/checkupdates", "--nocolor")] = (2, "")
     v.refresh_due_feeds(full=True)
     lines = [json.loads(l)["progress"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
-    scan = [p for p in lines if p["doing"] == "ClamAV scan of ~"][-1]
+    scan = [p for p in lines if p["doing"] == "Virus scan of ~"][-1]
     assert scan["span"] >= 0.8 and abs(scan["at"] + scan["span"] - 1) < 0.001
     firsts = {}
     for p in lines:
@@ -2804,7 +2804,7 @@ def test_each_button_runs_its_own_schedule(v, monkeypatch):
     v.refresh_due_feeds(weekly_only=True)
     assert ran == ["firmware", "virus-scan"]
     ran.clear()
-    # Run all: the update check, the daily check, the weekly check; the home
+    # Run all: the list update, the daily check, the weekly check; the home
     # folder scan covers Downloads, so Downloads is not scanned twice.
     v.refresh_due_feeds(full=True)
     assert ran == update + ["pending-updates", "flatpak", "bumblebee", "firmware", "virus-scan"]

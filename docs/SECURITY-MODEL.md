@@ -11,7 +11,7 @@ These hold for every pillar, now and in later phases:
 
 1. **No root from the plugin.** Root steps are constant scripts from
    `Model.js`, or the helper's two constant pkexec commands (the ClamAV
-   signatures and Bumblebee update, and the password check). Each is shown
+   signatures and Bumblebee update, and the password scan). Each is shown
    in full on a confirmation in the panel, then run through `pkexec`, so
    Omarchy's own polkit dialog asks for your password each time. Tools that
    ask questions as they go run in a visible terminal: Omarchy's own
@@ -29,11 +29,11 @@ These hold for every pillar, now and in later phases:
 3. **Virus scans run as you.** ClamAV scans (Vigil's scans and ClamUI)
    never run as root: malware scanners have had parser bugs, and running
    them unprivileged limits what a malicious file can do. What needs root
-   runs only from a button you press: the password check (accounts without
+   runs only from a button you press: the password scan (accounts without
    a password) only in Run all, keeping only account names; Show listeners
    (`ss -tulpn`, read-only) on its own button; and the ClamAV signature
    update (freshclam, which downloads signatures and scans nothing) in Run
-   update check and Run all.
+   list update and Run all.
 4. **Hand off, don't absorb.** ClamUI keeps quarantine, Black Ops keeps
    telemetry blocking. Vigil reads their results and opens them; it does not
    run their code or write their files, with one exception you confirm:
@@ -58,7 +58,7 @@ These hold for every pillar, now and in later phases:
    when you press a run button. Nothing the background checks fetch is ever
    run; results are size-capped and validated like any other input. The one
    program Vigil downloads, Bumblebee, is installed only from a button you
-   press (Install, Update Bumblebee, or the Update check and Run all buttons when
+   press (Install, Update Bumblebee, or the List update and Run all buttons when
    the installed one is older), never by a background check, at the
    version pinned in Vigil's code, after its checksum matches.
 6. **Nothing automatic.** Every change to your system is confirmed. Marking
@@ -156,10 +156,10 @@ program it is running, process group and all, and starts no further step.
   the script exactly as it is passed, unabridged; for a terminal action, the
   command the terminal runs. The run cards show the helper's root steps the
   same way: the ClamAV signatures and Bumblebee update (each only when it
-  applies) and, in Run all, the password check. `Model.js` keeps copies of
+  applies) and, in Run all, the password scan. `Model.js` keeps copies of
   those two helper scripts, and a test checks they are identical to what the
   helper starts; another checks every card against the plan that runs.
-- The Update check button (and Run all) updates ClamAV's signatures only when you press it (the
+- The List update button (and Run all) updates ClamAV's signatures only when you press it (the
   background run never asks), with one constant root script through pkexec: if
   ClamAV's update service runs, it is woken with `systemctl kill
   --signal=SIGUSR1` (it then checks at once; a second freshclam would fail
@@ -175,7 +175,7 @@ program it is running, process group and all, and starts no further step.
   current. Bumblebee is installed and updated by
   one constant root script (`BUMBLEBEE_SCRIPT` in `bin/vigil`, identical
   to `BUMBLEBEE_INSTALL` in `Model.js`; a test checks), used by Install,
-  Update Bumblebee, Update check and Run all. It takes no data from the report:
+  Update Bumblebee, List update and Run all. It takes no data from the report:
   it installs exactly `BUMBLEBEE_VERSION` (0.1.2), and the SHA-256 of
   each release archive (amd64 and arm64) is written in `bin/vigil`, so the
   reviewed commit decides which bytes run. Nothing is taken from the
@@ -190,7 +190,7 @@ program it is running, process group and all, and starts no further step.
   installed program is never run as root: a byte comparison decides
   whether anything changed. Whether an update is due is checked as you
   (`bumblebee version`, compared with the pinned version), and only then
-  does the update check add the Bumblebee step to its one password prompt.
+  does the list update add the Bumblebee step to its one password prompt.
   A newer Bumblebee arrives only with a Vigil update, which goes through
   the marketplace review again.
 - Terminal actions are constant strings in `Model.js`. The report only names
@@ -214,7 +214,7 @@ program it is running, process group and all, and starts no further step.
   a two-element argv, no shell. The URL is a constant from the `DOCS` table
   in `Model.js`, chosen by id; any other id is dropped when the report is
   validated.
-- The password check runs `pkexec /usr/bin/awk -F: '$2 == "" { print $1 }'
+- The password scan runs `pkexec /usr/bin/awk -F: '$2 == "" { print $1 }'
   /etc/shadow` from the helper, a constant argv (`NO_PASSWORD_ARGV`), only
   when you press Run all, never in the background run. pkexec asks for your
   password through Omarchy's polkit agent, the same dialog Omarchy's own
@@ -358,7 +358,7 @@ say where they connect before they run.
   a root-owned file in `/usr/bin` or `/usr/share/omarchy/bin` (a test
   checks the lookup) and reads `/sys/bus/usb/devices` only. It runs only
   when sudo has neither a fingerprint nor a security key set up.
-- The "Scans scheduled twice" check reads, without following links: the
+- The "Duplicate scan schedules" check reads, without following links: the
   `timers.target.wants` entries for `clamui-scheduled-scan.timer` and
   `qs-security-scan.timer` (lstat only), ClamUI's `settings.json` (1 MiB
   cap; only the schedule fields, and folders count as inside your home only

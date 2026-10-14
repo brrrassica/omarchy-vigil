@@ -442,15 +442,15 @@ test("run cards: each lists its own schedule; Run all scans ~ but not ~/Download
   const all = M.confirmation("full-scan", "all", r)
   assert.equal(all.title, "Run all")
   const steps = all.lines.filter(l => /^\d+\. /.test(l)).map(l => l.replace(/^\d+\. /, "").split(/[:.]/)[0])
-  assert.deepEqual(steps, ["ClamAV signatures", "Password check", "Arch security list", "System update check",
-                           "Quick check", "Firmware check", "ClamAV scan of ~"])
+  assert.deepEqual(steps, ["Virus signatures (ClamAV)", "Password scan", "Arch security list", "System update lookup",
+                           "Quick check", "Firmware lookup", "Virus scan of ~"])
   assert.ok(all.lines.some(l => l.includes("notification")))
   const daily = M.confirmation("daily-check", "all", r)
   assert.equal(daily.title, "Run daily check")
-  assert.ok(daily.lines.some(l => l.startsWith("2. ClamAV scan of ~/Downloads")))
+  assert.ok(daily.lines.some(l => l.startsWith("2. Virus scan of ~/Downloads")))
   assert.ok(!daily.lines.some(l => /password\./.test(l) && !/No password/.test(l)))
   const weekly = M.confirmation("weekly-check", "all", r)
-  assert.deepEqual(weekly.lines.slice(1, 3).map(l => l.split(":")[0]), ["1. Firmware check", "2. ClamAV scan of ~"])
+  assert.deepEqual(weekly.lines.slice(1, 3).map(l => l.split(":")[0]), ["1. Firmware lookup", "2. Virus scan of ~"])
   for (const k of ["full-scan", "daily-check", "weekly-check", "update-sources"])
     assert.equal(M.confirmation(k, "all", null), null)
 })
@@ -472,7 +472,7 @@ test("schedule lines: countdowns with the time, in local time", () => {
   assert.deepEqual(M.scheduleLines(r, true, now, 30), [
     "Next daily check: tomorrow at 07:40",
     "Next weekly check: today at 21:15",
-    "Next update check: in 7 days"])
+    "Next list update: in 7 days"])
   // Already due: it runs at the next background check, 30 minutes after the last one.
   assert.equal(M.scheduleLines(Object.assign({}, r, { nextDaily: "now" }), true, now, 30)[0],
     "Next daily check: today at 10:28")
@@ -490,9 +490,9 @@ test("schedule lines: countdowns with the time, in local time", () => {
   assert.equal(parse(report({ nextDaily: "<b>" })), null)
 })
 test("progress lines are validated and worded", () => {
-  const p = M.parseProgress(JSON.stringify({ progress: { step: 3, of: 4, doing: "ClamAV scan of ~", done: 500, total: 1000 } }))
+  const p = M.parseProgress(JSON.stringify({ progress: { step: 3, of: 4, doing: "Virus scan of ~", done: 500, total: 1000 } }))
   assert.equal(p.fraction, (2 + 0.5) / 4)
-  assert.match(M.progressText(p), /^Step 3 of 4: ClamAV scan of ~ \(500 of 1,?000 files\)$/)
+  assert.match(M.progressText(p), /^Step 3 of 4: Virus scan of ~ \(500 of 1,?000 files\)$/)
   for (const bad of ['{"ok":true}', "nope", JSON.stringify({ progress: { step: 5, of: 4, doing: "x", done: 0, total: 0 } }),
                      JSON.stringify({ progress: { step: 1, of: 1, doing: 7, done: 0, total: 0 } })])
     assert.equal(M.parseProgress(bad), null, bad)
@@ -502,11 +502,11 @@ test("last run: scans first, then updates, with times", () => {
   const r = parse(report({ generatedAt: "2026-10-12T10:02:00+0000", sources: [
     { id: "signatures", label: "ClamAV virus signatures", date: "2026-10-12", time: "08:00", state: "ok", tried: "" },
     { id: "virus-scan", label: "Virus scan (home folder)", date: "2026-10-11", time: "22:10", state: "ok", tried: "" },
-    { id: "password-check", label: "Password check (Full scan button only)", date: "", time: "", state: "never", tried: "" }] }))
+    { id: "password-check", label: "Password scan (Full scan button only)", date: "", time: "", state: "never", tried: "" }] }))
   const rows = M.lastRunRows(r, new Date(2026, 9, 12, 10, 5))
   assert.deepEqual(rows.map(x => [x.label, x.value]), [
     ["Scans", ""], ["Quick check (every row)", "ran today at 10:02"],
-    ["Virus scan (home folder)", "ran yesterday at 22:10"], ["Password check (Full scan button only)", "not run yet"],
+    ["Virus scan (home folder)", "ran yesterday at 22:10"], ["Password scan (Full scan button only)", "not run yet"],
     ["Updates", ""], ["ClamAV virus signatures", "updated today at 08:00"]])
 })
 
@@ -540,13 +540,13 @@ test("actions run without a terminal unless the tool asks questions", () => {
   assert.ok(card.lines[card.lines.length - 1].startsWith("Omarchy asks for your password"))
 })
 
-test("update check card: lists what updates and where the password comes in", () => {
+test("list update card: lists what updates and where the password comes in", () => {
   const r = parse(report({ sources: [
     { id: "signatures", label: "ClamAV virus signatures", date: "", time: "", state: "never", tried: "" },
     { id: "arch-audit", label: "Arch vulnerability database", date: "", time: "", state: "never", tried: "" }] }))
   const card = M.confirmation("update-sources", "all", r)
-  assert.equal(card.title, "Run update check")
-  assert.match(card.lines[1], /^1\. ClamAV signatures\. Omarchy asks for your password/)
+  assert.equal(card.title, "Run list update")
+  assert.match(card.lines[1], /^1\. Virus signatures \(ClamAV\)\. Omarchy asks for your password/)
   assert.match(card.lines[2], /^2\. Arch security list: known holes/)
   assert.ok(card.lines[card.lines.length - 1].startsWith("Technical: "))
   const none = M.confirmation("update-sources", "all", parse(report()))
@@ -660,7 +660,7 @@ test("an action in the panel shows how far it got; the words come from Vigil, no
 
 test("a scan started elsewhere is followed, and anything odd is refused", () => {
   assert.equal(parse(report()).running, null)
-  const r = parse(report({ running: { step: 2, of: 3, doing: "ClamAV scan of ~", done: 5, total: 10 } }))
+  const r = parse(report({ running: { step: 2, of: 3, doing: "Virus scan of ~", done: 5, total: 10 } }))
   assert.equal(r.running.step, 2)
   assert.equal(M.progressText(parse(report({ running: { step: 0, of: 0, doing: "", done: 0, total: 0 } })).running), "Working…")
   for (const bad of ["yes", [1], { step: 5, of: 3, doing: "x", done: 0, total: 0 }])
@@ -861,7 +861,7 @@ test("each tab's caption shows its most urgent count; Overview sums the security
 test("the Overview, the Care tab and the run cards say Care is never part of a run", () => {
   assert.match(M.CARE_NOTE, /never counts toward the score/)
   assert.match(M.CARE_NOTE, /only when you press a button on the Care tab/)
-  assert.match(M.CARE_TAB_NOTE, /not part of the score or of the daily, weekly and update checks/)
+  assert.match(M.CARE_TAB_NOTE, /not part of the score, the daily check, the weekly check or the list update/)
   const r = parse(report())
   for (const kind of ["daily-check", "full-scan"])
     assert.ok(M.confirmation(kind, "all", r, "/home/a").lines.includes(M.CARE_RUN_LINE), kind)
@@ -949,7 +949,7 @@ test("a rejected report says which part failed", () => {
 })
 
 test("the progress bar gives the long virus scan most of its length", () => {
-  const p = M.parseProgress(JSON.stringify({ progress: { step: 9, of: 9, doing: "ClamAV scan of ~",
+  const p = M.parseProgress(JSON.stringify({ progress: { step: 9, of: 9, doing: "Virus scan of ~",
     done: 5082, total: 172762, at: 0.2, span: 0.8 } }))
   assert.ok(p.fraction > 0.2 && p.fraction < 0.25, String(p.fraction))          // 3% of the scan, not 89% of the bar
   const old = M.parseProgress(JSON.stringify({ progress: { step: 9, of: 9, doing: "x", done: 0, total: 0 } }))
@@ -1005,23 +1005,23 @@ test("every Last run row names a schedule line, and the helper lists them in sch
   const helper = readFileSync(path.join(here, "..", "bin", "vigil"), "utf8")
   const body = helper.slice(helper.indexOf("def source_status"), helper.indexOf("def feeds_updated"))
   const order = [...body.matchAll(/\b(DAILY|WEEKLY|UPDATE|Run all only)\b/g)].map(m => m[1])
-  // Scans, then updates, each in schedule order (the password check, which
+  // Scans, then updates, each in schedule order (the password scan, which
   // follows no schedule line, ends the scans).
   assert.equal(order.join(" "), "DAILY DAILY WEEKLY WEEKLY Run all only DAILY UPDATE UPDATE")
   for (const line of M.scheduleLines({ generatedAt: "2026-10-12T09:58:00+0200", lastRun: { at: "", ok: true },
       nextUpdate: "2026-10-19 09:52", nextFullScan: "2026-10-12 21:15", nextDaily: "2026-10-13 07:40" },
       true, new Date(2026, 9, 12, 10, 0), 30)) {
-    const name = /^Next (\w+ check):/.exec(line)[1]
+    const name = /^Next (\w+ (?:check|update)):/.exec(line)[1]
     assert.ok(helper.includes('" (' + name + ')"'), name + " is not a Last run suffix")
   }
 })
 
-test("tab rows: settings checks, then daily, weekly and update check rows, worst first in each", () => {
+test("tab rows: the quick check, then daily, weekly and list update rows, worst first in each", () => {
   const c = (id, status, weight) => ({ id, category: "detect", status, weight: weight || 1, dismissed: false })
   const r = { checks: [c("scanner-clamav", "pass"), c("firmware", "warn"), c("virus-scan", "pass"),
                        c("aur-status", "fail"), c("screen-lock", "pass"), c("firewall", "fail")] }
   assert.deepEqual(M.checksFor(r, "detect").map(x => x.id),
-    ["firewall", "screen-lock", "virus-scan", "firmware", "aur-status", "scanner-clamav"])  // update check: worst first
+    ["firewall", "screen-lock", "virus-scan", "firmware", "aur-status", "scanner-clamav"])  // list update: worst first
 })
 
 test("Add a passphrase never puts SSH key file names in a program's arguments", () => {
@@ -1265,7 +1265,7 @@ test("every confirmation shows in full the commands Run starts, root steps inclu
 })
 
 test("run cards show the helper's root steps exactly as the helper starts them", () => {
-  const sig = { id: "signatures", label: "ClamAV signatures", date: "", time: "", state: "never", tried: "" }
+  const sig = { id: "signatures", label: "Virus signatures", date: "", time: "", state: "never", tried: "" }
   const older = check({ id: "bumblebee", category: "supply", status: "info", weight: 0,
                         fix: { kind: "terminal", action: "update-bumblebee", label: "Update Bumblebee" } })
   const card = (kind, over) => M.confirmation(kind, "all", parse(report(over)), "/home/marc").commands
