@@ -1858,10 +1858,6 @@ def _mtime_stamp(paths):
     return time.strftime("%Y-%m-%d", t), time.strftime("%H:%M", t)
 
 
-def _mtime_date(paths):
-    return _mtime_stamp(paths)[0]
-
-
 CLAMUI_LOG_INDEXES = ((".local", "share", "clamui", "logs", "log_index.json"),
                       (".var", "app", "io.github.linx_systems.ClamUI", "data", "clamui", "logs", "log_index.json"))
 _ISO_STAMP = re.compile(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})")
@@ -3783,21 +3779,6 @@ def _read_json_file(dirfd, name, cap=STATE_FILE_MAX):
     return data if isinstance(data, dict) else None
 
 
-def _state_text(name, cap=STATE_FILE_MAX):
-    """Read-only load of a text file from the state folder; "" when absent or unusable."""
-    try:
-        dirfd = _open_home_dir(list(STATE_DIR))
-    except (OSError, Refused):
-        return ""
-    try:
-        raw = _read_state_bytes(dirfd, name, cap)
-    except Refused:
-        return ""
-    finally:
-        os.close(dirfd)
-    return raw.decode("utf-8", "replace") if raw else ""
-
-
 def _state_json(name):
     """Read-only load of a JSON file from the state folder; None when absent or unusable."""
     try:
@@ -3820,20 +3801,6 @@ def save_baseline(snap):
         write_atomic(dirfd, BASELINE_NAME, json.dumps(body, separators=(",", ":")).encode())
     finally:
         os.close(dirfd)
-
-
-def _last_upgrade_date():
-    try:
-        text = read_tail(sys_path("/var/log/pacman.log"), PACMAN_LOG_TAIL) or ""
-    except Refused:
-        return ""
-    last = ""
-    for line in text.splitlines():
-        if "starting full system upgrade" in line or "] [ALPM] upgraded " in line:
-            m = _PACMAN_TS.match(line)
-            if m:
-                last = m.group(1)
-    return last
 
 
 def package_verified(paths):

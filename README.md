@@ -418,7 +418,9 @@ The panel always says which kind an action is:
 2. **Helper actions** run `bin/vigil fix <action>` as you, never as root:
    making `~/.ssh` and `~/.gnupg` private, the opt-out file, the thumbnail
    cache, the trash and unused application caches. Each is a fixed action name; nothing from a file or
-   from the report reaches it.
+   from the report reaches it. Leftover app data is kept or moved to the
+   trash the same way, named only by an id (`vigil keep <id>`, `vigil trash
+   <id>...`).
 3. **Script actions** run one of the constant scripts in
    [`Model.js`](Model.js) without a terminal. The panel first shows what it
    will do in plain words, with the exact commands under the **Run** button

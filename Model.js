@@ -90,18 +90,18 @@ var HELPER_INFO = {
                         what: ["Records the watched files as they are now as the new normal.",
                                "Only do this once you recognise every change in the list."] },
   "arch-audit-refresh": { title: "Check for known vulnerabilities now",
-                          what: ["Runs arch-audit, which downloads the Arch security tracker from security.archlinux.org.",
-                                 "Vigil also does this once a week by itself."] },
+                          what: ["Runs arch-audit, which downloads the Arch security tracker from security.archlinux.org",
+                                 "and compares your packages with it. Vigil also does this in every daily check."] },
   "osv-refresh": { title: "Check for known-malicious packages now",
                    what: ["Runs osv-scanner on your AUR build folders and global npm and Bun installs.",
                           "It sends package names and versions (never your files) to OSV.dev, run by Google.",
-                          "Vigil also does this once a week by itself."] },
+                          "Vigil also does this in every daily check."] },
   "virus-scan-now": { title: "Scan your home folder for viruses now",
                       what: ["Runs ClamAV on your whole home folder as you, in the background. Nothing is deleted.",
                              "It can take a while. Vigil also does this in each weekly check."] },
   "aur-refresh": { title: "Check your AUR packages now",
                    what: ["Asks aur.archlinux.org about the AUR packages you have installed, the same lookup",
-                          "yay and paru make on every update. Vigil also does this once a week by itself."] }
+                          "yay and paru make on every update. Vigil also does this in every daily check."] }
 }
 
 function isHelperAction(id) {
@@ -1236,23 +1236,6 @@ function countdown(when, now, nextCheck) {
   return "in " + days + " days"
 }
 
-// The lines under the buttons: when each automatic run comes next.
-// refreshMinutes is how often Vigil checks in the background.
-function scheduleLines(report, autoUpdate, now, refreshMinutes) {
-  if (!report) return []
-  if (!autoUpdate) return ["Automatic updates and scans are off (Vigil settings)."]
-  var checked = localDate(report.generatedAt)
-  var nextCheck = checked ? new Date(checked.getTime() + (refreshMinutes || 30) * 60000) : null
-  var out = []
-  // What each one runs is in the Last run list, where every row names its
-  // run (daily check, weekly check, Run all).
-  var d = countdown(report.nextDaily, now, nextCheck)
-  if (d !== "") out.push("Next daily check: " + d)
-  var f = countdown(report.nextFullScan, now, nextCheck)
-  if (f !== "") out.push("Next weekly check: " + f)
-  return out
-}
-
 // The two lines under each run button: when that check next runs by itself
 // ("next" over "today 21:40"). Run all has no schedule of its own; it runs
 // both checks at once, plus the password scan.
@@ -1707,21 +1690,6 @@ function checksFor(report, category) {
   return out
 }
 
-// Scored problems first, worst first: what the Overview tab lists.
-function topFindings(report, max) {
-  if (!report) return []
-  var out = []
-  for (var i = 0; i < report.checks.length; i++) {
-    var c = report.checks[i]
-    if ((c.status === "fail" || c.status === "warn") && c.weight > 0 && !c.dismissed) out.push(c)
-  }
-  out.sort(function(a, b) {
-    if (a.status !== b.status) return a.status === "fail" ? -1 : 1
-    return b.weight - a.weight
-  })
-  return out.slice(0, max || 6)
-}
-
 function countBy(report, category, status) {
   if (!report) return 0
   var n = 0
@@ -1739,17 +1707,6 @@ function shortDate(date) {
   if (!m) return ""
   var month = Number(m[2])
   return month >= 1 && month <= 12 ? MONTHS[month - 1] + " " + Number(m[3]) : ""
-}
-
-// One line that states the history in words, for when the bars are not seen.
-function historySummary(history) {
-  if (!history || history.length === 0) return ""
-  var lo = 100, hi = 0
-  for (var i = 0; i < history.length; i++) { lo = Math.min(lo, history[i].score); hi = Math.max(hi, history[i].score) }
-  var first = history[0], last = history[history.length - 1]
-  if (history.length === 1) return "Today " + last.score + ". The chart fills in day by day."
-  return shortDate(first.date) + " " + first.score + " \u2192 " + shortDate(last.date) + " " + last.score
-    + " \u00b7 low " + lo + ", high " + hi
 }
 
 function statusGlyph(status) {
@@ -1875,15 +1832,15 @@ if (typeof module !== "undefined") {
     plain: plain, parseReport: parseReport, reportVersion: reportVersion, reportProblem: reportProblem,
     VERSION: VERSION, parseFixResult: parseFixResult, terminalScript: terminalScript,
     terminalAction: terminalAction, actionPlan: actionPlan, runMode: runMode, stripSudo: stripSudo, launcherPath: launcherPath, canRun: canRun, checksFor: checksFor, withSettings: withSettings,
-    topFindings: topFindings, countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
+    countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
     tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
     categoryLabel: categoryLabel, pillarCounts: pillarCounts, tabCaption: tabCaption, tabCounts: tabCounts,
     CARE_NOTE: CARE_NOTE, SIGNATURES_NOTICE: SIGNATURES_NOTICE, rowHeading: rowHeading, rowHeadingNote: rowHeadingNote, currentNote: currentNote, CURRENT_HEADING: CURRENT_HEADING, runCaptions: runCaptions,
     scheduleNotes: scheduleNotes, heroMeta: heroMeta, keyHints: keyHints, separateFromCleanAll: separateFromCleanAll,
     CARE_SEPARATE_HEADING: CARE_SEPARATE_HEADING, CARE_SEPARATE_NOTE: CARE_SEPARATE_NOTE, CARE_TAB_NOTE: CARE_TAB_NOTE, CARE_RUN_LINE: CARE_RUN_LINE, tabIntro: tabIntro, cleanAllPlan: cleanAllPlan,
     howTo: howTo, docsUrl: docsUrl, docsCommand: docsCommand, DOCS: DOCS, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
-    shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
-    relativeDay: relativeDay, sourceLine: sourceLine, countdown: countdown, scheduleLines: scheduleLines,
+    shortDate: shortDate, VIGIL_MARK: VIGIL_MARK,
+    relativeDay: relativeDay, sourceLine: sourceLine, countdown: countdown, 
     BUMBLEBEE_INSTALL: BUMBLEBEE_INSTALL, BUMBLEBEE_VERSION: BUMBLEBEE_VERSION,
     SIGNATURES_SCRIPT: SIGNATURES_SCRIPT, NO_PASSWORD_STEP: NO_PASSWORD_STEP,
     SOURCE_IDS: SOURCE_IDS, DAILY_IDS: DAILY_IDS, WEEKLY_IDS: WEEKLY_IDS, cardShowsSignatures: cardShowsSignatures,

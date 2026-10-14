@@ -158,7 +158,6 @@ test("ordering and counts", () => {
     check({ id: "d", status: "warn", weight: 0 }),
     check({ id: "e", status: "info", category: "detect", weight: 0 })
   ] }))
-  assert.deepEqual(M.topFindings(r).map((c) => c.id), ["c", "b"])
   assert.deepEqual(M.checksFor(r, "harden").map((c) => c.id), ["c", "b", "d", "a"])
   assert.equal(M.countBy(r, "harden", "warn"), 2)
   assert.equal(M.countBy(r, "", "info"), 1)
@@ -276,7 +275,6 @@ test("reviewed warnings drop out of findings and counts", () => {
     check({ id: "c", status: "info", weight: 0 }),
     check({ id: "d", status: "pass", weight: 1 })
   ] }))
-  assert.deepEqual(M.topFindings(r).map((c) => c.id), ["b"])
   assert.equal(M.countBy(r, "harden", "warn"), 1)
   assert.deepEqual(M.checksFor(r, "harden").map((c) => c.id), ["b", "c", "a", "d"])
 })
@@ -284,10 +282,6 @@ test("reviewed warnings drop out of findings and counts", () => {
 test("history helpers", () => {
   assert.equal(M.shortDate("2026-10-12"), "Oct 12")
   assert.equal(M.shortDate("2026-13-01"), "")
-  assert.equal(M.historySummary([]), "")
-  assert.match(M.historySummary([{ date: "2026-10-12", score: 80 }]), /^Today 80/)
-  assert.equal(M.historySummary([{ date: "2026-10-01", score: 60 }, { date: "2026-10-12", score: 85 }, { date: "2026-10-05", score: 40 }].slice(0, 2)),
-    "Oct 1 60 → Oct 12 85 · low 60, high 85")
 })
 
 test("every pillar and tab label is one word", () => {
@@ -497,20 +491,15 @@ test("every terminal says what it does, plainly, then the technical part", () =>
   }
 })
 
-test("schedule lines: countdowns with the time, in local time", () => {
+test("countdowns: with the time, in local time", () => {
   const now = new Date(2026, 9, 12, 10, 0)
   const r = { generatedAt: "2026-10-12T09:58:00+0200", nextFullScan: "2026-10-12 21:15", nextDaily: "2026-10-13 07:40" }
-  assert.deepEqual(M.scheduleLines(r, true, now, 30), [
-    "Next daily check: tomorrow at 07:40",
-    "Next weekly check: today at 21:15"])
+  assert.deepEqual(M.runCaptions(r, true, now, 30), { daily: "next\ntomorrow 07:40", weekly: "next\ntoday 21:15", all: "both\nnow" })
   // Already due: it runs at the next background check, 30 minutes after the last one.
-  assert.equal(M.scheduleLines(Object.assign({}, r, { nextDaily: "now" }), true, now, 30)[0],
-    "Next daily check: today at 10:28")
-  assert.equal(M.scheduleLines(Object.assign({}, r, { nextDaily: "" }), true, now, 30).length, 1)  // nothing daily set up
+  assert.equal(M.runCaptions(Object.assign({}, r, { nextDaily: "now" }), true, now, 30).daily, "next\ntoday 10:28")
   assert.equal(M.countdown("2026-10-13 08:05", now, null), "tomorrow at 08:05")
   assert.equal(M.countdown("2026-10-12", now, null), "today at 10:00")       // older helper: date only
   assert.equal(M.countdown("", now, null), "")
-  assert.deepEqual(M.scheduleLines(r, false, now, 30), ["Automatic updates and scans are off (Vigil settings)."])
   assert.equal(parse(report({ nextFullScan: "2026-10-19 08:00" })).nextFullScan, "2026-10-19 08:00")
   assert.equal(parse(report({ nextDaily: "2026-10-13 08:00" })).nextDaily, "2026-10-13 08:00")
   assert.equal(parse(report({ nextFullScan: "<b>" })), null)

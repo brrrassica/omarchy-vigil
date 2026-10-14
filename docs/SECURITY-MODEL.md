@@ -133,7 +133,9 @@ program it is running, process group and all, and starts no further step.
   unknown statuses, categories, duplicate ids, non-integer weights, and
   tool directories other than `/usr/bin` and `/usr/share/omarchy/bin`. A
   report that does not match is rejected whole. Keys are looked up with
-  `hasOwnProperty` and collected into `Object.create(null)` maps.
+  `hasOwnProperty` and collected into `Object.create(null)` maps. A Last
+  run line's note ("with the list from Oct 14") must match one fixed
+  pattern, and whether it shows in red is a separate boolean.
 - Every `Text` sets `textFormat: Text.PlainText`. Strings passed to host
   components (tooltip, `PanelHero`, notifications) go through
   `Model.plain`, which removes `<`, `>`, `&`, control and bidi characters
@@ -282,14 +284,16 @@ program it is running, process group and all, and starts no further step.
   refusing would let a hidden line escape the scan), `shell.json` (for the
   lock timeout), and sysfs entries (sysfs is made of symlinks). Nothing read
   is ever written back or executed.
-- Writes (the state file and the opt-out file) walk from your home directory
+- Writes (the state file, Vigil's other notes such as the kept-leftovers list,
+  and the opt-out file) walk from your home directory
   one component at a time with `O_NOFOLLOW`, refusing any component that is
   a symlink or not owned by you, then create an exclusive random temporary
   at its final mode, `fsync`, `rename` over the target and `fsync` the
   directory. A symlink planted at the target is replaced, not written
   through; tests plant one and check the victim file is untouched.
-- Deletion (thumbnail cache) works relative to held directory descriptors
-  and never follows a symlink. The opt-out file is removed only if its bytes
+- Deletion (thumbnail cache, the trash, unused application caches) works
+  relative to held directory descriptors and never follows a symlink.
+  Leftover app data is never deleted, only moved to the trash (see below). The opt-out file is removed only if its bytes
   are exactly what Vigil wrote.
 
 ## Network
@@ -455,11 +459,11 @@ say where they connect before they run.
   recorded, each checked against the same pattern. The list is rebuilt in a
   fresh file and renamed into place on the way out, also when a step fails,
   so every network already changed stays recorded.
-- For the Last run list Vigil reads ClamUI's log index
-  (`clamui/logs/log_index.json` in its data folder, Flatpak or not) with
-  the no-follow reader and a 2 MiB cap, and keeps only the newest
-  timestamp of each kind ("scan", "update"), matched against a strict date
-  pattern. It never reads ClamUI's logs themselves.
+- Vigil reads ClamUI's log index (`clamui/logs/log_index.json` in its data
+  folder, Flatpak or not) with the no-follow reader and a 2 MiB cap, and
+  keeps only the newest timestamp of each kind, matched against a strict
+  date pattern: "scan" for the Last run list, "update" for how old the
+  virus signatures are. It never reads ClamUI's logs themselves.
 - File-change alerts store SHA-256 fingerprints, never contents; symlinks
   are recorded by their target path and never followed.
 - Secrets found in shell history are reported by file, line and kind. The
