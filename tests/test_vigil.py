@@ -947,16 +947,12 @@ def test_file_changes_peek_does_not_create_baseline(v):
     assert not os.path.exists(os.path.join(v.HOME, ".local/state/omarchy-vigil/baseline.json"))
 
 
-
-
 def test_arch_audit_parse():
     mod = load_vigil()
     got = mod.parse_arch_audit(ARCH_AUDIT_JSON)
     assert [p["name"] for p in got] == ["openssl", "libfoo"]
     assert got[0] == {"name": "openssl", "severity": "High", "fixed": True, "issues": 2}
     assert mod.parse_arch_audit("not json") is None and mod.parse_arch_audit('{"x": 1}') is None
-
-
 
 
 def test_clamui_quarantine_count(v):
@@ -1260,10 +1256,24 @@ def scan_argv(v):
     return tuple(v._clamscan_argv(v.HOME))
 
 
+def fresh_signatures(v, hours_old=0):
+    """ClamAV's signatures as its update service leaves them: freshclam.dat
+    changes on every check. hours_old makes them that old."""
+    p = sysfile(v, "/var/lib/clamav/freshclam.dat", "x")
+    when = time.time() - hours_old * 3600
+    os.utime(p, (when, when))
+    try:
+        os.remove(v.home_path(*v.STATE_DIR, v.FEED_FILES["signatures"]))     # Vigil's own update, if any
+    except OSError:
+        pass
+
+
 def clamscan_ok(v, out="", rc=0):
     """A scan with this output. Detected files are created, and the second scan
-    that confirms each one (by its own path) agrees, unless the test says otherwise."""
+    that confirms each one (by its own path) agrees, unless the test says otherwise.
+    The signatures are current, as ClamAV's own update service keeps them."""
     v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
+    fresh_signatures(v)
     v.COMMANDS[scan_argv(v)] = (rc, out)
     found = [l[:-len(" FOUND")].rsplit(": ", 1) for l in out.splitlines() if l.endswith(" FOUND") and ": " in l]
     paths = [p for p, _ in found if p.startswith(v.HOME + "/")]
@@ -1357,13 +1367,13 @@ def test_progress_lines_for_the_panel(v, capsys, monkeypatch):
     v.PROGRESS["on"] = True
     monkeypatch.setattr(v, "FEED_REFRESH", {"arch-audit": lambda: None})
     monkeypatch.setattr(v, "feed_available", lambda n: n in ("arch-audit", "full-scan"))
-    v.refresh_due_feeds(sources_only=True)
+    v.refresh_due_feeds(daily_only=True)
     out = [json.loads(l) for l in capsys.readouterr().out.splitlines()]
-    assert out == [{"progress": {"step": 1, "of": 1, "doing": "Arch security list",
+    assert out == [{"progress": {"step": 1, "of": 1, "doing": "Arch security scan",
                                  "done": 0, "total": 0, "at": 0.0, "span": 1.0}}]
 
 
-def test_two_timers_sources_and_full_scan(v, monkeypatch):
+def test_two_timers_daily_and_weekly(v, monkeypatch):
     ran = []
 
     def fake(name):
@@ -1371,13 +1381,14 @@ def test_two_timers_sources_and_full_scan(v, monkeypatch):
             ran.append(name)
             v.save_feed(name, {})
         return go
+    fresh_signatures(v)
     monkeypatch.setattr(v, "FEED_REFRESH", {"arch-audit": fake("arch-audit")})
     monkeypatch.setattr(v, "refresh_virus_scan", fake("virus-scan"))
     monkeypatch.setattr(v, "feed_available", lambda n: n in ("arch-audit", "virus-scan", "full-scan"))
-    # Update sources: only the lists.
-    v.refresh_due_feeds(sources_only=True)
+    # Daily check: the Arch security scan, which fetches its list as it runs.
+    v.refresh_due_feeds(daily_only=True)
     assert ran == ["arch-audit"]
-    # Weekly run: sources were just updated, the full scan has never run.
+    # Background run: the daily check just ran, the weekly check never did.
     ran.clear()
     v.refresh_due_feeds()
     assert ran == ["virus-scan"]
@@ -1398,21 +1409,22 @@ def test_report_says_when_something_is_due(v):
     assert v.audit(peek=True)["feedsDue"] is True
 
 
-def test_countdowns_to_the_next_update_and_full_scan(v):
+def test_countdowns_to_the_next_daily_and_weekly_check(v):
     from datetime import datetime, timedelta
-    assert v.next_update() == ""                                          # no sources set up
+    assert v.next_daily() == ""                                           # nothing daily set up
     assert v.next_full_scan() == "now"                                    # never ran: due now
     v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
     v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
     before = datetime.now().replace(second=0, microsecond=0)
-    v.refresh_due_feeds(sources_only=True)
-    week = datetime.strptime(v.next_update(), "%Y-%m-%d %H:%M")
-    assert timedelta(days=7) <= week - before <= timedelta(days=7, minutes=1)   # a week, to the minute
+    v.refresh_due_feeds(daily_only=True)
+    day = datetime.strptime(v.next_daily(), "%Y-%m-%d %H:%M")
+    assert timedelta(days=1) <= day - before <= timedelta(days=1, minutes=1)   # a day, to the minute
     assert v.next_full_scan() == "now"
     v.refresh_due_feeds(full=True)
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", v.next_full_scan())
     report = v.audit(peek=True)
-    assert report["nextUpdate"] == v.next_update() and report["nextFullScan"] == v.next_full_scan()
+    assert report["nextDaily"] == v.next_daily() and report["nextFullScan"] == v.next_full_scan()
+    assert not {"nextUpdate", "lastRun", "feedsUpdated"} & set(report)    # no list update to count down to
 
 
 def test_due_to_the_minute(v):
@@ -1420,47 +1432,41 @@ def test_due_to_the_minute(v):
     v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
     d = Path(v.HOME, ".local/state/omarchy-vigil")
     d.mkdir(parents=True, mode=0o700, exist_ok=True)
-    nearly = datetime.now() - timedelta(days=7) + timedelta(minutes=5)   # due in five minutes
+    nearly = datetime.now() - timedelta(days=1) + timedelta(minutes=5)   # due in five minutes
     put(d / "arch-audit.json", json.dumps({"at": nearly.strftime("%Y-%m-%d"), "time": nearly.strftime("%H:%M"),
                                            "attempted": nearly.strftime("%Y-%m-%d")}), 0o600)
     assert v.feed_due("arch-audit") is False
-    assert v.next_update() == (nearly + timedelta(days=7)).strftime("%Y-%m-%d %H:%M")
-    late = datetime.now() - timedelta(days=7, minutes=5)                  # five minutes overdue
+    assert v.next_daily() == (nearly + timedelta(days=1)).strftime("%Y-%m-%d %H:%M")
+    late = datetime.now() - timedelta(days=1, minutes=5)                  # five minutes overdue
     put(d / "arch-audit.json", json.dumps({"at": late.strftime("%Y-%m-%d"), "time": late.strftime("%H:%M"),
                                            "attempted": late.strftime("%Y-%m-%d")}), 0o600)
-    assert v.feed_due("arch-audit") is True and v.next_update() == "now"
+    assert v.feed_due("arch-audit") is True and v.next_daily() == "now"
+
 
 def test_full_scan_with_nothing_installed_still_checks(v):
     res = v.refresh_due_feeds(full=True)
     assert res["ok"] and res["message"].startswith("Checked every setting.")
 
 
-def test_full_scan_message_separates_refreshing_from_findings(v):
-    """Refreshing a database must never read as finding something."""
+def test_full_scan_message_separates_what_ran_from_findings(v):
+    """Running a scan must never read as finding something."""
     v.TRUSTED |= {v.ROOT + "/usr/bin/arch-audit"}
     v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (1, ARCH_AUDIT_JSON)
     clamscan_ok(v, os.path.join(v.HOME, "x.exe") + ": Win.Test.EICAR_HDB-1 FOUND\n", 1)
     msg = v.refresh_due_feeds(full=True)["message"]
-    assert msg.startswith("Refreshed the Arch vulnerability database and scanned your home folder.")
+    assert msg.startswith("Checked your packages against the Arch security list and scanned your home folder.")
     assert "On this machine: updating would fix 2 known vulnerabilities; 1 infected file in your home folder." in msg
     assert v.run_fix("arch-audit-refresh")["message"] == (
-        "Vulnerability database refreshed. Updating would fix 2 known vulnerabilities on this machine.")
-
-
-def test_feeds_updated_is_oldest_completed_source(v):
-    assert v.feeds_updated() == ""
-    v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
-    assert v.feeds_updated() == ""                                        # available but never completed
-    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
-    v.run_fix("arch-audit-refresh")
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", v.feeds_updated())
-    assert v.audit(peek=True)["feedsUpdated"] == v.feeds_updated()
+        "Checked your packages against the newest Arch security list. Updating would fix 2 known "
+        "vulnerabilities on this machine.")
 
 
 def test_cli_refresh_feeds_arguments():
     import subprocess
     vigil = str(REPO / "bin" / "vigil")
-    for args in (["refresh-feeds", "--all"], ["refresh-feeds", "--force", "x"]):
+    for args in (["refresh-feeds", "--all"], ["refresh-feeds", "--force", "x"], ["refresh-feeds", "--sources"],
+                 ["refresh-feeds", "--signatures"], ["refresh-feeds", "--scan", "--signatures"],
+                 ["refresh-feeds", "--daily", "--signatures", "--signatures"]):
         p = subprocess.run(["/usr/bin/python3", "-I", "-S", vigil] + args, capture_output=True, timeout=30)
         assert p.returncode == 2, args
 
@@ -1468,17 +1474,17 @@ def test_cli_refresh_feeds_arguments():
 # --------------------------------------------------------------------------
 # When each scan last ran and each source last updated, shown on the Overview
 
-def test_last_run_list_scans_then_updates_with_times(v):
+def test_last_run_list_by_run_with_times(v):
     assert [s["id"] for s in v.source_status()] == ["password-check"]       # always offered
     v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan", v.ROOT + "/usr/bin/arch-audit"}
-    got = [(s["id"], s["label"], s["state"]) for s in v.source_status()]
-    # In schedule order: daily check, weekly check, list update.
-    assert got == [("downloads-scan", "Virus scan of ~/Downloads (daily check)", "never"),
-                   ("virus-scan", "Virus scan of ~ (weekly check)", "never"),
-                   ("password-check", "Password scan (Run all only)", "never"),
-                   ("signatures", "Virus signatures (list update)", "never"),
-                   ("arch-audit", "Arch security list (list update)", "never")]
-    assert all(len(s["label"]) <= 40 for s in v.source_status())          # the panel's limit
+    got = [(s["id"], s["label"], s["run"], s["state"]) for s in v.source_status()]
+    # Each scan and lookup, in the order its run does it: no rows for the lists
+    # themselves, since every scan gets its list right before it runs.
+    assert got == [("arch-audit", "Arch security scan", "daily", "never"),
+                   ("downloads-scan", "Virus scan of ~/Downloads", "daily", "never"),
+                   ("virus-scan", "Virus scan of ~", "weekly", "never"),
+                   ("password-check", "Password scan", "all", "never")]
+    assert all(len(s["label"]) <= 40 and s["note"] == "" for s in v.source_status())   # the panel's limit
     v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
     v.run_fix("arch-audit-refresh")
     src = {s["id"]: s for s in v.source_status()}["arch-audit"]
@@ -1496,15 +1502,27 @@ def test_source_failed_and_stale(v):
     assert {x["id"]: x for x in v.source_status()}["arch-audit"]["state"] == "stale"
 
 
-def test_last_run_recorded_for_source_updates(v):
-    assert v.last_run() == {"at": "", "ok": False}
-    v.TRUSTED.add(v.ROOT + "/usr/bin/arch-audit")
-    v.refresh_due_feeds(sources_only=True)                                # arch-audit fails: no output
-    r = v.last_run()
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", r["at"]) and r["ok"] is False
-    v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
-    v.refresh_due_feeds(sources_only=True)
-    assert v.last_run()["ok"] is True
+def test_a_scan_that_used_old_signatures_says_so(v, monkeypatch):
+    clamscan_ok(v)
+    fresh_signatures(v, hours_old=72)                                     # ClamAV's update service is off
+    monkeypatch.setattr(v, "count_home_files", lambda **kw: 1)
+    res = v.refresh_due_feeds(weekly_only=True)
+    assert "The virus signatures are 3 days old" in res["message"] and "used them as they were" in res["message"]
+    assert {s["id"]: s for s in v.source_status()}["virus-scan"]["note"].startswith("with signatures from ")
+    assert ", with signatures from " in v.check_virus_scan()["summary"]
+    fresh_signatures(v)
+    v.refresh_due_feeds(weekly_only=True)
+    assert {s["id"]: s for s in v.source_status()}["virus-scan"]["note"] == ""
+    assert "with signatures from" not in v.check_virus_scan()["summary"]
+
+
+def test_no_signatures_means_no_virus_scan(v, monkeypatch):
+    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
+    v.COMMANDS[scan_argv(v)] = (0, "")
+    monkeypatch.setattr(v, "count_home_files", lambda **kw: 1)
+    res = v.refresh_due_feeds(weekly_only=True)
+    assert "The virus scan could not run: ClamAV has no virus signatures yet." in res["message"]
+    assert v.feed_cache("virus-scan") is None and v.feed_due("full-scan") is False   # tried: again tomorrow
 
 
 def test_warnings_cost_less_than_failures(v):
@@ -1660,31 +1678,51 @@ def test_remove_secret_lines(v):
     assert v.run_fix("remove-secret-lines")["message"] == "No lines with keys were found."
 
 
-def test_signatures_update_with_update_check_and_run_all_only(v):
-    v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash", v.ROOT + "/usr/bin/freshclam",
-                  v.ROOT + "/usr/bin/clamscan"}
-    SIG = tuple(v.root_updates_argv(True, False))
-    v.COMMANDS[SIG] = (0, "VIGIL-SIG 0\n")
-    v.COMMANDS[tuple(v.NO_PASSWORD_ARGV)] = (0, "")
-    v.COMMANDS[scan_argv(v)] = (0, "")
+def test_old_signatures_are_updated_only_from_a_run_now_button(v, monkeypatch):
+    v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash", v.ROOT + "/usr/bin/freshclam"}
+    clamscan_ok(v)
+    monkeypatch.setattr(v, "count_home_files", lambda **kw: 1)
+    SIG, NOPW = tuple(v.SIGNATURES_ARGV), tuple(v.NO_PASSWORD_ARGV)
+    v.COMMANDS[SIG] = (0, "")
+    v.COMMANDS[NOPW] = (0, "")
     calls = []
     real = v.run
     v.run = lambda argv, **kw: (calls.append(tuple(argv)), real(argv, **kw))[1]
-    res = v.refresh_due_feeds(sources_only=True)
-    assert calls[0] == SIG and res["message"].startswith("Refreshed the ClamAV virus signatures")
+    # Current (ClamAV's update service ran recently): no button asks.
+    for kw in ({"daily_only": True}, {"weekly_only": True}):
+        v.refresh_due_feeds(**kw)
+    assert SIG not in calls and v.audit(peek=True)["signaturesDue"] is False
+    # Two days old: a Run now button whose card showed the command updates
+    # them first, behind your password.
+    fresh_signatures(v, hours_old=48)
+    assert v.audit(peek=True)["signaturesDue"] is True
     calls.clear()
-    v.refresh_due_feeds(full=True)                                         # Run all: the same prompt
-    assert SIG in calls
+    res = v.refresh_due_feeds(daily_only=True, signatures=True)
+    assert calls[0] == SIG and res["message"].startswith("Updated the virus signatures")
+    assert "days old" not in res["message"]                               # the scan used the new ones
+    fresh_signatures(v, hours_old=48)
     calls.clear()
-    v.refresh_due_feeds(daily_only=True)                                   # daily and weekly: never ask
-    v.refresh_due_feeds(weekly_only=True)
-    assert SIG not in calls and tuple(v.NO_PASSWORD_ARGV) not in calls
+    v.refresh_due_feeds(full=True, signatures=True)                       # Run all: both prompts first
+    assert calls[:2] == [SIG, NOPW]
+    # A card that did not show the command (it was drawn before they got old)
+    # never leads to that password prompt.
+    fresh_signatures(v, hours_old=48)
     calls.clear()
-    v.refresh_due_feeds()                                                  # weekly: never asks
-    assert SIG not in calls and tuple(v.NO_PASSWORD_ARGV) not in calls
-    v.COMMANDS[SIG] = (126, "")                                            # dialog dismissed
-    res = v.refresh_due_feeds(sources_only=True)
-    assert "virus signatures were not updated" in res["message"] and "tries again" not in res["message"]
+    for kw in ({"daily_only": True}, {"weekly_only": True}, {"full": True}):
+        v.refresh_due_feeds(**kw)
+    assert SIG not in calls
+    # The background run and a row's Scan now never ask; they scan with what is there.
+    fresh_signatures(v, hours_old=48)
+    os.remove(v.home_path(*v.STATE_DIR, v.FEED_FILES["downloads-scan"]))
+    calls.clear()
+    res = v.refresh_due_feeds()
+    v.refresh_due_feeds(scan_only=True)
+    assert SIG not in calls and NOPW not in calls and "2 days old" in res["message"]
+    # Password dialog dismissed: said once, and the scan still runs.
+    v.COMMANDS[SIG] = (126, "")
+    res = v.refresh_due_feeds(daily_only=True, signatures=True)
+    assert "virus signatures were not updated: no password was given" in res["message"]
+    assert "Scanned what is new in Downloads" in res["message"] and "tries again" not in res["message"]
 
 
 def test_clamui_activity_counts_in_the_last_run_list(v):
@@ -1699,26 +1737,22 @@ def test_clamui_activity_counts_in_the_last_run_list(v):
     assert v.clamui_last("update") == ("2026-10-11", "08:15")
     src = {s["id"]: s for s in v.source_status()}
     assert src["virus-scan"]["date"] == "2026-10-11" and src["virus-scan"]["by"] == "ClamUI"
-    assert src["signatures"]["time"] == "08:15" and src["signatures"]["by"] == "ClamUI"
-    sysfile(v, "/var/lib/clamav/freshclam.dat", "x")                     # ClamAV's own check, just now
-    src = {s["id"]: s for s in v.source_status()}
-    assert src["signatures"]["by"] == "" and src["signatures"]["state"] == "ok"
+    assert v.signatures_updated() == ("2026-10-11", "08:15")             # ClamUI's update counts
+    fresh_signatures(v)                                                   # ClamAV's own check, just now
+    assert v.signatures_updated()[0] == time.strftime("%Y-%m-%d")
 
 
 def test_signature_update_wakes_clamavs_service_and_explains_failures(v):
     script = v.SIGNATURES_SCRIPT
     assert "systemctl kill --signal=SIGUSR1 --kill-whom=main clamav-freshclam.service" in script
     assert "journalctl -u clamav-freshclam.service" in script and "/usr/bin/freshclam" in script
-    v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash", v.ROOT + "/usr/bin/freshclam"}
-    SIG = tuple(v.root_updates_argv(True, False))
-    v.COMMANDS[SIG] = (0, "VIGIL-SIG 3\n")
-    msg = v.refresh_due_feeds(sources_only=True)["message"]
-    assert "did not finish checking within two minutes" in msg
-    v.COMMANDS[SIG] = (0, "VIGIL-SIG 0\n")
-    v.refresh_due_feeds(sources_only=True)
-    v.TRUSTED.add(v.ROOT + "/usr/bin/clamscan")
-    sig = {x["id"]: x for x in v.source_status()}["signatures"]
-    assert sig["state"] == "ok" and re.fullmatch(r"\d{2}:\d{2}", sig["time"])      # Vigil's own record
+    assert v.SIGNATURES_ARGV == [v.PKEXEC, "/usr/bin/bash", "-c", script]
+    v.COMMANDS[tuple(v.SIGNATURES_ARGV)] = (3, "")
+    with pytest.raises(v.Refused, match="did not finish checking within two minutes"):
+        v.refresh_signatures()
+    v.COMMANDS[tuple(v.SIGNATURES_ARGV)] = (0, "")
+    assert v.refresh_signatures() == "Virus signatures updated."
+    assert v.signatures_updated()[0] == time.strftime("%Y-%m-%d")         # Vigil's own record
 
 
 def test_missing_helpers_listed_in_order(v):
@@ -1727,8 +1761,6 @@ def test_missing_helpers_listed_in_order(v):
                   v.ROOT + "/usr/bin/fwupdmgr"}
     assert v.missing_helpers() == ["osv-scanner", "clamui", "bumblebee"]
     assert v.audit(peek=True)["missing"] == ["osv-scanner", "clamui", "bumblebee"]
-
-
 
 
 # --------------------------------------------------------------------------
@@ -1870,8 +1902,8 @@ def test_only_one_run_at_a_time(v, capsys, monkeypatch):
     finally:
         os.close(fd)                          # the other run ends: the kernel drops its lock
     assert v.main(["vigil", "refresh-feeds", "--full"]) == 0
-    assert calls == [{"force": False, "sources_only": False, "full": True, "scan_only": False, "daily_only": False,
-                      "weekly_only": False}]
+    assert calls == [{"force": False, "full": True, "scan_only": False, "daily_only": False, "weekly_only": False,
+                      "signatures": False}]
     os.close(v.RUN_LOCK["fd"])
     v.RUN_LOCK["fd"] = None
 
@@ -2408,7 +2440,7 @@ def test_daily_check_checks_for_waiting_updates(v, capsys):
     updates_tools(v)
     v.COMMANDS[("/usr/bin/checkupdates", "--nocolor")] = (2, "")
     v.PROGRESS["on"] = True
-    v.refresh_due_feeds(sources_only=True)                                 # the list update: lists only
+    v.refresh_due_feeds(weekly_only=True)                                  # the weekly check: not this
     steps = [json.loads(l)["progress"]["doing"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
     assert "System update lookup" not in steps
     v.refresh_due_feeds(daily_only=True)
@@ -2541,8 +2573,10 @@ def test_the_bumblebee_row_offers_the_pinned_version_only_when_older(v):
     assert v.check_bumblebee()["status"] == "pass"
     bee_installed(v, "0.1.1")
     c = v.check_bumblebee()
-    assert c["status"] == "info" and c["fix"]["action"] == "update-bumblebee"
-    assert c["summary"] == "Bumblebee %s is ready to install (you have 0.1.1)." % v.BUMBLEBEE_VERSION
+    assert c["status"] == "info" and c["fix"] == {"kind": "terminal", "action": "update-bumblebee",
+                                                  "label": "Install Bumblebee " + v.BUMBLEBEE_VERSION}
+    assert c["summary"] == "Bumblebee 0.1.1 is installed; this Vigil was reviewed with %s." % v.BUMBLEBEE_VERSION
+    assert "No check updates Bumblebee by itself" in c["howto"]
     bee_installed(v, "9.0.0")                                                 # newer than the pin: left alone
     assert v.check_bumblebee()["status"] == "pass"
 
@@ -2562,47 +2596,31 @@ def test_bumblebee_is_pinned_in_the_reviewed_code(v):
     assert "/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 180 --max-filesize" in s
 
 
-def test_update_check_updates_bumblebee_behind_the_same_password(v):
-    bee_installed(v, "0.1.1")
-    v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash", v.ROOT + "/usr/bin/freshclam",
-                  v.ROOT + "/usr/bin/clamscan"}
-    both = tuple(v.root_updates_argv(True, True))
-    v.COMMANDS[both] = (0, "VIGIL-SIG 0\nVIGIL-BEE 0\n")
+def test_no_run_installs_or_updates_bumblebee(v, monkeypatch):
+    bee_installed(v, "0.1.1")                                                 # older than the pin
+    v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash", v.ROOT + "/usr/bin/freshclam"}
+    clamscan_ok(v)
+    monkeypatch.setattr(v, "count_home_files", lambda **kw: 1)
+    v.COMMANDS[tuple(v.NO_PASSWORD_ARGV)] = (0, "")
     calls = []
     real = v.run
     v.run = lambda argv, **kw: (calls.append(tuple(argv)), real(argv, **kw))[1]
-    res = v.refresh_due_feeds(sources_only=True)
-    pk = [c for c in calls if c[0] == "/usr/bin/pkexec"]
-    assert pk == [both]                                                     # one password prompt for both
-    assert "Bumblebee was updated." in res["message"]
-    assert both[3].index("VIGIL-SIG") < both[3].index("VIGIL-BEE")
-    assert v.BUMBLEBEE_SCRIPT in both[3]                                     # the fixed script, no report data
-    v.COMMANDS[both] = (0, "VIGIL-SIG 0\nVIGIL-BEE 1\n")
-    res = v.refresh_due_feeds(sources_only=True)
-    assert "Bumblebee could not be updated now" in res["message"]
-    assert "virus signatures were not updated" not in res["message"]
-    # No ClamAV signatures to update, but a Bumblebee update: still one prompt, Bumblebee only.
-    v.TRUSTED.discard(v.ROOT + "/usr/bin/freshclam")
-    bee = tuple(v.root_updates_argv(False, True))
-    v.COMMANDS[bee] = (0, "VIGIL-BEE 0\n")
-    calls.clear()
-    v.refresh_due_feeds(sources_only=True)
-    assert [c for c in calls if c[0] == "/usr/bin/pkexec"] == [bee]
+    for kw in ({}, {"daily_only": True}, {"weekly_only": True}, {"full": True}, {"scan_only": True}):
+        v.refresh_due_feeds(**kw)
+    assert not any("bumblebee" in " ".join(c) and c[0] == "/usr/bin/pkexec" for c in calls)
+    assert [c for c in calls if c[0] == "/usr/bin/pkexec"] == [tuple(v.NO_PASSWORD_ARGV)]   # Run all only
 
 
 def test_the_cards_show_the_helpers_root_steps_exactly(v):
     """The run cards show the helper's two root steps; they must be the very
-    scripts the helper starts, for every combination it can start."""
+    scripts the helper starts."""
     import subprocess as sp
     js = json.loads(sp.run(["node", "-e", """
 const M = require(process.argv[1])
-process.stdout.write(JSON.stringify({ sig: M.SIGNATURES_SCRIPT, nopw: M.NO_PASSWORD_STEP,
-  both: M.rootUpdatesScript(true, true), sig_only: M.rootUpdatesScript(true, false), bee_only: M.rootUpdatesScript(false, true) }))
+process.stdout.write(JSON.stringify({ sig: M.SIGNATURES_SCRIPT, nopw: M.NO_PASSWORD_STEP }))
 """, str(REPO / "Model.js")], capture_output=True, text=True, check=True).stdout)
-    assert js["sig"] == v.SIGNATURES_SCRIPT
+    assert js["sig"] == v.SIGNATURES_SCRIPT and v.SIGNATURES_ARGV == [v.PKEXEC, "/usr/bin/bash", "-c", js["sig"]]
     assert js["nopw"] == v.ROOT_STEP and v.NO_PASSWORD_ARGV == [v.PKEXEC, "/usr/bin/bash", "-c", js["nopw"]]
-    for key, sig, bee in (("both", True, True), ("sig_only", True, False), ("bee_only", False, True)):
-        assert v.root_updates_argv(sig, bee) == [v.PKEXEC, "/usr/bin/bash", "-c", js[key]], key
 
 
 def test_every_omarchy_command_a_script_uses_is_one_the_helper_looks_up(v):
@@ -2748,30 +2766,56 @@ def test_xdg_download_dir_is_used_only_inside_home(v):
     assert v.downloads_dir() == v.HOME + "/Downloads"
 
 
-def test_the_daily_run_is_light_and_the_weekly_items_stay_weekly(v, capsys, monkeypatch):
+def test_the_daily_run_gets_each_list_right_before_its_scan(v, capsys, monkeypatch):
     v.PROGRESS["on"] = True
     clamscan_ok(v)
     bee_installed(v)
-    put(Path(v.HOME, ".local/state/omarchy-vigil", v.BUMBLEBEE_CATALOG), "{}")
     updates_tools(v)
     v.COMMANDS[("/usr/bin/checkupdates", "--nocolor")] = (2, "")
     ran = []
+    monkeypatch.setattr(v, "refresh_bumblebee_list", lambda: (ran.append("list"), v.save_feed("bumblebee-list", {})))
     monkeypatch.setattr(v, "refresh_bumblebee", lambda: (ran.append("bumblebee"), v.save_feed("bumblebee", {})))
     monkeypatch.setattr(v, "refresh_downloads_scan",
                         lambda cb: (ran.append("downloads"), v.save_feed("downloads-scan", {"found": []})))
     monkeypatch.setattr(v, "refresh_virus_scan", lambda cb: ran.append("home-scan"))
-    # Everything weekly done today; the daily items due.
-    for n in ("full-scan", "virus-scan", "arch-audit", "osv", "aur", "bumblebee-list"):
+    # The weekly check ran today; the daily check is due.
+    for n in ("full-scan", "virus-scan"):
         v.save_feed(n, {})
     two_days = time.strftime("%Y-%m-%d", time.localtime(time.time() - 2 * 86400))
     put(Path(v.HOME, ".local/state/omarchy-vigil/bumblebee.json"),
         json.dumps({"at": two_days, "time": "08:00", "attempted": two_days, "findings": [], "status": "complete"}))
     v.refresh_due_feeds()
-    assert ran == ["bumblebee", "downloads"] and "home-scan" not in ran
+    steps = [json.loads(l)["progress"]["doing"] for l in capsys.readouterr().out.splitlines() if '"progress"' in l]
+    assert ran == ["list", "bumblebee", "downloads"] and "home-scan" not in ran
+    assert steps.index("Bumblebee list") + 1 == steps.index("Bumblebee scan")
+    assert steps.index("Virus signatures") + 1 == steps.index("Virus scan of ~/Downloads")
+    assert steps[0] == "System update lookup" and "Virus scan of ~" not in steps
     nxt = v.next_daily()
     assert nxt != "now" and nxt                                             # done: due again in a day
-    assert v.next_update() not in ("", "now")
     v.PROGRESS["on"] = False
+
+
+def test_a_failed_list_download_scans_with_the_last_good_list(v, monkeypatch):
+    bee_installed(v)
+    put(Path(v.HOME, ".local/state/omarchy-vigil", v.BUMBLEBEE_CATALOG), "{}")
+    put(Path(v.HOME, ".local/state/omarchy-vigil/bumblebee-list.json"),
+        json.dumps({"at": "2026-10-01", "time": "08:00", "attempted": "2026-10-01"}), 0o600)
+    scanned, real_scan = [], v.refresh_bumblebee
+
+    def fail():
+        raise v.Refused("the list could not be downloaded")
+    monkeypatch.setattr(v, "refresh_bumblebee_list", fail)
+    monkeypatch.setattr(v, "refresh_bumblebee", lambda: scanned.append(1) or v.save_feed(
+        "bumblebee", {"findings": [], "status": "complete", "used": ["2026-10-01", "08:00"]}))
+    res = v.refresh_due_feeds(daily_only=True)
+    assert scanned and "used the one from 2026-10-01" in res["message"]
+    assert {s["id"]: s for s in v.source_status()}["bumblebee"]["note"] == "with the list from Oct 1"
+    assert v.check_bumblebee()["summary"].endswith(", with the list from Oct 1).")
+    # No list at all: the scan cannot run, and says why.
+    os.remove(v.home_path(*v.STATE_DIR, v.BUMBLEBEE_CATALOG))
+    monkeypatch.setattr(v, "refresh_bumblebee", real_scan)
+    res = v.refresh_due_feeds(daily_only=True)
+    assert "Could not finish the Bumblebee list and the Bumblebee scan" in res["message"]
 
 
 def test_a_full_scan_covers_the_daily_downloads_scan(v, monkeypatch):
@@ -2787,27 +2831,34 @@ def test_each_button_runs_its_own_schedule(v, monkeypatch):
     monkeypatch.setattr(v, "feed_available", lambda n: True)
     monkeypatch.setattr(v, "bumblebee_ok", lambda: True)
     monkeypatch.setattr(v, "can_ask_password", lambda: False)
+    monkeypatch.setattr(v, "signatures_due", lambda: False)
+    monkeypatch.setattr(v, "verify_signatures", lambda: "")
     monkeypatch.setattr(v, "flatpak_installations", lambda: [])
     monkeypatch.setattr(v, "exists", lambda p: True)
-    for n in v.SOURCE_FEEDS:
+    for n in ("pending-updates", "flatpak", "arch-audit", "osv", "aur"):
         monkeypatch.setitem(v.FEED_REFRESH, n, lambda n=n: ran.append(n))
-    for fn, n in (("refresh_bumblebee", "bumblebee"), ("refresh_firmware", "firmware"),
-                  ("refresh_downloads_scan", "downloads-scan"), ("refresh_virus_scan", "virus-scan")):
+    for fn, n in (("refresh_bumblebee_list", "bumblebee-list"), ("refresh_bumblebee", "bumblebee"),
+                  ("refresh_firmware", "firmware"), ("refresh_downloads_scan", "downloads-scan"),
+                  ("refresh_virus_scan", "virus-scan")):
         monkeypatch.setattr(v, fn, lambda *a, n=n: ran.append(n))
-    update = ["arch-audit", "osv", "aur", "bumblebee-list"]
-    v.refresh_due_feeds(sources_only=True)
-    assert ran == update
-    ran.clear()
+    daily = ["pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee-list", "bumblebee"]
     v.refresh_due_feeds(daily_only=True)
-    assert ran == ["pending-updates", "flatpak", "bumblebee", "downloads-scan"]
+    assert ran == daily + ["downloads-scan"]
     ran.clear()
     v.refresh_due_feeds(weekly_only=True)
     assert ran == ["firmware", "virus-scan"]
     ran.clear()
-    # Run all: the list update, the daily check, the weekly check; the home
-    # folder scan covers Downloads, so Downloads is not scanned twice.
+    # Run all: the daily check, then the weekly check; the scan of the home
+    # folder covers Downloads, so Downloads is not scanned twice.
     v.refresh_due_feeds(full=True)
-    assert ran == update + ["pending-updates", "flatpak", "bumblebee", "firmware", "virus-scan"]
+    assert ran == daily + ["firmware", "virus-scan"]
+    # Every ClamAV scan comes right after the virus signatures, in every run.
+    for kw in ({"daily_only": True}, {"weekly_only": True}, {"full": True}, {"scan_only": True}, {}):
+        plan = v.run_plan(**kw)
+        for scan in ("downloads-scan", "virus-scan"):
+            if scan in plan:
+                assert plan[plan.index(scan) - 1] == "signatures", (kw, plan)
+        assert "bumblebee" not in plan or plan[plan.index("bumblebee") - 1] == "bumblebee-list"
 
 
 def test_each_button_restarts_its_own_countdown(v, monkeypatch):
@@ -2817,9 +2868,12 @@ def test_each_button_restarts_its_own_countdown(v, monkeypatch):
     monkeypatch.setattr(v, "can_ask_password", lambda: False)
     monkeypatch.setattr(v, "flatpak_installations", lambda: [])
     monkeypatch.setattr(v, "exists", lambda p: True)
-    for n in v.SOURCE_FEEDS:
+    monkeypatch.setattr(v, "signatures_due", lambda: False)
+    monkeypatch.setattr(v, "verify_signatures", lambda: "")
+    for n in ("pending-updates", "flatpak", "arch-audit", "osv", "aur"):
         monkeypatch.setitem(v.FEED_REFRESH, n, lambda n=n: v.save_feed(n, {}))
-    for fn, n in (("refresh_bumblebee", "bumblebee"), ("refresh_firmware", "firmware"),
+    for fn, n in (("refresh_bumblebee_list", "bumblebee-list"), ("refresh_bumblebee", "bumblebee"),
+                  ("refresh_firmware", "firmware"),
                   ("refresh_downloads_scan", "downloads-scan"), ("refresh_virus_scan", "virus-scan")):
         monkeypatch.setattr(v, fn, lambda *a, n=n: v.save_feed(n, {}))
 
@@ -2829,14 +2883,12 @@ def test_each_button_restarts_its_own_countdown(v, monkeypatch):
     def near(s, days):
         return abs(at(s) - (datetime.now() + timedelta(days=days))) < timedelta(minutes=2)
 
-    assert v.next_daily() == v.next_full_scan() == v.next_update() == "now"     # never ran
+    assert v.next_daily() == v.next_full_scan() == "now"                     # never ran
     v.refresh_due_feeds(daily_only=True)
-    assert near(v.next_daily(), 1) and v.next_full_scan() == v.next_update() == "now"
+    assert near(v.next_daily(), 1) and v.next_full_scan() == "now"
     v.refresh_due_feeds(weekly_only=True)
-    assert near(v.next_full_scan(), 7) and v.next_update() == "now"
-    v.refresh_due_feeds(sources_only=True)
-    assert near(v.next_update(), 7)
-    # Run all restarts all three, the daily one included, though it does not
+    assert near(v.next_full_scan(), 7)
+    # Run all restarts both, the daily one included, though it does not
     # scan Downloads on its own (the scan of ~ covered it).
     for name in v.FEED_FILES:                                               # start over: nothing ran yet
         try:
@@ -2845,7 +2897,7 @@ def test_each_button_restarts_its_own_countdown(v, monkeypatch):
             pass
     assert v.next_daily() == "now"
     v.refresh_due_feeds(full=True)
-    assert near(v.next_daily(), 1) and near(v.next_full_scan(), 7) and near(v.next_update(), 7)
+    assert near(v.next_daily(), 1) and near(v.next_full_scan(), 7)
 
 
 def test_the_confirming_rescan_keeps_file_names_out_of_its_arguments(v):

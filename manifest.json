@@ -58,7 +58,7 @@
         "type": "boolean",
         "label": "Background checks",
         "defaultValue": true,
-        "description": "Runs the three schedules by themselves: the daily check (what is new in Downloads, waiting system and Flatpak updates, a Bumblebee scan), the weekly check (firmware, and a ClamAV scan of your home folder, as you) and the weekly list update (known vulnerabilities from security.archlinux.org via arch-audit; known-malicious npm and Bun packages from OSV.dev via osv-scanner, which receives package names and versions, never files; your AUR packages from aur.archlinux.org; Bumblebee's list from Perplexity on GitHub). Each step runs only once its tool is installed. Turn off to run them only with the Run buttons."
+        "description": "Runs the daily and weekly checks by themselves. Every scan gets its list right before it runs. Daily: waiting system and Flatpak updates; known vulnerabilities (arch-audit downloads the tracker from security.archlinux.org); known-malicious npm and Bun packages (osv-scanner sends package names and versions to OSV.dev, never files); your AUR packages (aur.archlinux.org); Perplexity's Bumblebee list from GitHub, then a Bumblebee scan; and a ClamAV scan of what is new in Downloads. Weekly: firmware (LVFS) and a ClamAV scan of your home folder. Each step runs only once its tool is installed; scans run as you, and the background run never asks for a password. Turn off to run them only with the Run now buttons."
       }
     ]
   }

@@ -142,8 +142,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       anything.
 - [x] Every tab groups its rows under headings that say which check brings
       them in (Always current, with when those rows are read; Daily check,
-      Weekly check, List update),
-      when it has more than one. The Care tab splits **In Clean all** from
+      Weekly check), when it has more than one. The Care tab splits **In Clean all** from
       **Not in Clean all**: Orphaned packages and Leftover app data sit at
       the bottom, under a heading and a line that say Clean all never
       touches them.
@@ -151,13 +150,12 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       Care). The Detect tab's intro no longer promises rootkit checks Vigil
       stopped running; it names what it does check.
 - [x] One naming convention. Runs are the only things called a check:
-      Daily check and Weekly check, and the **List update** (was
-      Update check), which downloads Vigil's lists and looks at nothing on
-      your computer. Steps say what they do: a scan reads this computer
-      (Virus scan of ~, Bumblebee scan, Password scan), a lookup asks a tool
-      (System update lookup, Flatpak update lookup, Firmware lookup), and
-      lists are downloaded (Virus signatures, Arch security list, OSV malware
-      list). Rows name what is examined, with the tool in brackets: System
+      the Daily check and the Weekly check. Steps say what they do: a scan
+      reads this computer (Virus scan of ~, Bumblebee scan, Arch security
+      scan, OSV malware scan, Password scan), a lookup asks a tool or a
+      service (System update lookup, Flatpak update lookup, AUR status
+      lookup, Firmware lookup), and a list is downloaded (Bumblebee list,
+      Virus signatures). Rows name what is examined, with the tool in brackets: System
       updates, Flatpak updates, Firmware updates, Infected files (ClamAV),
       Virus signatures (ClamAV), Known vulnerabilities (arch-audit),
       Known-malicious packages (OSV), Known-compromised packages (Bumblebee),
@@ -165,6 +163,28 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       leftovers and false positives carry over. Reading your settings and
       files is not a run: those rows are headed **Always current**, with a
       line saying when they are read.
+- [x] **Every scan gets its list right before it runs.** There is no
+      separate list update any more (its button, countdown, `U` key and
+      tab heading are gone). The daily check runs the Arch security scan
+      (arch-audit downloads the tracker as it scans), the OSV malware scan
+      (osv-scanner asks OSV.dev as it scans), the AUR status lookup, the
+      Bumblebee list followed by the Bumblebee scan, and Virus signatures
+      followed by the virus scan of new downloads; the weekly check checks
+      the signatures again right before the virus scan of `~`. These
+      lookups move from weekly to daily: a few MB a day more.
+- [x] Virus signatures stay root-only: ClamAV's own update service keeps
+      them current, Vigil checks them before every virus scan, and a Run
+      now button updates them first, behind your password and with the
+      command on its card, only when they are over a day old. The
+      background run and a row's Scan now never ask; a scan with old
+      signatures says how old they were.
+- [x] A failed list download no longer stops a scan: it uses the last good
+      list, and its row and its Last run line say "with the list from Oct 1".
+      The Last run list groups every scan and lookup under the run that
+      does it, and has no lines for the lists themselves.
+- [x] No run installs or updates Bumblebee. Only Install, or Install
+      Bumblebee on its row once a Vigil update has raised the pinned
+      version, puts the reviewed version in place.
 - [ ] Later: show launchers that point to a program by name rather than
       by path, once there is a reliable way to know the PATH your session
       uses.

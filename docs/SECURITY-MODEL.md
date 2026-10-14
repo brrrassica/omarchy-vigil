@@ -10,8 +10,8 @@ mechanical ones.
 These hold for every pillar, now and in later phases:
 
 1. **No root from the plugin.** Root steps are constant scripts from
-   `Model.js`, or the helper's two constant pkexec commands (the ClamAV
-   signatures and Bumblebee update, and the password scan). Each is shown
+   `Model.js`, or the helper's two constant pkexec commands (the virus
+   signatures update, and the password scan). Each is shown
    in full on a confirmation in the panel, then run through `pkexec`, so
    Omarchy's own polkit dialog asks for your password each time. Tools that
    ask questions as they go run in a visible terminal: Omarchy's own
@@ -31,9 +31,11 @@ These hold for every pillar, now and in later phases:
    them unprivileged limits what a malicious file can do. What needs root
    runs only from a button you press: the password scan (accounts without
    a password) only in Run all, keeping only account names; Show listeners
-   (`ss -tulpn`, read-only) on its own button; and the ClamAV signature
-   update (freshclam, which downloads signatures and scans nothing) in Run
-   list update and Run all.
+   (`ss -tulpn`, read-only) on its own button; and the virus signature
+   update (freshclam, which downloads signatures and scans nothing), only
+   from a Run now button (Daily check, Weekly check, Run all) and only
+   when the signatures are over a day old. The background run never asks
+   for a password, and neither does a row's Scan now.
 4. **Hand off, don't absorb.** ClamUI keeps quarantine, Black Ops keeps
    telemetry blocking. Vigil reads their results and opens them; it does not
    run their code or write their files, with one exception you confirm:
@@ -48,19 +50,23 @@ These hold for every pillar, now and in later phases:
    markers, and never writes through one. Perplexity's Bumblebee is a
    standalone program Vigil installs from Perplexity's own release and runs
    as you, read-only.
-5. **Maintained sources, never executed.** Vigil keeps no threat lists. Data
-   comes from the tools of the people who maintain it: every day,
+5. **Maintained sources, fresh, never executed.** Vigil keeps no threat
+   lists, and every scan gets its list right before it runs: every day,
    `checkupdates` (your Arch and Omarchy mirrors) and `flatpak remote-ls`
-   (your Flatpak remotes) for waiting updates; every week, fwupd's refresh
-   from LVFS, arch-audit, osv-scanner, Perplexity's Bumblebee catalogs and
-   one fixed AUR lookup; ClamAV's own freshclam service keeps the virus
-   signatures. All of it on those schedules (the `autoUpdate` setting) or
-   when you press a run button. Nothing the background checks fetch is ever
-   run; results are size-capped and validated like any other input. The one
-   program Vigil downloads, Bumblebee, is installed only from a button you
-   press (Install, Update Bumblebee, or the List update and Run all buttons when
-   the installed one is older), never by a background check, at the
-   version pinned in Vigil's code, after its checksum matches.
+   (your Flatpak remotes) for waiting updates, arch-audit (which downloads
+   the Arch tracker as it scans), osv-scanner (which asks OSV.dev as it
+   scans), one fixed AUR lookup, and Perplexity's Bumblebee catalogs right
+   before the Bumblebee scan; every week, fwupd's refresh from LVFS. ClamAV's
+   own freshclam service keeps the virus signatures current, and Vigil
+   checks them right before every virus scan. A failed download never
+   stops a scan: it uses the last good list and says how old it is. All of
+   it on those schedules (the `autoUpdate` setting) or when you press a run
+   button. Nothing the checks fetch is ever run; results are size-capped
+   and validated like any other input. The one program Vigil downloads,
+   Bumblebee, is installed only from a button you press (Install, or
+   Install Bumblebee on its row after a Vigil update raised the pinned
+   version), never by a run, at the version pinned in Vigil's code, after
+   its checksum matches.
 6. **Nothing automatic.** Every change to your system is confirmed. Marking
    a finding as reviewed, a virus detection as a false positive, or a
    leftover as kept, changes only Vigil's own notes and is undone with one
@@ -155,12 +161,22 @@ program it is running, process group and all, and starts no further step.
   `/usr/bin/pkexec /usr/bin/env HOME=<your home> /usr/bin/bash -c`), then
   the script exactly as it is passed, unabridged; for a terminal action, the
   command the terminal runs. The run cards show the helper's root steps the
-  same way: the ClamAV signatures and Bumblebee update (each only when it
-  applies) and, in Run all, the password scan. `Model.js` keeps copies of
+  same way: the virus signatures update (only when they are over a day old,
+  which the report states as `signaturesDue`) and, in Run all, the password
+  scan. The panel lets the helper run the signatures update only when the
+  card you confirmed showed that exact command (`refresh-feeds --daily
+  --signatures`, and likewise for the weekly check and Run all); without the
+  flag the helper never asks for that password, so a card drawn before the
+  signatures grew old cannot lead to a prompt it did not show. `Model.js` keeps copies of
   those two helper scripts, and a test checks they are identical to what the
   helper starts; another checks every card against the plan that runs.
-- The List update button (and Run all) updates ClamAV's signatures only when you press it (the
-  background run never asks), with one constant root script through pkexec: if
+- Right before every virus scan, the helper checks how old the virus
+  signatures are, from the dates of ClamAV's database files and
+  `freshclam.dat` (which ClamAV's service touches on every check), Vigil's
+  own record and ClamUI's log. Over a day old, a Run now button updates
+  them first, at the start of the run while you are at the screen (the
+  background run never asks; it scans with what is there and records how
+  old they were), with one constant root script through pkexec: if
   ClamAV's update service runs, it is woken with `systemctl kill
   --signal=SIGUSR1` (it then checks at once; a second freshclam would fail
   on the service's log lock), and the script waits up to two minutes for the
@@ -172,10 +188,11 @@ program it is running, process group and all, and starts no further step.
   for ClamAV, ClamUI (skipped when you already have it from Flathub),
   arch-audit, osv-scanner and fwupd, then Bumblebee. Everything except
   Bumblebee comes from the Arch repositories, so `omarchy-update` keeps it
-  current. Bumblebee is installed and updated by
-  one constant root script (`BUMBLEBEE_SCRIPT` in `bin/vigil`, identical
-  to `BUMBLEBEE_INSTALL` in `Model.js`; a test checks), used by Install,
-  Update Bumblebee, List update and Run all. It takes no data from the report:
+  current. Bumblebee is installed by one constant root script
+  (`BUMBLEBEE_SCRIPT` in `bin/vigil`, identical to `BUMBLEBEE_INSTALL` in
+  `Model.js`; a test checks), used only by Install and by Install Bumblebee
+  on its row; no run installs or updates it (a test checks). It takes no
+  data from the report:
   it installs exactly `BUMBLEBEE_VERSION` (0.1.2), and the SHA-256 of
   each release archive (amd64 and arm64) is written in `bin/vigil`, so the
   reviewed commit decides which bytes run. Nothing is taken from the
@@ -188,11 +205,10 @@ program it is running, process group and all, and starts no further step.
   --no-same-permissions`), and only a regular file, not a link, is
   installed as `/usr/local/bin/bumblebee`, owned by root, mode 0755. The
   installed program is never run as root: a byte comparison decides
-  whether anything changed. Whether an update is due is checked as you
-  (`bumblebee version`, compared with the pinned version), and only then
-  does the list update add the Bumblebee step to its one password prompt.
-  A newer Bumblebee arrives only with a Vigil update, which goes through
-  the marketplace review again.
+  whether anything changed. Whether the installed one is older than the
+  pinned version is checked as you (`bumblebee version`); only then does
+  its row offer Install Bumblebee. A newer Bumblebee arrives only with a
+  Vigil update, which goes through the marketplace review again.
 - Terminal actions are constant strings in `Model.js`. The report only names
   an action id; an id that is not in the table does nothing. Omarchy tools
   are addressed by absolute path, from one of the two trusted directories,
@@ -337,8 +353,12 @@ by itself, and only once the relevant tool is installed:
   0700), and the confirming list is deleted when that scan ends. File names with a line break or other control
   character are reported as a warning in their own right.
 - Results are parsed with byte caps and strict patterns, and only names,
-  severities, IDs and counts are kept. A failed refresh keeps the last good
-  result and retries after a day, so an offline machine is not hammered.
+  severities, IDs and counts are kept. A failed step keeps the last good
+  result and is tried again the next day, so an offline machine is not
+  hammered. A failed Bumblebee list download leaves the last good list in
+  place; the scan uses it and records which list it used, so its row and
+  its Last run line say how old it was. Each list is fetched at most once
+  per daily check, and only right before the scan that uses it.
 
 Actions you start yourself (package installs, ClamUI, `omarchy-update`)
 say where they connect before they run.

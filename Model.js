@@ -138,7 +138,7 @@ function confirmation(kind, id, report, home) {
   var tools = report && report.tools ? report.tools : {}
   card.commands = kind === "terminal" ? actionCommands(id, tools, home)
     : kind === "clean-all" && cleanAllPlan(report).system ? actionCommands("clean-system", tools, home)
-    : kind === "update-sources" || kind === "full-scan" ? runCommands(kind, report)
+    : kind === "daily-check" || kind === "weekly-check" || kind === "full-scan" ? runCommands(kind, report)
     : []
   return card
 }
@@ -163,17 +163,15 @@ function actionCommands(id, tools, home) {
   return out
 }
 
-// The run cards' root steps, exactly as the helper starts them: the ClamAV
-// signatures and a Bumblebee update behind one password prompt (each only when
-// it applies), and in Run all the password scan. The rest runs as you.
+// The run cards' root steps, exactly as the helper starts them: the virus
+// signatures when they are over a day old (any Run now button; the helper says
+// so in signaturesDue), and in Run all the password scan. The rest runs as you.
 function runCommands(kind, report) {
   if (!report || toolDir(report.tools, "pkexec") === "") return []
-  var signatures = report.sources.some(function(s) { return s.id === "signatures" })
-  var bumblebee = report.checks.some(function(c) { return c.id === "bumblebee" && c.fix.action === "update-bumblebee" })
   var out = []
-  if (signatures || bumblebee)
-    out.push({ who: "As root, through pkexec (Omarchy asks for your password):",
-               text: commandText([PKEXEC, BASH, "-c", rootUpdatesScript(signatures, bumblebee)]) })
+  if (report.signaturesDue)
+    out.push({ who: "As root, through pkexec (Omarchy asks for your password), for the virus signatures:",
+               text: commandText([PKEXEC, BASH, "-c", SIGNATURES_SCRIPT]) })
   if (kind === "full-scan")
     out.push({ who: "As root, through pkexec, for the password scan (only account names are kept):",
                text: commandText([PKEXEC, BASH, "-c", NO_PASSWORD_STEP]) })
@@ -185,7 +183,6 @@ function confirmationText(kind, id, report) {
   if (kind === "ignore") return ignoreConfirmation(id, report)
   if (kind === "trash") return trashConfirmation(id, report)
   if (kind === "trash-all") return trashAllConfirmation(report)
-  if (kind === "update-sources") return updateConfirmation(report)
   if (kind === "full-scan") return fullScanConfirmation(report)
   if (kind === "daily-check") return dailyConfirmation(report)
   if (kind === "weekly-check") return weeklyConfirmation(report)
@@ -394,24 +391,17 @@ var OLD_SERVICES = ["telnet.socket", "rsh.socket", "rlogin.socket", "ftpd.servic
 
 // Installs or updates Bumblebee, as root: the pinned BUMBLEBEE_VERSION, the
 // download capped in bytes and checked against the SHA-256 written in the
-// helper, installed only as a regular file, and never run as root. The helper runs
-// the same script in Run list update. Must equal BUMBLEBEE_SCRIPT in bin/vigil
-// (a test checks).
+// helper, installed only as a regular file, and never run as root. Only the
+// Install buttons run it: no check installs or updates Bumblebee by itself.
+// Must equal BUMBLEBEE_SCRIPT in bin/vigil (a test checks).
 var BUMBLEBEE_VERSION = "0.1.2"
 var BUMBLEBEE_INSTALL = "set -o pipefail\nv=0.1.2\ncase \"$(/usr/bin/uname -m)\" in x86_64) a=amd64; want=53b080cf3ddb692b0c4e5492ef4785b4c54daf1624fcd0fcba3958116a0be8d9 ;; aarch64) a=arm64; want=cb641a1023b12cd7b1411ebef5c7d426f7ecd81770a15a85873c5334a0e6b74d ;; *) echo 'Bumblebee has no build for this computer.'; exit 0 ;; esac\nt=$(/usr/bin/mktemp -d); trap '/usr/bin/rm -rf \"$t\"' EXIT\nf=\"bumblebee_${v}_linux_${a}.tar.gz\"\n/usr/bin/curl -q -fsSL --proto =https --proto-redir =https --max-time 180 --max-filesize 67108864 -- \"https://github.com/perplexityai/bumblebee/releases/download/v${v}/$f\" | /usr/bin/head -c 67108865 > \"$t/$f\" || { echo 'Bumblebee could not be downloaded.'; exit 1; }\nif [ \"$(/usr/bin/stat -c %s \"$t/$f\")\" -gt 67108864 ]; then echo 'The Bumblebee download was too large, so it was not installed.'; exit 1; fi\nhave=$(/usr/bin/sha256sum \"$t/$f\" | /usr/bin/cut -d' ' -f1)\nif [ \"$have\" != \"$want\" ]; then echo \"Bumblebee $v did not match the checksum Vigil has for it, so it was not installed.\"; exit 1; fi\n/usr/bin/tar --no-same-owner --no-same-permissions -xzf \"$t/$f\" -C \"$t\" bumblebee\nif [ ! -f \"$t/bumblebee\" ] || [ -L \"$t/bumblebee\" ]; then echo 'Bumblebee was not a plain program file, so it was not installed.'; exit 1; fi\nif [ -f /usr/local/bin/bumblebee ] && [ ! -L /usr/local/bin/bumblebee ] && /usr/bin/cmp -s \"$t/bumblebee\" /usr/local/bin/bumblebee; then echo \"Bumblebee $v is already installed.\"; exit 0; fi\n/usr/bin/install -D -o root -g root -m 0755 \"$t/bumblebee\" /usr/local/bin/bumblebee\necho \"Bumblebee $v is installed.\"\n"
 
 // The helper's other root steps, so the run cards can show them exactly as the
-// helper runs them. Must equal SIGNATURES_SCRIPT and ROOT_STEP in bin/vigil, and
-// rootUpdatesScript must build what root_updates_argv does (a test checks).
+// helper runs them. Must equal SIGNATURES_SCRIPT and ROOT_STEP in bin/vigil (a
+// test checks).
 var SIGNATURES_SCRIPT = "if /usr/bin/systemctl is-active --quiet clamav-freshclam.service; then start=$(/usr/bin/date +%s); /usr/bin/systemctl kill --signal=SIGUSR1 --kill-whom=main clamav-freshclam.service || exit 4; for i in $(/usr/bin/seq 120); do if /usr/bin/journalctl -u clamav-freshclam.service --since \"@$start\" -o cat --no-pager 2>/dev/null | /usr/bin/grep -qE 'daily\\.c[lv]d (database is up-to-date|updated)'; then exit 0; fi; [ \"$(/usr/bin/stat -c %Y /var/lib/clamav/freshclam.dat 2>/dev/null || echo 0)\" -gt \"$start\" ] && exit 0; /usr/bin/sleep 1; done; exit 3; else /usr/bin/freshclam >/dev/null 2>&1; rc=$?; [ \"$rc\" -le 1 ] || exit 5; fi"
 var NO_PASSWORD_STEP = "/usr/bin/awk -F: '$2 == \"\" { print $1 }' /etc/shadow"
-
-function rootUpdatesScript(signatures, bumblebee) {
-  var parts = []
-  if (signatures) parts.push("( " + SIGNATURES_SCRIPT + " ) >/dev/null 2>&1; echo \"VIGIL-SIG $?\"")
-  if (bumblebee) parts.push("( set -e\n" + BUMBLEBEE_INSTALL + ") >/dev/null 2>&1; echo \"VIGIL-BEE $?\"")
-  return parts.join("\n")
-}
 
 // The user-level scripts that keep notes in ~/.local/state/omarchy-vigil walk
 // there one folder at a time, as the helper does: a link, or anything that is
@@ -637,10 +627,10 @@ var TERMINAL_ACTIONS = {
     run: "/usr/bin/flatpak update --noninteractive && echo 'Your Flatpak apps are up to date.'"
   },
   "update-bumblebee": {
-    title: "Update Bumblebee",
+    title: "Install Bumblebee " + BUMBLEBEE_VERSION,
     what: ["Installs Bumblebee " + BUMBLEBEE_VERSION + " from Perplexity, the version this Vigil was reviewed with.",
            "It is installed only if it matches the checksum written into Vigil.",
-           "List update under Run now on the Overview does this too, behind the same password prompt.",
+           "No check installs or updates Bumblebee by itself: a newer version reaches you only with a Vigil update.",
            "Technical: release archive over HTTPS, size-capped, SHA-256 checked, installed as root to /usr/local/bin/bumblebee"],
     run: BUMBLEBEE_INSTALL
   },
@@ -1148,9 +1138,12 @@ function validCheck(c) {
   }
 }
 
-var SOURCE_IDS = ["signatures", "virus-scan", "arch-audit", "osv", "aur", "password-check", "bumblebee", "firmware",
-                  "pending-updates", "flatpak", "downloads-scan",
-                  "bumblebee-list"]
+// The Last run list: every scan and lookup, grouped by the run that does it.
+// There are no rows for the lists: every scan gets its list right before it
+// runs, and says so (note) when it had to use an older one.
+var SOURCE_IDS = ["pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee", "downloads-scan",
+                  "firmware", "virus-scan", "password-check"]
+var SOURCE_RUNS = ["daily", "weekly", "all"]
 var SOURCE_STATES = ["ok", "stale", "never", "failed"]
 var DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
@@ -1169,16 +1162,13 @@ function parseSources(list) {
     if (!isString(time, 5) || (time !== "" && !/^\d{2}:\d{2}$/.test(time))) return null
     var by = e.by === undefined ? "" : e.by
     if (!inList(by, ["", "ClamUI"])) return null
-    out.push({ id: e.id, label: plain(e.label, 40), date: e.date, time: time, state: e.state, tried: e.tried, by: by })
+    if (!inList(e.run, SOURCE_RUNS)) return null
+    var note = e.note === undefined ? "" : e.note
+    if (!isString(note, 40) || (note !== "" && !/^with (the list|signatures) from [A-Z][a-z]{2} \d{1,2}$/.test(note))) return null
+    out.push({ id: e.id, label: plain(e.label, 40), date: e.date, time: time, state: e.state, tried: e.tried, by: by,
+               run: e.run, note: note })
   }
   return out
-}
-
-function parseLastRun(r) {
-  if (r === undefined) return { at: "", ok: false }
-  if (!r || typeof r !== "object" || !isString(r.at, 16) || typeof r.ok !== "boolean") return null
-  if (r.at !== "" && !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(r.at)) return null
-  return { at: r.at, ok: r.ok }
 }
 
 // "today", "yesterday", or "Oct 3", relative to `now` (a Date).
@@ -1194,44 +1184,31 @@ function relativeDay(date, now) {
 }
 
 function sourceLine(src, now) {
-  // Scans "ran"; databases and signatures are "updated".
-  var scan = SCAN_SOURCES.indexOf(src.id) !== -1
-  if (src.state === "never") return scan ? "not run yet" : "not updated yet"
+  if (src.state === "never") return "not run yet"
   if (src.state === "failed")
-    return (scan ? "last run failed" : "last update failed") + (src.date !== "" ? "; last good " + relativeDay(src.date, now) : "")
+    return "last run failed" + (src.date !== "" ? "; last good " + relativeDay(src.date, now) : "")
   var when = relativeDay(src.date, now) + (src.time ? " at " + src.time : "") + (src.by ? " (by " + src.by + ")" : "")
-  return src.state === "stale" ? "out of date (" + when + ")" : (scan ? "ran " : "updated ") + when
+    + (src.note ? ", " + src.note : "")
+  return src.state === "stale" ? "out of date (" + when + ")" : "ran " + when
 }
 
-function lastRunLine(run, now) {
-  if (!run || run.at === "") return "No update yet. It runs within a day, or press List update under Run now."
-  var time = run.at.substring(11, 16)
-  return "Last update " + relativeDay(run.at, now) + " at " + time
-    + (run.ok ? ". Every source refreshed." : ". Some sources did not refresh; Vigil tries again tomorrow.")
-}
-
-var SCAN_SOURCES = ["virus-scan", "downloads-scan", "bumblebee", "firmware", "password-check"]
+var RUN_HEADINGS = { daily: "Daily check", weekly: "Weekly check", all: "Run all only" }
 
 // The Overview's LAST RUN list: when your settings and files were last read,
-// then every scan,
-// then every source update, each with when it last ran or updated.
+// then each run's scans and lookups under its name, in the order it runs them.
+// A scan that had to use a list over a day old is red, and says how old.
 function lastRunRows(report, now) {
   if (!report) return []
-  var rows = [{ label: "Scans", value: "", heading: true, problem: false },
-              { label: "Your settings and files", heading: false, problem: false,
+  var rows = [{ label: "Your settings and files", heading: false, problem: false,
                 value: "read " + relativeDay(report.generatedAt, now) + " at " + report.generatedAt.substring(11, 16) }]
-  var add = function(scan) {
-    for (var i = 0; i < report.sources.length; i++) {
-      var src = report.sources[i]
-      if ((SCAN_SOURCES.indexOf(src.id) !== -1) !== scan) continue
-      rows.push({ label: src.label, value: sourceLine(src, now), heading: false,
-                  problem: src.state === "failed" || src.state === "stale" })
-    }
+  for (var r = 0; r < SOURCE_RUNS.length; r++) {
+    var group = report.sources.filter(function(src) { return src.run === SOURCE_RUNS[r] })
+    if (group.length === 0) continue
+    rows.push({ label: RUN_HEADINGS[SOURCE_RUNS[r]], value: "", heading: true, problem: false })
+    for (var i = 0; i < group.length; i++)
+      rows.push({ label: group[i].label, value: sourceLine(group[i], now), heading: false,
+                  problem: group[i].state === "failed" || group[i].state === "stale" || group[i].note !== "" })
   }
-  add(true)
-  rows.push({ label: "Updates", value: "", heading: true, problem: false })
-  add(false)
-  if (rows[rows.length - 1].heading) rows.pop()
   return rows
 }
 
@@ -1270,31 +1247,27 @@ function scheduleLines(report, autoUpdate, now, refreshMinutes) {
   var nextCheck = checked ? new Date(checked.getTime() + (refreshMinutes || 30) * 60000) : null
   var out = []
   // What each one runs is in the Last run list, where every row names its
-  // schedule ("daily check", "weekly check", "list update").
+  // run (daily check, weekly check, Run all).
   var d = countdown(report.nextDaily, now, nextCheck)
   if (d !== "") out.push("Next daily check: " + d)
   var f = countdown(report.nextFullScan, now, nextCheck)
   if (f !== "") out.push("Next weekly check: " + f)
-  var u = countdown(report.nextUpdate, now, nextCheck)
-  if (u !== "") out.push("Next list update: " + u)
-  if (report.lastRun && report.lastRun.at !== "" && !report.lastRun.ok)
-    out.push("The last update could not reach every source; Vigil tries again tomorrow.")
   return out
 }
 
 // The two lines under each run button: when that check next runs by itself
 // ("next" over "today 21:40"). Run all has no schedule of its own; it runs
-// the other three at once.
+// both checks at once, plus the password scan.
 function runCaptions(report, autoUpdate, now, refreshMinutes) {
-  var out = { daily: "", weekly: "", update: "", all: "all three\nnow" }
+  var out = { daily: "", weekly: "", all: "both\nnow" }
   if (!report) return out
   if (!autoUpdate) {
-    out.daily = out.weekly = out.update = "by hand\nonly"
+    out.daily = out.weekly = "by hand\nonly"
     return out
   }
   var checked = localDate(report.generatedAt)
   var nextCheck = checked ? new Date(checked.getTime() + (refreshMinutes || 30) * 60000) : null
-  var keys = { daily: report.nextDaily, weekly: report.nextFullScan, update: report.nextUpdate }
+  var keys = { daily: report.nextDaily, weekly: report.nextFullScan }
   for (var k in keys) {
     var when = countdown(keys[k], now, nextCheck)
     out[k] = when === "" ? "" : "next\n" + when.replace(" at ", " ")
@@ -1306,8 +1279,6 @@ function runCaptions(report, autoUpdate, now, refreshMinutes) {
 function scheduleNotes(report, autoUpdate) {
   if (!report) return []
   if (!autoUpdate) return ["Background checks are off (Vigil settings): they run only when you press a button."]
-  if (report.lastRun && report.lastRun.at !== "" && !report.lastRun.ok)
-    return ["The last update could not reach every source; Vigil tries again tomorrow."]
   return []
 }
 
@@ -1326,7 +1297,7 @@ function heroMeta(report, tab, checking, now) {
 // The key hints at the bottom, for the tab you are on.
 function keyHints(tab, version) {
   var keys = ["\u2190 \u2192 or 1\u20136 tabs"]
-  if (tab === "overview") keys.push("R run all", "U list update")
+  if (tab === "overview") keys.push("R run all")
   else keys.push("\u2191 \u2193 rows", "Enter details", "F fix", "D reviewed")
   if (tab === "care") keys.push("C clean all")
   return keys.join(" \u00b7 ") + (version ? " \u00b7 Vigil " + version : "")
@@ -1427,70 +1398,83 @@ function runLines(report, ids) {
     for (var i = 0; i < report.sources.length; i++) if (report.sources[i].id === id) return true
     return false
   }
+  // A list or the signatures go on the card only with the scan they come before.
+  var shown = function(i) {
+    if (ids[i] === "bumblebee-list") return has("bumblebee")
+    if (ids[i] === "signatures") return i + 1 < ids.length && has(ids[i + 1])
+    if (ids[i] === "signatures-update") return report.signaturesDue === true
+    return has(ids[i])
+  }
   var what = {
-    "downloads-scan": "Virus scan of ~/Downloads: what is new there since the last scan.",
+    "signatures-update": "Virus signatures update: they are over a day old (ClamAV's own update service is off or"
+      + " offline), so Vigil updates them first. Omarchy asks for your password.",
+    "password-check": "Password scan: every account has a password. Omarchy asks for your password.",
     "pending-updates": "System update lookup: waiting system and Omarchy updates (nothing is installed).",
     "flatpak": "Flatpak update lookup, and the updates for your own Flatpak apps (no password).",
-    "bumblebee": "Bumblebee scan: your npm, Bun and other packages against the Bumblebee list.",
-    "virus-scan": "Virus scan of ~: your whole home folder, Downloads included. This can take a while.",
+    "arch-audit": "Arch security scan: downloads the Arch security team's newest list, then compares your packages with it.",
+    "osv": "OSV malware scan: checks your npm and Bun packages against OSV.dev as it runs.",
+    "aur": "AUR status lookup: asks the AUR whether your AUR packages are still maintained.",
+    "bumblebee-list": "Bumblebee list: downloads Perplexity's newest list of compromised packages.",
+    "bumblebee": "Bumblebee scan: your npm, Bun and other packages against that list.",
+    "signatures": "Virus signatures: makes sure ClamAV's are current; its own update service keeps them so.",
+    "downloads-scan": "Virus scan of ~/Downloads: what is new there since the last scan.",
     "firmware": "Firmware lookup: firmware updates for this computer, from LVFS.",
-    "password-check": "Password scan: every account has a password. Omarchy asks for your password.",
-    "signatures": "Virus signatures (ClamAV). Omarchy asks for your password, because ClamAV keeps them in a system folder.",
-    "arch-audit": "Arch security list: known holes in your packages, from the Arch security team.",
-    "osv": "OSV malware list: malicious npm and Bun packages, from OSV.dev.",
-    "aur": "AUR package status: whether your AUR packages are still maintained.",
-    "bumblebee-list": "Bumblebee list: known-compromised packages, from Perplexity. An older Bumblebee is"
-      + " updated to " + BUMBLEBEE_VERSION + " with the same password prompt as the signatures."
+    "virus-scan": "Virus scan of ~: your whole home folder, Downloads included. This can take a while."
   }
   var lines = [], n = 1
   for (var i = 0; i < ids.length; i++)
-    if (has(ids[i])) lines.push((n++) + ". " + what[ids[i]])
+    if (shown(i)) lines.push((n++) + ". " + what[ids[i]])
   return lines
 }
 
-var UPDATE_IDS = ["signatures", "arch-audit", "osv", "aur", "bumblebee-list"]
-var DAILY_IDS = ["pending-updates", "flatpak", "bumblebee", "downloads-scan"]
-var WEEKLY_IDS = ["firmware", "virus-scan"]
+// Each scan comes right after its list: the Bumblebee list before the
+// Bumblebee scan, the virus signatures before each virus scan.
+var DAILY_IDS = ["pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee-list", "bumblebee", "signatures",
+                 "downloads-scan"]
+var WEEKLY_IDS = ["firmware", "signatures", "virus-scan"]
 var DONE_LINE = "The panel shows the progress, and you get a notification when it is done."
-
-// Run list update: the lists Vigil checks against, and the one step that asks.
-function updateConfirmation(report) {
-  if (!report) return null
-  var lines = runLines(report, UPDATE_IDS)
-  if (lines.length === 0) lines = ["Nothing to update yet. Install ClamAV, arch-audit or osv-scanner (Detect and Supply tabs) to add them."]
-  else lines.unshift("Downloads the latest of everything Vigil checks against:")
-  lines.push("No scan runs. " + DONE_LINE)
-  lines.push("Technical: wake clamav-freshclam (pkexec), arch-audit --upgradable, osv-scanner, an AUR lookup and Perplexity threat_intel, both with curl")
-  return { title: "Run list update", lines: lines }
-}
 
 // Run daily check: light work, no password.
 function dailyConfirmation(report) {
   if (!report) return null
   return { title: "Run daily check", lines: ["Runs the daily check now, in this order:"]
-    .concat(runLines(report, DAILY_IDS)).concat([CARE_RUN_LINE, "No password needed. " + DONE_LINE]) }
+    .concat(runLines(report, ["signatures-update"].concat(DAILY_IDS)))
+    .concat([CARE_RUN_LINE, passwordLine(report) + DONE_LINE]) }
+}
+
+// Whether a confirmation card shows the virus signatures update among its
+// commands: only then does the panel let the helper run it.
+function cardShowsSignatures(card) {
+  if (!card || !Array.isArray(card.commands)) return false
+  return card.commands.some(function(c) { return c && c.text === commandText([PKEXEC, BASH, "-c", SIGNATURES_SCRIPT]) })
+}
+
+// Whether a Run now button asks for your password, in words.
+function passwordLine(report) {
+  return report.signaturesDue ? "Omarchy asks for your password first, for the virus signatures. "
+                              : "No password needed. "
 }
 
 // Run weekly check: the long one.
 function weeklyConfirmation(report) {
   if (!report) return null
-  var lines = runLines(report, WEEKLY_IDS)
+  var lines = runLines(report, ["signatures-update"].concat(WEEKLY_IDS))
   if (lines.length === 0) lines = ["Nothing to run yet. Install ClamUI (Detect tab) to add the scan of your home folder."]
   return { title: "Run weekly check", lines: ["Runs the weekly check now, in this order:"]
-    .concat(lines).concat(["No password needed. You can close this panel. " + DONE_LINE]) }
+    .concat(lines).concat([passwordLine(report) + "You can close this panel. " + DONE_LINE]) }
 }
 
-// Run all: the list update, the daily check and the weekly check, plus the
-// password scan. The scan of your home folder covers Downloads, so Downloads
-// is not scanned twice. The steps that ask for your password come first.
+// Run all: the daily check and the weekly check, plus the password scan. The
+// scan of your home folder covers Downloads, so Downloads is not scanned
+// twice. The steps that ask for your password come first.
 function fullScanConfirmation(report) {
   if (!report) return null
-  var ids = UPDATE_IDS.slice(0, 1).concat(["password-check"]).concat(UPDATE_IDS.slice(1))
-    .concat(DAILY_IDS.filter(function(id) { return id !== "downloads-scan" })).concat(WEEKLY_IDS)
-  return { title: "Run all", lines: ["Runs the list update, the daily check and the weekly check, in this order:"]
+  var ids = ["signatures-update", "password-check"]
+    .concat(DAILY_IDS.filter(function(id) { return id !== "downloads-scan" && id !== "signatures" })).concat(WEEKLY_IDS)
+  return { title: "Run all", lines: ["Runs the daily check and the weekly check, in this order:"]
     .concat(runLines(report, ids))
     .concat(["The virus scan of ~ includes Downloads, so ~/Downloads is not scanned twice.", CARE_RUN_LINE,
-             "Omarchy asks for your password at the start, up to twice. " + DONE_LINE]) }
+             "Omarchy asks for your password at the start" + (report.signaturesDue ? ", twice. " : ". ") + DONE_LINE]) }
 }
 
 function parseHistory(h) {
@@ -1530,7 +1514,6 @@ function reportProblem(text) {
     }
   }
   if (parseSources(d.sources) === null) return "the Last run list"
-  if (parseLastRun(d.lastRun) === null) return "the last update"
   if (parseHistory(d.history) === null) return "the score history"
   if (d.running !== undefined && parseRunningValue(d.running) === undefined) return "the running scan"
   return "the report"
@@ -1584,20 +1567,14 @@ function parseReport(text) {
   var history = parseHistory(d.history)
   if (!history) return null
   if (d.feedsDue !== undefined && typeof d.feedsDue !== "boolean") return null
-  var feedsUpdated = ""
-  if (d.feedsUpdated !== undefined && d.feedsUpdated !== "") {
-    if (!isString(d.feedsUpdated, 10) || !/^\d{4}-\d{2}-\d{2}$/.test(d.feedsUpdated)) return null
-    feedsUpdated = d.feedsUpdated
-  }
+  if (d.signaturesDue !== undefined && typeof d.signaturesDue !== "boolean") return null
   var sources = parseSources(d.sources)
-  var lastRun = parseLastRun(d.lastRun)
-  if (!sources || !lastRun) return null
+  if (!sources) return null
   // "" (nothing set up), "now" (due already), or a local "YYYY-MM-DD HH:MM".
   var optionalDate = function(v) {
     if (v === undefined || v === "" || v === "now") return v === undefined ? "" : v
     return isString(v, 16) && /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?$/.test(v) ? v : null
   }
-  var nextUpdate = optionalDate(d.nextUpdate)
   var nextFullScan = optionalDate(d.nextFullScan)
   var nextDaily = optionalDate(d.nextDaily)
   var missing = []
@@ -1611,19 +1588,17 @@ function parseReport(text) {
       missing.push(d.missing[mi])
     }
   }
-  if (nextUpdate === null || nextFullScan === null || nextDaily === null) return null
+  if (nextFullScan === null || nextDaily === null) return null
   var running = parseRunningValue(d.running)
   if (running === undefined) return null
   return {
     running: running,
     sources: sources,
-    lastRun: lastRun,
-    nextUpdate: nextUpdate,
     nextFullScan: nextFullScan,
     nextDaily: nextDaily,
     missing: missing,
     feedsDue: d.feedsDue === true,
-    feedsUpdated: feedsUpdated,
+    signaturesDue: d.signaturesDue === true,
     history: history,
     version: plain(d.version, 20), generatedAt: plain(d.generatedAt, 40),
     score: Math.round(d.score), level: d.level, checks: checks, tools: tools, apps: apps, fresh: fresh
@@ -1657,12 +1632,10 @@ function withSettings(report, autoUpdate) {
   return out
 }
 
-// The schedule each tab row belongs to: 1 daily check, 2 weekly check,
-// 3 list update. Every other row is always current (0): read again
-// with every check, the daily one included.
+// The run each tab row belongs to: 1 daily check, 2 weekly check. Every
+// other row is always current (0): read again whenever you open Vigil.
 var CHECK_SCHEDULE = { "virus-scan": 1, "updates": 1, "flatpak-apps": 1, "bumblebee": 1, "firmware": 2,
-                       "scanner-arch-audit": 3, "malicious-packages": 3, "aur-status": 3,
-                       "scanner-clamav": 3 }
+                       "scanner-arch-audit": 1, "malicious-packages": 1, "aur-status": 1 }
 
 // Care rows that are never part of Clean all: removing packages, or settings
 // you might want back, deserves a look item by item. They sort last on the
@@ -1697,7 +1670,7 @@ function currentNote(refreshMinutes) {
   return "Read again from your settings and files whenever you open Vigil, after every fix, and " + every + "."
 }
 
-var GROUP_HEADINGS = { 0: CURRENT_HEADING, 1: "DAILY CHECK", 2: "WEEKLY CHECK", 3: "LIST UPDATE", 100: CARE_SEPARATE_HEADING }
+var GROUP_HEADINGS = { 0: CURRENT_HEADING, 1: "DAILY CHECK", 2: "WEEKLY CHECK", 100: CARE_SEPARATE_HEADING }
 
 // The heading above a row, or "": at the start of each group, on tabs that
 // have more than one. The Care tab names its groups for Clean all.
@@ -1725,7 +1698,7 @@ function checksFor(report, category) {
   for (var i = 0; i < report.checks.length; i++)
     if (report.checks[i].category === category) out.push(report.checks[i])
   // Grouped like the Last run list: the always-current rows first, then
-  // the daily check, weekly check, list update and ClamAV's own updates.
+  // the daily check and the weekly check.
   // Within a group, worst first; reviewed warnings sort after the
   // information rows, just above "pass".
   // On the Care tab, what Clean all leaves alone comes last.
@@ -1858,7 +1831,7 @@ function tabCounts(report, tab) {
 }
 
 var CARE_NOTE = "Care is separate from security: it never counts toward the score, and the checks above never clean anything. Vigil cleans only when you press a button on the Care tab."
-var CARE_TAB_NOTE = "Separate from security: not part of the score, the daily check, the weekly check or the list update. Nothing is cleaned until you press a button."
+var CARE_TAB_NOTE = "Separate from security: not part of the score, the daily check or the weekly check. Nothing is cleaned until you press a button."
 var CARE_RUN_LINE = "Nothing on the Care tab is cleaned: that happens only when you press a button there."
 
 function categoryLabel(category) {
@@ -1909,9 +1882,10 @@ if (typeof module !== "undefined") {
     CARE_SEPARATE_HEADING: CARE_SEPARATE_HEADING, CARE_SEPARATE_NOTE: CARE_SEPARATE_NOTE, CARE_TAB_NOTE: CARE_TAB_NOTE, CARE_RUN_LINE: CARE_RUN_LINE, tabIntro: tabIntro, cleanAllPlan: cleanAllPlan,
     howTo: howTo, docsUrl: docsUrl, docsCommand: docsCommand, DOCS: DOCS, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
     shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
-    relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine, countdown: countdown, scheduleLines: scheduleLines,
+    relativeDay: relativeDay, sourceLine: sourceLine, countdown: countdown, scheduleLines: scheduleLines,
     BUMBLEBEE_INSTALL: BUMBLEBEE_INSTALL, BUMBLEBEE_VERSION: BUMBLEBEE_VERSION,
-    SIGNATURES_SCRIPT: SIGNATURES_SCRIPT, NO_PASSWORD_STEP: NO_PASSWORD_STEP, rootUpdatesScript: rootUpdatesScript,
+    SIGNATURES_SCRIPT: SIGNATURES_SCRIPT, NO_PASSWORD_STEP: NO_PASSWORD_STEP,
+    SOURCE_IDS: SOURCE_IDS, DAILY_IDS: DAILY_IDS, WEEKLY_IDS: WEEKLY_IDS, cardShowsSignatures: cardShowsSignatures,
     parseProgress: parseProgress, parseRunning: parseRunning, detectionItem: detectionItem, leftoverItem: leftoverItem, leftoverTrashIds: leftoverTrashIds, actionStage: actionStage, actionProgress: actionProgress,
     actionOutputText: actionOutputText, progressText: progressText, lastRunRows: lastRunRows, missingLabel: missingLabel,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,

@@ -11,15 +11,16 @@ with a cleared environment, and reads exactly one JSON object from stdout.
 Rules this file keeps (they follow the marketplace review guidance):
 
 - It runs as you, and never runs a file from the plugin folder as root. Its
-  only root steps are two constant pkexec commands, started only by a run
-  button you pressed, never in the background: the ClamAV signatures and
-  Bumblebee update (root_updates_argv; Run list update, Run all) and the
-  password scan (NO_PASSWORD_ARGV; Run all). The panel shows both in full on
-  the confirmation card first. Every other root step is a constant script
-  from Model.js that the panel runs the same way.
+  only root steps are two constant pkexec commands, started only by a Run
+  now button you pressed, never in the background: the virus signatures,
+  only when they are over a day old (SIGNATURES_ARGV; Daily check, Weekly
+  check, Run all), and the password scan (NO_PASSWORD_ARGV; Run all). The
+  panel shows both in full on the confirmation card first. Every other root
+  step is a constant script from Model.js that the panel runs the same way.
 - Its network use is the checks' own tools (arch-audit, osv-scanner,
   checkupdates, flatpak, fwupdmgr) and two curl calls to fixed addresses (the
-  AUR and Perplexity's Bumblebee lists). Nothing it downloads is ever run.
+  AUR and Perplexity's Bumblebee lists). Every scan gets its list right
+  before it runs. Nothing it downloads is ever run.
 - If the plugin is removed while a scan or update runs, it stops within
   seconds (plugin_removed), so removal leaves nothing running.
 - Every child process is an absolute path, runs in its own session with a
@@ -1160,7 +1161,7 @@ _PACMAN_TS = re.compile(r"^\[(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})")
 
 
 def pending_updates(last_update):
-    """(count, omarchy) from the last list update, if it ran after the last
+    """(count, omarchy) from the last system update lookup, if it ran after the last
     full update (an older check is out of date by then), else None."""
     cache = feed_cache("pending-updates") if feed_available("pending-updates") else None
     if not cache or not isinstance(cache.get("count"), int) or isinstance(cache.get("count"), bool):
@@ -1385,8 +1386,9 @@ SCANNERS = [
      "", "install-clamav"),
     ("arch-audit", "arch-audit", "supply", "Known vulnerabilities (arch-audit)",
      "arch-audit checks your installed packages against the Arch security team's tracker and lists the "
-     "ones where an update fixes a published vulnerability. Vigil refreshes it once a week (it contacts "
-     "security.archlinux.org); Check now does it straight away.", "run-arch-audit", "install-arch-audit"),
+     "ones where an update fixes a published vulnerability. Each daily check downloads the tracker again "
+     "(from security.archlinux.org) right before it compares; Check now does it straight away.",
+     "run-arch-audit", "install-arch-audit"),
 ]
 
 
@@ -1502,37 +1504,21 @@ def can_update_signatures():
     return can_ask_password() and is_trusted_executable(sys_path("/usr/bin/freshclam"))
 
 
-def root_updates_argv(signatures, bumblebee):
-    """One password prompt for everything Run list update (and Run all) does as root. Each part
-    runs in its own subshell and reports its own exit code on a marker line."""
-    parts = []
-    if signatures:
-        parts.append("( %s ) >/dev/null 2>&1; echo \"VIGIL-SIG $?\"" % SIGNATURES_SCRIPT)
-    if bumblebee:
-        parts.append("( set -e\n%s) >/dev/null 2>&1; echo \"VIGIL-BEE $?\"" % BUMBLEBEE_SCRIPT)
-    return [PKEXEC, "/usr/bin/bash", "-c", "\n".join(parts)]
+# The one root step a run can take besides the password scan: updating the
+# virus signatures, only from a Run now button you pressed (its card shows this
+# exact command first) and only when they are over a day old. The background
+# run never asks; ClamAV's own update service keeps them current.
+SIGNATURES_ARGV = [PKEXEC, "/usr/bin/bash", "-c", SIGNATURES_SCRIPT]
 
 
-def refresh_root_updates(signatures, bumblebee):
-    """Virus signatures and/or a Bumblebee update behind one password prompt.
-    Returns notes for the result message; raises only when nothing could run."""
-    rc, out = run(root_updates_argv(signatures, bumblebee), timeout=600, limit=64 * 1024)
+def refresh_signatures():
+    rc, _ = run(SIGNATURES_ARGV, timeout=600, limit=64 * 1024)
     if rc in (126, 127):
         raise Refused("no password was given")
-    codes = dict(re.findall(r"^VIGIL-(SIG|BEE) (\d{1,3})$", out or "", re.M))
-    notes = []
-    if signatures:
-        if codes.get("SIG") == "0":
-            save_feed("signatures", {})
-        else:
-            notes.append("The virus signatures were not updated: %s." % SIGNATURE_ERRORS.get(
-                int(codes.get("SIG", "1")), "ClamAV could not update them"))
-    if bumblebee:
-        notes.append("Bumblebee was updated." if codes.get("BEE") == "0"
-                     else "Bumblebee could not be updated now; Vigil tries again with the next update.")
-    if signatures and codes.get("SIG") != "0" and not (bumblebee and codes.get("BEE") == "0"):
-        raise Refused(notes[0][len("The virus signatures were not updated: "):-1])
-    return notes
+    if rc != 0:
+        raise Refused(SIGNATURE_ERRORS.get(rc, "ClamAV could not update them"))
+    save_feed("signatures", {})
+    return "Virus signatures updated."
 
 
 def missing_helpers():
@@ -1725,20 +1711,23 @@ for _spec in SCANNERS:
 
 
 # ---------------------------------------------------------------------------
-# Maintained sources ("feeds"). Vigil keeps no threat lists of its own. Each
-# feed is refreshed from the people who maintain it: once a week in the
-# background (the panel's autoUpdate setting, on by default) or when you
-# press Check now. A failed refresh is retried after a day. Results are
-# cached in the state folder; checks read only the cache.
+# Scans and lookups ("feeds"). Vigil keeps no threat lists of its own, and it
+# never scans with a list it did not just fetch: every scan gets the newest
+# list from the people who maintain it right before it runs. arch-audit,
+# osv-scanner and the AUR lookup fetch theirs as they run; the Bumblebee scan
+# runs right after its list is downloaded; every ClamAV scan runs right after
+# Vigil makes sure the virus signatures are current. If a download fails, the
+# scan uses the last good list and says how old it is. Results are cached in
+# the state folder; checks read only the cache. A failed step is tried again
+# the next day.
 
 FEED_FILES = {"arch-audit": "arch-audit.json", "osv": "osv.json", "aur": "aur.json", "virus-scan": "virus-scan.json",
               "full-scan": "full-scan.json", "signatures": "signatures.json",
               "bumblebee-list": "bumblebee-list.json", "bumblebee": "bumblebee.json",
               "pending-updates": "pending-updates.json", "firmware": "firmware.json", "flatpak": "flatpak.json",
               "downloads-scan": "downloads-scan.json"}
-# Two weekly timers: the list update, and the weekly check
-# (the virus scan of the home folder and firmware); the daily check daily.
-SOURCE_FEEDS = ("pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee-list")
+# Two timers: the daily check (each step a day after it last finished) and
+# the weekly check (firmware and the virus scan of the home folder).
 FEED_DAYS = 7
 FEED_RETRY_DAYS = 1
 
@@ -1792,10 +1781,11 @@ def feed_available(name):
     return False
 
 
-# The daily check: light work, no password, seconds (a scan of what is new in
-# Downloads, the update and Flatpak checks, Bumblebee over your packages).
-# Everything else is weekly: the lists, the whole home folder, firmware.
-DAILY_FEEDS = ("downloads-scan", "pending-updates", "flatpak", "bumblebee")
+# The daily check, in the order it runs: the update lookups, then each scan
+# right after its list (a minute or two, no password in the background). The
+# weekly check is firmware and the whole home folder.
+DAILY_FEEDS = ("pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee", "downloads-scan")
+WEEKLY_FEEDS = ("firmware", "virus-scan")
 FEED_INTERVAL = {n: 1 for n in DAILY_FEEDS}
 
 
@@ -1828,11 +1818,6 @@ def feed_due(name):
     return _due_at(_state_json(FEED_FILES[name]) or {}, FEED_INTERVAL.get(name, FEED_DAYS)) is None
 
 
-def next_update():
-    """When the next weekly update falls due: the earliest of the available weekly sources."""
-    return _next_due([n for n in SOURCE_FEEDS if n not in DAILY_FEEDS])
-
-
 def next_daily():
     """When the next daily check falls due."""
     return _next_due(DAILY_FEEDS)
@@ -1854,32 +1839,6 @@ def _next_due(names):
             return "now"
         nxt = due if nxt is None else min(nxt, due)
     return nxt.strftime("%Y-%m-%d %H:%M") if nxt else ""
-
-
-RUN_NAME = "last-run.json"
-
-
-def save_last_run(ok, forced):
-    try:
-        dirfd = _state_dir()
-    except (OSError, Refused):
-        return
-    try:
-        _lock(dirfd)
-        body = {"schema": SCHEMA, "at": time.strftime("%Y-%m-%d %H:%M"), "ok": bool(ok), "forced": bool(forced)}
-        write_atomic(dirfd, RUN_NAME, json.dumps(body, separators=(",", ":")).encode())
-    except OSError:
-        pass
-    finally:
-        os.close(dirfd)
-
-
-def last_run():
-    data = _state_json(RUN_NAME)
-    if not isinstance(data, dict) or not isinstance(data.get("at"), str) \
-            or not re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", data["at"]):
-        return {"at": "", "ok": False}
-    return {"at": data["at"], "ok": data.get("ok") is True}
 
 
 def _mtime_stamp(paths):
@@ -1934,20 +1893,65 @@ def _newer(a, b):
     return a if (a[0], a[1]) >= (b[0], b[1]) else b
 
 
+SIGNATURE_FILES = ("daily.cld", "daily.cvd", "main.cld", "main.cvd", "bytecode.cld", "bytecode.cvd", "freshclam.dat")
+SIGNATURES_FRESH_HOURS = 24
+
+
+def signatures_updated():
+    """(date, HH:MM) when ClamAV's virus signatures were last brought up to date,
+    or ("", ""): by ClamAV's own update service (freshclam.dat changes on every
+    check, even when nothing new came out), by Vigil, or by ClamUI."""
+    d, t = _mtime_stamp([sys_path("/var/lib/clamav/" + n) for n in SIGNATURE_FILES])
+    meta = _state_json(FEED_FILES["signatures"]) or {}
+    mine = (meta.get("at", ""), meta.get("time", "")) if isinstance(meta.get("at"), str) and \
+        _DATE.match(meta.get("at", "")) and isinstance(meta.get("time"), str) else ("", "")
+    return _newer(clamui_last("update"), _newer(mine, (d, t)))
+
+
+def _hours_since(stamp):
+    """Hours since a (date, HH:MM) pair (a list, once read back from JSON), or None."""
+    try:
+        return (time.time() - time.mktime(time.strptime("%s %s" % tuple(stamp), "%Y-%m-%d %H:%M"))) / 3600.0
+    except (TypeError, ValueError):
+        return None
+
+
+def signatures_due():
+    """True when a Run now button would update the virus signatures first: ClamAV
+    is installed and its signatures are over a day old, which means its own
+    update service is off or offline. Only ever behind your password."""
+    if not (feed_available("virus-scan") and can_update_signatures()):
+        return False
+    age = _hours_since(signatures_updated())
+    return age is None or age > SIGNATURES_FRESH_HOURS
+
+
+def _age_note(stamp, what):
+    """ "with the list from Oct 12" when a scan used something over a day old, else ""."""
+    age = _hours_since(stamp) if isinstance(stamp, (list, tuple)) and len(stamp) == 2 else None
+    if age is None or age <= SIGNATURES_FRESH_HOURS:
+        return ""
+    try:
+        return "with %s from %s" % (what, time.strftime("%b %-d", time.strptime(stamp[0], "%Y-%m-%d")))
+    except ValueError:
+        return ""
+
+
 def source_status():
-    """When each scan last ran and each source last updated, for the Overview.
-    Scans first, then updates; each in schedule order."""
+    """When each scan and lookup last ran, for the Overview's Last run list,
+    grouped by the run that does it (daily check, weekly check, Run all) and in
+    the order it runs them. A scan that had to use an old list says so."""
     out = []
 
-    def add(sid, label, date_, time_, state, tried="", by=""):
-        out.append({"id": sid, "label": label, "date": date_, "time": time_, "state": state, "tried": tried,
-                    "by": by})
+    def add(sid, run_, date_, time_, state, tried="", by="", note=""):
+        out.append({"id": sid, "label": ITEM_NAME[sid], "run": run_, "date": date_, "time": time_, "state": state,
+                    "tried": tried, "by": by, "note": note})
 
     def fresh(d, days):
         age = _days_since(d)
         return "never" if not d else ("ok" if age is not None and age <= days else "stale")
 
-    def feed(name, label):
+    def feed(name, run_, note=""):
         meta = _state_json(FEED_FILES[name]) or {}
         at = meta.get("at") if isinstance(meta.get("at"), str) and _DATE.match(meta.get("at")) else ""
         tm = meta.get("time") if isinstance(meta.get("time"), str) and re.fullmatch(r"\d{2}:\d{2}", meta["time"]) else ""
@@ -1958,59 +1962,26 @@ def source_status():
             state = "failed"
         else:
             state = fresh(at, FEED_INTERVAL.get(name, FEED_DAYS) + FEED_RETRY_DAYS)
-        add(name, label, at, tm if at else "", state, tried if state == "failed" else "")
+        used = meta.get("used") if isinstance(meta.get("used"), list) else None
+        add(name, run_, at, tm if at else "", state, tried if state == "failed" else "",
+            note=_age_note(used, note) if note and at else "")
 
-    # Each group in the order of the schedule lines: daily check, weekly check,
-    # list update.
-    if feed_available("downloads-scan"):
-        feed("downloads-scan", ITEM_NAME["downloads-scan"] + DAILY)
-    if feed_available("bumblebee"):
-        feed("bumblebee", ITEM_NAME["bumblebee"] + DAILY)
+    for name in DAILY_FEEDS:
+        if feed_available(name):
+            feed(name, "daily", {"bumblebee": "the list", "downloads-scan": "signatures"}.get(name, ""))
+    if feed_available("firmware"):
+        feed("firmware", "weekly")
     if feed_available("virus-scan"):
-        feed("virus-scan", ITEM_NAME["virus-scan"] + WEEKLY)
+        feed("virus-scan", "weekly", "signatures")
         ext = clamui_last("scan")                       # a scan you ran in ClamUI counts too
         mine = out[-1]
         if ext[0] and _newer(ext, (mine["date"], mine["time"])) == ext and ext != (mine["date"], mine["time"]):
             out[-1] = dict(mine, date=ext[0], time=ext[1], state=fresh(ext[0], FEED_DAYS + FEED_RETRY_DAYS),
-                           tried="", by="ClamUI")
-    if feed_available("firmware"):
-        feed("firmware", ITEM_NAME["firmware"] + WEEKLY)
+                           tried="", by="ClamUI", note="")
     d, _ = no_password_scan()
     _, t = _mtime_stamp([home_path(*STATE_DIR, NO_PASSWORD_NAME)]) if d else ("", "")
-    add("password-check", ITEM_NAME["password-check"] + " (Run all only)", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
-    for name in ("pending-updates", "flatpak"):
-        if feed_available(name):
-            feed(name, ITEM_NAME[name] + DAILY)
-    if is_trusted_executable(sys_path("/usr/bin/clamscan")):
-        # Whoever updated them: ClamAV's own service (freshclam.dat changes on
-        # every check, even when nothing new came out), Vigil, or ClamUI.
-        d, t = _mtime_stamp([sys_path("/var/lib/clamav/" + n) for n in
-                             ("daily.cld", "daily.cvd", "main.cld", "main.cvd", "bytecode.cld", "bytecode.cvd",
-                              "freshclam.dat")])
-        meta = _state_json(FEED_FILES["signatures"]) or {}
-        mine = (meta.get("at", ""), meta.get("time", "")) if isinstance(meta.get("at"), str) and \
-            _DATE.match(meta.get("at", "")) and isinstance(meta.get("time"), str) else ("", "")
-        d, t = _newer(mine, (d, t))
-        ext = clamui_last("update")
-        by = "ClamUI" if ext[0] and _newer(ext, (d, t)) == ext and ext != (d, t) else ""
-        d, t = _newer(ext, (d, t))
-        add("signatures", ITEM_NAME["signatures"] + UPDATE, d, t, fresh(d, FEED_DAYS), by=by)
-    for name in ("arch-audit", "osv", "aur", "bumblebee-list"):
-        if feed_available(name):
-            feed(name, ITEM_NAME[name] + UPDATE)
+    add("password-check", "all", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
     return out
-
-
-def feeds_updated():
-    """The oldest completed date among the available feeds, or ''."""
-    dates = []
-    for name in SOURCE_FEEDS:
-        if feed_available(name):
-            cache = feed_cache(name)
-            if cache is None:
-                return ""
-            dates.append(cache["at"])
-    return min(dates) if dates else ""
 
 
 def save_feed(name, body, ok=True, retry_days=None):
@@ -2040,7 +2011,7 @@ def refresh_arch_audit():
         save_feed("arch-audit", {}, ok=False)
         raise Refused("arch-audit did not finish (no network, or it took too long)")
     save_feed("arch-audit", {"packages": pkgs})
-    return "Vulnerability database refreshed. " + (
+    return "Checked your packages against the newest Arch security list. " + (
         "Updating would fix %d known vulnerabilit%s on this machine." % (len(pkgs), "y" if len(pkgs) == 1 else "ies")
         if pkgs else "No updates are waiting that fix a known vulnerability on this machine.")
 
@@ -2407,7 +2378,7 @@ def refresh_downloads_scan(on_progress=None):
         save_feed("downloads-scan", {}, ok=False)
         raise Refused("the scan of new downloads did not finish (missing signatures?)")
     found = confirm_detections(parse_clamscan(out)) if rc == 1 else []
-    save_feed("downloads-scan", {"found": found, "files": len(files)})
+    save_feed("downloads-scan", {"found": found, "files": len(files), "used": list(signatures_updated())})
     return "Scanned %d new download%s." % (len(files), "" if len(files) == 1 else "s")
 
 
@@ -2486,7 +2457,8 @@ def refresh_virus_scan(on_progress=None):
         raise Refused("the virus scan did not finish (missing signatures?)")
     found = confirm_detections(parse_clamscan(out)) if rc == 1 else []
     odd_shown = [clean(_shown(p).replace("\n", "\\n").replace("\r", "\\r"), 200) for p in odd]
-    save_feed("virus-scan", {"found": found, "scanned": "~", "files": seen[0], "oddNames": odd_shown})
+    save_feed("virus-scan", {"found": found, "scanned": "~", "files": seen[0], "oddNames": odd_shown,
+                             "used": list(signatures_updated())})
     ignored = ignored_detections()
     live = sum(1 for f in found if not detection_ignored(f, ignored))
     note = " %d marked as a false positive." % (len(found) - live) if len(found) > live else ""
@@ -2507,6 +2479,8 @@ def check_virus_scan():
     if cache is None:
         return result(cid, cat, title, "info", "The first scan runs within a day.", why, fix=now, weight=0,
                       howto="Press Scan now to scan your home folder now, or wait for the next weekly check.")
+    old = _age_note(cache.get("used") if isinstance(cache.get("used"), list) else None, "signatures")
+    scanned = feed_when(cache).replace("checked", "scanned") + ((", " + old) if old else "")
     found = current_detections()
     ignored = ignored_detections()
     items, live = [], []
@@ -2523,8 +2497,7 @@ def check_virus_scan():
         if isinstance(cache.get("oddNames"), list) else []
     if odd and not live:
         out = result(cid, cat, title, "warn", "No infected files, but %d file name%s contain%s a line break (%s)." % (
-            len(odd), "" if len(odd) == 1 else "s", "s" if len(odd) == 1 else "", feed_when(cache).replace(
-                "checked", "scanned")), why, clean_block(odd), fix=now, weight=1,
+            len(odd), "" if len(odd) == 1 else "s", "s" if len(odd) == 1 else "", scanned), why, clean_block(odd), fix=now, weight=1,
             howto="Normal programs never name files like this; it is a trick to confuse virus scanners. "
                   "Look at where these files came from, and delete them if you do not know them.")
         out["items"] = items
@@ -2533,7 +2506,7 @@ def check_virus_scan():
         handoff = fix("app", "open-clamui", "Open ClamUI to quarantine them") if clamui_install() else now
         out = result(cid, cat, title, "fail", "%d infected file%s in %s (%s).%s" % (
             len(live), "" if len(live) == 1 else "s", _scanned_where(cache),
-            feed_when(cache).replace("checked", "scanned"), note),
+            scanned, note),
             why, clean_block(live), handoff, weight=3,
             howto="Do not open these files. Quarantine or delete them in ClamUI; if you downloaded them "
                   "on purpose, get them again from the official site. Only if you are sure a file is safe "
@@ -2542,7 +2515,7 @@ def check_virus_scan():
         daily = feed_cache("downloads-scan")
         daily_note = " New downloads scanned %s." % feed_when(daily).replace("checked ", "") if daily else ""
         out = result(cid, cat, title, "pass", "No infected files in %s (%s).%s%s" % (
-            _scanned_where(cache), feed_when(cache).replace("checked", "scanned"), note, daily_note), why,
+            _scanned_where(cache), scanned, note, daily_note), why,
             fix=now, weight=3)
     out["items"] = items
     return out
@@ -2893,13 +2866,13 @@ def check_firmware():
 
 FEED_REFRESH = {"arch-audit": refresh_arch_audit, "osv": refresh_osv, "aur": refresh_aur}
 FEED_REFRESH["pending-updates"] = refresh_pending_updates
-FEED_LABELS = {"pending-updates": "the list of waiting updates", "firmware": "the firmware lookup",
-               "downloads-scan": "the scan of new downloads",
-               "flatpak": "the Flatpak update lookup", "flatpak-update": "your Flatpak apps",
-               "arch-audit": "the Arch vulnerability database", "osv": "the OSV malicious-package database",
-               "aur": "your AUR package status", "virus-scan": "the virus scan", "bumblebee": "the Bumblebee scan",
-               "bumblebee-list": "the Bumblebee list of compromised packages",
-               "password-check": "the password scan", "signatures": "the ClamAV virus signatures"}
+FEED_LABELS = {"pending-updates": "the system update lookup", "flatpak": "the Flatpak update lookup",
+               "firmware": "the firmware lookup", "downloads-scan": "the virus scan of ~/Downloads",
+               "flatpak-update": "your Flatpak apps", "arch-audit": "the Arch security scan",
+               "osv": "the OSV malware scan", "aur": "the AUR status lookup", "virus-scan": "the virus scan of ~",
+               "bumblebee": "the Bumblebee scan", "bumblebee-list": "the Bumblebee list",
+               "password-check": "the password scan", "signatures": "the virus signatures",
+               "signatures-update": "the virus signatures update"}
 
 
 def _and(items):
@@ -2931,8 +2904,8 @@ def feed_findings():
 # installed packages, lockfiles, editor and browser extensions and MCP configs
 # against exposure catalogs of known-compromised releases that Perplexity
 # maintains in the same repository (threat_intel/). The Install button puts
-# the pinned release binary, checksum-verified, at BUMBLEBEE_BIN; the list update
-# fetches the current catalogs; the daily check runs it as you, read-only.
+# the pinned release binary, checksum-verified, at BUMBLEBEE_BIN; each daily
+# check downloads the current catalogs and then runs it as you, read-only.
 BUMBLEBEE_BIN = "/usr/local/bin/bumblebee"
 # The one Bumblebee version Vigil installs, with the SHA-256 of each release
 # archive written here, in the reviewed code (from Perplexity's checksums.txt
@@ -2945,8 +2918,9 @@ BUMBLEBEE_SHA256 = {"amd64": "53b080cf3ddb692b0c4e5492ef4785b4c54daf1624fcd0fcba
 BUMBLEBEE_MAX_BYTES = 64 * 1024 * 1024
 _VERSION_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}$")
 
-# Installs or updates Bumblebee, as root (Install, Update Bumblebee, and the
-# list update when the installed one is older). It never takes anything from
+# Installs the pinned Bumblebee, as root, only from a button you press (Install,
+# or Install Bumblebee on its row when a Vigil update has raised the pinned
+# version). No run installs or updates it. It never takes anything from
 # the report. The download is capped in bytes while it streams; the archive
 # must match the SHA-256 above; only a regular file is installed; and the
 # installed program is never run as root (a byte comparison decides whether
@@ -3128,7 +3102,9 @@ def refresh_bumblebee():
         raise Refused("it is not installed")
     catalog = home_path(*STATE_DIR, BUMBLEBEE_CATALOG)
     if not exists(catalog):
-        raise Refused("its list has not been downloaded yet; press List update under Run now on the Overview")
+        raise Refused("its list could not be downloaded")
+    listed = feed_cache("bumblebee-list") or {}
+    used = [listed.get("at", ""), listed.get("time", "")]
     rc, out = run([BUMBLEBEE_BIN, "scan", "--profile", "baseline", "--exposure-catalog", catalog,
                    "--findings-only", "--output", "stdout", "--max-duration", "5m"],
                   timeout=360, limit=4 * 1024 * 1024)
@@ -3136,73 +3112,96 @@ def refresh_bumblebee():
     if rc not in (0, 1) or status in (None, "error"):
         save_feed("bumblebee", {}, ok=False)
         raise Refused("its scan did not finish")
-    save_feed("bumblebee", {"findings": findings, "status": status})
+    save_feed("bumblebee", {"findings": findings, "status": status, "used": used})
     return "Bumblebee scanned."
 
 
-STEP_WEIGHT = {"virus-scan": 30, "downloads-scan": 3, "osv": 2, "bumblebee": 2, "firmware": 2, "signatures": 2, "flatpak": 4}
+STEP_WEIGHT = {"virus-scan": 30, "downloads-scan": 3, "osv": 2, "bumblebee": 2, "bumblebee-list": 2, "firmware": 2,
+               "signatures-update": 2, "flatpak": 4, "arch-audit": 2}
 
 # One name for each thing Vigil runs, used everywhere: the progress line, the
-# Last run list and (in Model.js) the schedule lines, so what will run, what
-# ran and what is running now always read the same. Must match Model.js.
-ITEM_NAME = {"downloads-scan": "Virus scan of ~/Downloads", "virus-scan": "Virus scan of ~",
-             "bumblebee": "Bumblebee scan", "firmware": "Firmware lookup", "password-check": "Password scan",
-             "signatures": "Virus signatures", "pending-updates": "System update lookup",
-             "flatpak": "Flatpak update lookup", "arch-audit": "Arch security list",
-             "osv": "OSV malware list", "aur": "AUR package status", "bumblebee-list": "Bumblebee list"}
+# Last run list and (in Model.js) the run cards, so what will run, what ran
+# and what is running now always read the same. A scan reads this computer, a
+# lookup asks a tool or a service, and a list is downloaded. arch-audit and
+# osv-scanner download their lists as they scan, so each is one step.
+# Must match Model.js.
+ITEM_NAME = {"pending-updates": "System update lookup", "flatpak": "Flatpak update lookup",
+             "arch-audit": "Arch security scan", "osv": "OSV malware scan", "aur": "AUR status lookup",
+             "bumblebee-list": "Bumblebee list", "bumblebee": "Bumblebee scan",
+             "signatures": "Virus signatures", "downloads-scan": "Virus scan of ~/Downloads",
+             "firmware": "Firmware lookup", "virus-scan": "Virus scan of ~", "password-check": "Password scan"}
 ASKS = " (Omarchy asks for your password)"
-# Which schedule line runs each Last run row.
-DAILY, WEEKLY, UPDATE = " (daily check)", " (weekly check)", " (list update)"
 STEP_TEXT = dict(ITEM_NAME, **{
     "flatpak-update": "Flatpak app updates",
     "password-check": ITEM_NAME["password-check"] + ASKS,
-    "signatures": ITEM_NAME["signatures"] + ASKS,
-    "bumblebee-update": "Bumblebee update" + ASKS,
-    "signatures-and-bumblebee": "Virus signatures and Bumblebee update" + ASKS})
+    "signatures-update": "Virus signatures update" + ASKS})
+CLAM_SCANS = ("downloads-scan", "virus-scan")
 
 
-def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=False, daily_only=False,
-                      weekly_only=False):
-    """Run what is due (the background run), or what a button asks for:
-    sources_only (Run list update), daily_only (Run daily check), weekly_only
-    (Run weekly check), full or force (Run all), scan_only (the virus scan of
-    your home folder alone). Emits progress lines when asked to."""
-    full = full or force
-    background = not (full or sources_only or scan_only or daily_only or weekly_only)
+def run_plan(full=False, scan_only=False, daily_only=False, weekly_only=False, signatures=False):
+    """The steps a run takes, in order. With no flag it is the background run:
+    only what is due, never a password. Each scan comes right after its list:
+    the Bumblebee list before the Bumblebee scan, the virus signatures before
+    each ClamAV scan. A Run now button (daily, weekly, all) updates signatures
+    over a day old first, behind your password, while you are at the screen,
+    but only when the panel says its card showed that command (signatures):
+    no root step runs that the card did not show. Run all also runs the
+    password scan first. A row's Scan now never asks."""
+    background = not (full or scan_only or daily_only or weekly_only)
     pressed = not background
-    # The list update: the lists. The daily check: the update and Flatpak
-    # checks, Bumblebee over your packages, a scan of what is new in Downloads.
-    # The weekly check: firmware and the whole home folder.
-    want_update = full or sources_only or background
-    want_daily = full or daily_only or background
-    run_full = full or weekly_only or (background and feed_due("full-scan"))
-    update = [n for n in SOURCE_FEEDS if n not in DAILY_FEEDS and feed_available(n) and (pressed or feed_due(n))] \
-        if want_update else []
-    daily = [n for n in SOURCE_FEEDS if n in DAILY_FEEDS and feed_available(n) and (pressed or feed_due(n))] \
-        if want_daily else []
-    # Steps that ask for your password come first, while you are at the screen,
-    # and only when you press a button: never in the background run. The one
-    # password step of the list update includes Bumblebee when the installed
-    # one is older than the version Vigil pins.
-    early = []
-    # The password step: what it includes is decided when it is reached (see the loop).
-    root_step = "root-updates" if (full or sources_only) and can_ask_password() \
-        and (can_update_signatures() or bumblebee_ok()) else ""
-    steps = early + ([root_step] if root_step else []) \
-        + (["password-check"] if full and can_ask_password() else []) + update + daily
-    sources = [n for n in steps if n in SOURCE_FEEDS]
-    catalog = exists(home_path(*STATE_DIR, BUMBLEBEE_CATALOG))
-    if bumblebee_ok() and (full or (daily_only and catalog) or
-                           (background and (run_full or (feed_due("bumblebee") and catalog)))):
-        steps.append("bumblebee")
-    # Run all scans the whole home folder, Downloads included, so not Downloads twice.
-    if (daily_only or (background and not run_full)) and feed_available("downloads-scan") and \
-            (daily_only or feed_due("downloads-scan")):
-        steps.append("downloads-scan")
-    if run_full and feed_available("firmware"):
+    run_weekly = full or weekly_only or (background and feed_due("full-scan"))
+    steps = []
+    if full or daily_only or background:
+        for name in DAILY_FEEDS:
+            if not feed_available(name) or not (pressed or feed_due(name)):
+                continue
+            if name == "bumblebee":
+                steps += (["bumblebee-list"] if feed_available("bumblebee-list") else []) + ["bumblebee"]
+            elif name == "downloads-scan":
+                if not run_weekly:                 # the weekly scan of ~ covers Downloads
+                    steps += ["signatures", "downloads-scan"]
+            else:
+                steps.append(name)
+    if run_weekly and feed_available("firmware"):
         steps.append("firmware")
-    if (run_full or scan_only) and feed_available("virus-scan"):
-        steps.append("virus-scan")                    # last: it takes longest
+    if (run_weekly or scan_only) and feed_available("virus-scan"):
+        steps += ["signatures", "virus-scan"]      # last: it takes longest
+    first = []
+    if signatures and (full or daily_only or weekly_only) and any(n in steps for n in CLAM_SCANS) \
+            and signatures_due():
+        first.append("signatures-update")
+    if full and can_ask_password():
+        first.append("password-check")
+    return first + steps
+
+
+def verify_signatures():
+    """Right before a ClamAV scan: are the virus signatures there and current?
+    Returns a note when they are over a day old; raises when there are none."""
+    stamp = signatures_updated()
+    if not stamp[0]:
+        raise Refused("ClamAV has no virus signatures yet")
+    age = _hours_since(stamp)
+    if age is not None and age > SIGNATURES_FRESH_HOURS:
+        days = max(1, int(age // 24))
+        return ("The virus signatures are %d day%s old (ClamAV's update service is off or offline), so the "
+                "virus scan used them as they were." % (days, "" if days == 1 else "s"))
+    return ""
+
+
+def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False, weekly_only=False,
+                      signatures=False):
+    """Run what is due (the background run), or what a button asks for:
+    daily_only (Daily check), weekly_only (Weekly check), full or force
+    (Run all), scan_only (the virus scan of your home folder alone, its row's
+    Scan now). signatures: the card you confirmed showed the signatures update.
+    Emits progress lines when asked to."""
+    full = full or force
+    background = not (full or scan_only or daily_only or weekly_only)
+    pressed = not background
+    run_weekly = full or weekly_only or (background and feed_due("full-scan"))
+    steps = run_plan(full=full, scan_only=scan_only, daily_only=daily_only, weekly_only=weekly_only,
+                     signatures=signatures)
 
     # Each step's share of the progress bar: the virus scan takes most of the
     # time, so it gets most of the bar, and the quick steps a sliver each.
@@ -3213,34 +3212,50 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
         acc += w
     PROGRESS["spans"] = spans
     done, failed, why, timed_out, notes = [], [], {}, [], []
+    no_signatures = ""
     for i, name in enumerate(steps, 1):
         if not STOP["on"] and plugin_removed():
             STOP["on"] = True                        # the plugin was removed: start nothing more
         if STOP["on"]:
             break
-        if name == "root-updates":
-            # Include Bumblebee only when the installed one is older than the pinned version.
-            sig, bee = can_update_signatures(), bool(bumblebee_update_ready())
-            name = steps[i - 1] = ("signatures-and-bumblebee" if sig and bee else "signatures" if sig
-                                   else "bumblebee-update" if bee else "")
-            if not name:
-                continue
         progress(i, len(steps), STEP_TEXT[name])
         try:
+            if name in CLAM_SCANS and no_signatures:
+                # No signatures at all: scanning would only fail. Tried again tomorrow.
+                save_feed(name, {}, ok=False)
+                raise Refused(no_signatures)
             if name == "virus-scan":
                 refresh_virus_scan(lambda n, of, i=i: progress(i, len(steps), STEP_TEXT["virus-scan"], n, of))
+            elif name == "downloads-scan":
+                refresh_downloads_scan(lambda n, of, i=i: progress(i, len(steps), STEP_TEXT["downloads-scan"], n, of))
+            elif name == "signatures":
+                no_signatures = ""
+                try:
+                    note = verify_signatures()
+                except Refused as e:
+                    no_signatures = str(e)
+                    raise
+                if note and note not in notes:
+                    notes.append(note)
+            elif name == "signatures-update":
+                refresh_signatures()
+            elif name == "bumblebee-list":
+                try:
+                    refresh_bumblebee_list()
+                except Refused:
+                    old = feed_cache("bumblebee-list")
+                    if old is None or not exists(home_path(*STATE_DIR, BUMBLEBEE_CATALOG)):
+                        raise
+                    notes.append("Bumblebee's list could not be downloaded, so the Bumblebee scan used the one "
+                                 "from %s." % old["at"])
             elif name == "bumblebee":
                 refresh_bumblebee()
             elif name == "firmware":
                 refresh_firmware()
-            elif name == "downloads-scan":
-                refresh_downloads_scan(lambda n, of, i=i: progress(i, len(steps), STEP_TEXT["downloads-scan"], n, of))
             elif name == "password-check":
                 refresh_no_password()
             elif name == "flatpak" and (full or daily_only) and "user" in flatpak_installations():
                 update_user_flatpaks()
-            elif name in ("signatures", "bumblebee-update", "signatures-and-bumblebee"):
-                notes.extend(refresh_root_updates(name != "bumblebee-update", name != "signatures"))
             else:
                 FEED_REFRESH[name]()
             done.append(name)
@@ -3257,51 +3272,37 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
                     save_feed(name, {}, ok=False)
                 except (OSError, Refused):
                     pass
-    # The password step under whatever name it ran as counts as the signatures for the message.
-    for lst in (done, failed):
-        if "signatures-and-bumblebee" in lst:
-            lst.append("signatures")
-    if "signatures-and-bumblebee" in why:
-        why["signatures"] = why["signatures-and-bumblebee"]
     stopped = STOP["on"]
     if stopped:
-        # What was stopped or never ran counts as tried today, so the weekly run
-        # does not start it again straight away; it tries again tomorrow.
+        # What was stopped or never ran counts as tried today, so the background
+        # run does not start it again straight away; it tries again tomorrow.
         for name in steps:
             if name in FEED_FILES and name not in done:
                 save_feed(name, {}, ok=False)
-    if sources:
-        save_last_run(not stopped and not [n for n in failed if n in SOURCE_FEEDS], pressed)
-    if run_full and "virus-scan" in done and feed_available("downloads-scan"):
+    if run_weekly and "virus-scan" in done and feed_available("downloads-scan"):
         save_feed("downloads-scan", {"found": [], "files": 0, "byFullScan": True})
-    if run_full:
-        save_feed("full-scan", {}, ok=not stopped and not [n for n in failed if n in ("virus-scan", "bumblebee")],
+    if run_weekly:
+        save_feed("full-scan", {}, ok=not stopped and not [n for n in failed if n in ("virus-scan", "firmware")],
                   retry_days=FEED_DAYS if timed_out else None)
     no_pkexec = " The password scan could not run: pkexec is missing." if full and not can_ask_password() else ""
     if stopped and not done:
         return {"ok": True, "stopped": True, "action": "", "message": "Stopped."}
     if not done and not failed:
-        if run_full:
+        if run_weekly:
             return {"ok": True, "action": "", "message": "Checked every setting. Install ClamUI (Detect tab) "
                     "to add a virus scan to the weekly check." + no_pkexec}
         return {"ok": True, "action": "", "message": "Everything is up to date."}
-    refreshed = [FEED_LABELS[n] for n in done if n in SOURCE_FEEDS or n == "signatures"]
-    parts = []
-    if refreshed:
-        parts.append("refreshed " + _and(refreshed))
-    if "downloads-scan" in done:
-        parts.append("scanned what is new in Downloads")
-    if "virus-scan" in done:
-        parts.append("scanned your home folder")
-    if "firmware" in done:
-        parts.append("checked for firmware updates")
-    if "bumblebee" in done:
-        parts.append("checked your packages with Bumblebee")
-    if "password-check" in done:
-        parts.append("checked for accounts without a password")
+    said = {"signatures-update": "updated the virus signatures",
+            "pending-updates": "looked up waiting updates", "flatpak": "looked up Flatpak updates",
+            "arch-audit": "checked your packages against the Arch security list",
+            "osv": "checked your npm and Bun packages against OSV",
+            "aur": "looked up your AUR packages", "bumblebee": "checked your packages with Bumblebee",
+            "downloads-scan": "scanned what is new in Downloads", "firmware": "checked for firmware updates",
+            "virus-scan": "scanned your home folder", "password-check": "checked for accounts without a password"}
+    parts = [said[n] for n in done if n in said]
     msg = (_and(parts)[0].upper() + _and(parts)[1:] + ".") if parts else ""
-    retried = [n for n in failed if n not in ("password-check", "signatures", "bumblebee", "bumblebee-update",
-                                              "signatures-and-bumblebee") and n not in timed_out]
+    retried = [n for n in failed if n not in ("password-check", "signatures-update", "signatures")
+               and n not in timed_out]
     if retried:
         msg += " Could not finish %s; Vigil tries again tomorrow." % _and([FEED_LABELS[n] for n in retried])
     if "password-check" in failed:
@@ -3311,13 +3312,13 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
             VIRUS_SCAN_SECONDS // 3600)
     if "bumblebee" in failed:
         msg += " Bumblebee could not scan: %s." % why.get("bumblebee", "it did not finish")
+    if "signatures-update" in failed:
+        msg += " The virus signatures were not updated: %s." % why.get("signatures-update",
+                                                                         "ClamAV could not update them")
     if "signatures" in failed:
-        msg += " The virus signatures were not updated: %s." % why.get("signatures", "ClamAV could not update them")
-    if "bumblebee-update" in failed:
-        msg += " Bumblebee was not updated: %s." % why.get("bumblebee-update", "it could not run")
+        msg += " The virus scan could not run: %s." % why.get("signatures", "ClamAV has no virus signatures yet")
     for note in notes:
-        if not ("signatures" in failed and note.startswith("The virus signatures")):
-            msg += " " + note
+        msg += " " + note
     msg += no_pkexec
     found = feed_findings()
     msg += (" On this machine: %s. See the tabs for details." % "; ".join(found)) if found \
@@ -3380,6 +3381,8 @@ def check_bumblebee():
     found = [f for f in cache.get("findings", []) if isinstance(f, dict)][:500] \
         if isinstance(cache.get("findings"), list) else []
     when = feed_when(cache).replace("checked", "scanned")
+    old = _age_note(cache.get("used") if isinstance(cache.get("used"), list) else None, "the list")
+    when += (", " + old) if old else ""
     if found:
         lines = ["%s: %s %s %s in %s" % (clean(f.get("catalog_name"), 120), clean(f.get("ecosystem"), 30),
                                           clean(f.get("package_name"), 100), clean(f.get("version"), 40),
@@ -3390,12 +3393,14 @@ def check_bumblebee():
                   "the passwords and keys used on this computer from another device.")
     ready = bumblebee_update_ready()
     if ready:
-        return result(cid, cat, title, "info", "Bumblebee %s is ready to install (you have %s)." % (
-            ready, bumblebee_installed_version()), why, "No known-compromised packages (%s)." % when,
-            fix=fix("terminal", "update-bumblebee", "Update Bumblebee"), weight=0,
-            howto="Press Update Bumblebee, or List update under Run now on the Overview, which does it behind the same "
-                  "password prompt. Vigil installs the version it was reviewed with, checked against the checksum "
-                  "written in its code; newer Bumblebee versions come with Vigil updates.")
+        # A Vigil update raised the pinned version. Nothing installs it by itself:
+        # only this button, after its card, behind your password.
+        return result(cid, cat, title, "info", "Bumblebee %s is installed; this Vigil was reviewed with %s." % (
+            bumblebee_installed_version(), ready), why, "No known-compromised packages (%s)." % when,
+            fix=fix("terminal", "update-bumblebee", "Install Bumblebee " + ready), weight=0,
+            howto="Press Install Bumblebee %s. Vigil installs only the version it was reviewed with, checked "
+                  "against the checksum written in its code. No check updates Bumblebee by itself: a newer "
+                  "version reaches you only with a Vigil update." % ready)
     return result(cid, cat, title, "pass", "No known-compromised packages (%s)." % when, why, weight=3)
 
 
@@ -5323,12 +5328,9 @@ def audit(peek=False):
         "score": score_of(checks), "level": level, "counts": counts,
         "checks": checks, "tools": tools, "apps": {"clamui": clamui_install()},
         "new": [], "stateSaved": False, "history": state_history(state),
-        "feedsDue": running is None and (any(feed_due(n) for n in SOURCE_FEEDS + DAILY_FEEDS)
-                                         or feed_due("full-scan")),
-        "feedsUpdated": feeds_updated(),
+        "feedsDue": running is None and (any(feed_due(n) for n in DAILY_FEEDS) or feed_due("full-scan")),
         "sources": source_status(),
-        "lastRun": last_run(),
-        "nextUpdate": next_update(),
+        "signaturesDue": signatures_due(),
         "nextFullScan": next_full_scan(),
         "nextDaily": next_daily(),
         "missing": missing_helpers(),
@@ -5942,10 +5944,13 @@ def main(argv):
     if len(argv) == 3 and argv[1] in ("dismiss", "undismiss") and re.fullmatch(r"[a-z0-9-]{1,40}", argv[2]):
         emit(set_dismissed(argv[2], argv[1] == "dismiss"))
         return 0
-    if len(argv) in (2, 3) and argv[1] == "refresh-feeds" and argv[2:] in (
-            [], ["--force"], ["--sources"], ["--full"], ["--scan"], ["--daily"], ["--weekly"]):
+    # --signatures: the confirmed card showed the virus signatures update, so
+    # a Run now button may run it (only when they are over a day old).
+    if 2 <= len(argv) <= 4 and argv[1] == "refresh-feeds" and argv[2:] in (
+            [], ["--force"], ["--full"], ["--scan"], ["--daily"], ["--weekly"],
+            ["--full", "--signatures"], ["--daily", "--signatures"], ["--weekly", "--signatures"]):
         PROGRESS["on"] = True
-        flag = argv[2] if len(argv) == 3 else ""
+        flag = argv[2] if len(argv) >= 3 else ""
         if not take_run_lock():
             emit({"ok": True, "busy": True, "action": "",
                   "message": "Vigil is already running a scan or update. This one was not started."})
@@ -5956,9 +5961,9 @@ def main(argv):
         except OSError:
             pass
         save_run_info()
-        emit(refresh_due_feeds(force=flag == "--force", sources_only=flag == "--sources", full=flag == "--full",
+        emit(refresh_due_feeds(force=flag == "--force", full=flag == "--full",
                                scan_only=flag == "--scan", daily_only=flag == "--daily",
-                               weekly_only=flag == "--weekly"))
+                               weekly_only=flag == "--weekly", signatures=argv[3:] == ["--signatures"]))
         return 0
     if len(argv) == 2 and argv[1] == "stop":
         emit(stop_run())
@@ -5970,7 +5975,7 @@ def main(argv):
     if len(argv) == 2 and argv[1] == "version":
         emit({"version": VERSION})
         return 0
-    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection> | vigil keep|unkeep <leftover> | vigil trash <leftover>... | vigil refresh-feeds [--force|--sources|--daily|--weekly|--full|--scan] | vigil running | vigil stop | vigil version\n")
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection> | vigil keep|unkeep <leftover> | vigil trash <leftover>... | vigil refresh-feeds [--force|--daily|--weekly|--full|--scan] [--signatures] | vigil running | vigil stop | vigil version\n")
     return 2
 
 

@@ -49,7 +49,7 @@ Panel {
     return isFinite(n) ? Math.max(5, Math.min(1440, Math.round(n))) : 30
   }
   readonly property bool notifyOnNew: setting("notifyOnNew", true) === true
-  // Weekly refresh of the maintained sources (arch-audit, OSV, the AUR).
+  // The daily and weekly checks in the background (the autoUpdate setting).
   readonly property bool autoUpdate: setting("autoUpdate", true) === true
   property var actionSteps: []
   property int actionIndex: 0
@@ -169,14 +169,16 @@ Panel {
 
   // Runs `bin/vigil refresh-feeds` in the background. With no mode (the
   // background run) the helper runs only what is due and retries failures the
-  // next day. The buttons: "sources" (Run list update), "daily" (Run daily
-  // check), "weekly" (Run weekly check), "full" (Run all); "scan" is the
-  // virus scan of the home folder alone (its row's Scan now button).
-  readonly property var feedFlags: ({ sources: "--sources", daily: "--daily", weekly: "--weekly", full: "--full",
-                                      scan: "--scan" })
-  readonly property var feedTitles: ({ sources: "Run list update", daily: "Run daily check",
-                                       weekly: "Run weekly check", full: "Run all", scan: "Virus scan" })
-  function refreshFeeds(mode) {
+  // next day. The buttons: "daily" (Daily check), "weekly" (Weekly check),
+  // "full" (Run all); "scan" is the virus scan of the home folder alone (its
+  // row's Scan now button). Every scan gets its list right before it runs.
+  readonly property var feedFlags: ({ daily: "--daily", weekly: "--weekly", full: "--full", scan: "--scan" })
+  readonly property var feedTitles: ({ daily: "Run daily check", weekly: "Run weekly check", full: "Run all",
+                                       scan: "Virus scan" })
+  // withSignatures: the card you confirmed showed the virus signatures update
+  // (they were over a day old), so the helper may run it. Without it, the
+  // helper never asks for that password, whatever happened since.
+  function refreshFeeds(mode, withSignatures) {
     if (feedProc.running || runElsewhere) return
     feedBuffer = ""
     feedResult = ""
@@ -187,13 +189,13 @@ Panel {
     feedMode = mode
     feedProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, "refresh-feeds"]
       .concat(feedForced ? [feedFlags[mode]] : [])
+      .concat(feedForced && withSignatures === true && mode !== "scan" ? ["--signatures"] : [])
     feedProc.running = true
-    // The list update takes minutes; anything that scans files can take hours.
-    feedDeadline.interval = mode === "sources" ? 3600000 : 4 * 3600000
+    // Anything that scans files can take hours.
+    feedDeadline.interval = 4 * 3600000
     feedDeadline.restart()
-    if (mode === "sources") setStatus("List update started. Omarchy may ask for your password first.", false)
-    else if (mode === "full") setStatus("Run all started. Omarchy may ask for your password first; after that you can close this panel.", false)
-    else if (mode === "daily") setStatus("Daily check started.", false)
+    if (mode === "full") setStatus("Run all started. Omarchy may ask for your password first; after that you can close this panel.", false)
+    else if (mode === "daily") setStatus("Daily check started. Omarchy asks for your password first only if the virus signatures are old.", false)
     else if (mode === "weekly") setStatus("Weekly check started. You can close this panel; you get a notification when it is done.", false)
     else if (mode === "scan") setStatus("Virus scan started. It runs in the background.", false)
   }
@@ -204,7 +206,6 @@ Panel {
     pendingKind = kind
     pendingAction = "all"
   }
-  function requestUpdate() { requestRun("update-sources") }
   function requestFullScan() { requestRun("full-scan") }
 
   function requestInstallHelpers() {
@@ -261,6 +262,8 @@ Panel {
   function confirmPending() {
     var kind = pendingKind
     var action = pendingAction
+    // What the card you confirmed showed: its root steps, exactly.
+    var shown = pending
     cancelPending()
     if (!report) return
     if (kind === "ignore") {
@@ -278,18 +281,14 @@ Panel {
       if (ids.length > 0) runHelper(["trash"].concat(ids))
       return
     }
-    if (kind === "update-sources") {
-      refreshFeeds("sources")
-      return
-    }
     if (kind === "full-scan") {
       // No terminal: the password steps use Omarchy's own password dialog,
       // so the panel stays open and shows the progress.
-      refreshFeeds("full")
+      refreshFeeds("full", Model.cardShowsSignatures(shown))
       return
     }
     if (kind === "daily-check" || kind === "weekly-check") {
-      refreshFeeds(kind === "daily-check" ? "daily" : "weekly")
+      refreshFeeds(kind === "daily-check" ? "daily" : "weekly", Model.cardShowsSignatures(shown))
       return
     }
     if (kind === "clean-all") {
@@ -793,7 +792,6 @@ Panel {
       onTextKey: function(t) {
         if (t === "r" || t === "R" || t === "s" || t === "S") root.requestFullScan()
         else if (t === "f" || t === "F") root.requestFix(root.selectedCheck())
-        else if (t === "u" || t === "U") root.requestUpdate()
         else if ((t === "c" || t === "C") && root.tab === "care") root.requestCleanAll()
         else if (t === "d" || t === "D") {
           var sel = root.selectedCheck()
@@ -1152,7 +1150,7 @@ Panel {
             }
 
             // One button per schedule, each with when it next runs by itself
-            // right under it, then all three at once.
+            // right under it, then both at once.
             SectionHeading { visible: root.report !== null; text: "RUN NOW" }
             Row {
               id: runStrip
@@ -1160,27 +1158,22 @@ Panel {
               width: parent.width
               spacing: Style.spacing.md
               readonly property var captions: Model.runCaptions(root.report, root.autoUpdate, new Date(), root.refreshMinutes)
-              readonly property real spare: Math.max(0, Math.floor((width - spacing * 3 - runDaily.naturalWidth
-                - runWeekly.naturalWidth - runUpdate.naturalWidth - runAll.naturalWidth) / 4))
+              readonly property real spare: Math.max(0, Math.floor((width - spacing * 2 - runDaily.naturalWidth
+                - runWeekly.naturalWidth - runAll.naturalWidth) / 3))
               RunCell {
                 id: runDaily; kind: "daily-check"; mode: "daily"; label: "Daily check"
                 caption: runStrip.captions.daily; width: naturalWidth + runStrip.spare
-                tip: "Now: Virus scan of ~/Downloads, System update lookup, Flatpak update lookup, Bumblebee scan"
+                tip: "Now: update lookups, then the Arch security, OSV, AUR and Bumblebee scans and a virus scan of ~/Downloads, each with its newest list"
               }
               RunCell {
                 id: runWeekly; kind: "weekly-check"; mode: "weekly"; label: "Weekly check"
                 caption: runStrip.captions.weekly; width: naturalWidth + runStrip.spare
-                tip: "Now: Firmware lookup and Virus scan of ~ (your whole home folder)"
-              }
-              RunCell {
-                id: runUpdate; kind: "update-sources"; mode: "sources"; label: "List update"
-                caption: runStrip.captions.update; width: naturalWidth + runStrip.spare
-                tip: "Now: virus signatures and every list Vigil checks against. No scan"
+                tip: "Now: firmware lookup, then a virus scan of ~ (your whole home folder) with current signatures"
               }
               RunCell {
                 id: runAll; kind: "full-scan"; mode: "full"; label: "Run all"; primary: true
                 caption: runStrip.captions.all; width: naturalWidth + runStrip.spare
-                tip: "Now: the list update, the daily check and the weekly check, plus the password scan"
+                tip: "Now: the daily check and the weekly check, plus the password scan"
               }
             }
             // While an update or scan runs: what it is doing, and how far along.
