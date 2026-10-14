@@ -239,8 +239,9 @@ they act on.
 | Infected files | **False positive selected** only: Vigil stops counting that exact file | (none) |
 
 Removing, trashing and marking a false positive always ask first, on a card
-at the top of the panel that lists each item and shows the exact command;
-see [How actions run](#how-actions-run). There is no "all" for what you
+at the top of the panel that lists each item; a card that removes packages
+or plugins also shows the exact command it runs (see
+[How actions run](#how-actions-run)). There is no "all" for what you
 cannot easily get back (foreign packages, plugins) or must be sure of
 (false positives).
 

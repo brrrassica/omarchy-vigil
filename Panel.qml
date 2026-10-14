@@ -1811,6 +1811,7 @@ Panel {
             : row.pick.all ? row.pick.remove + " all" : row.pick.remove + " selected"
           tooltipText: row.pick === null ? ""
             : count === 0 && !row.pick.all ? "Tick the items first"
+            : row.pick.card === "trash" || row.pick.card === "ignore" ? "Asks first, listing each item"
             : "Asks first, listing each item and the exact command"
           foreground: root.foreground
           fontFamily: root.fontFamily
