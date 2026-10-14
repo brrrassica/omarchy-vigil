@@ -11,16 +11,18 @@ with a cleared environment, and reads exactly one JSON object from stdout.
 Rules this file keeps (they follow the marketplace review guidance):
 
 - It runs as you, and never runs a file from the plugin folder as root. Its
-  only root steps are two constant pkexec commands, started only by a run
-  button you pressed, never in the background: the ClamAV signatures and
-  Bumblebee update (root_updates_argv; Run update check, Run all) and the
-  password check (NO_PASSWORD_ARGV; Run all). The panel shows both in full on
-  the confirmation card first. Every other root step is a constant script
-  from Model.js that the panel runs the same way.
+  only root steps are two constant pkexec commands, started only by Run all,
+  never in the background: the virus signatures, only when ClamAV's own
+  update service has let them get over two days old (SIGNATURES_ARGV), and
+  the password scan (NO_PASSWORD_ARGV). The
+  panel shows both in full on the confirmation card first. Every other root
+  step is a constant script from Model.js that the panel runs the same way.
 - Its network use is the checks' own tools (arch-audit, osv-scanner,
   checkupdates, flatpak, fwupdmgr) and two curl calls to fixed addresses (the
-  AUR and Perplexity's Bumblebee lists). Nothing it downloads is ever run.
-- If the plugin is removed while a scan or update runs, it stops within
+  AUR and Perplexity's Bumblebee lists). Each scan gets its list right
+  before it runs; ClamAV's own update service keeps the virus signatures
+  current. Nothing it downloads is ever run.
+- If the plugin is removed while a run is going, it stops within
   seconds (plugin_removed), so removal leaves nothing running.
 - Every child process is an absolute path, runs in its own session with a
   minimal environment, has a hard deadline, and has its output capped at the
@@ -35,10 +37,12 @@ Rules this file keeps (they follow the marketplace review guidance):
 
 Standard library only.
 """
+import bisect
 import errno
 import fcntl
 import zlib
 import hashlib
+import hmac
 import json
 import os
 import pwd
@@ -55,7 +59,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta, timezone
 
-VERSION = "0.29.0"
+VERSION = "0.30.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -99,6 +103,7 @@ PACMAN_LOG_TAIL = 2 * 1024 * 1024
 CMD_MAX = 256 * 1024
 CMD_TIMEOUT = 8
 STR_MAX = 240
+MESSAGE_MAX = 2000                # a result message: shown whole, never cut short
 DETAIL_MAX = 1200
 LIST_MAX = 40
 WALK_MAX_ENTRIES = 200000
@@ -300,7 +305,7 @@ def _kill_group(proc):
 
 def plugin_removed():
     """True once this helper's own file is gone, which is what removing the
-    plugin does. A scan or update that is running then stops within seconds,
+    plugin does. A run that is going then stops within seconds,
     instead of running on to its deadline with no panel left to stop it."""
     return not os.path.exists(SELF)
 
@@ -312,7 +317,7 @@ def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False, env=N
     byte budget, stderr discarded. Overflow and timeout both return None.
     With `on_line`, each output line is handed to it as it arrives and only
     the lines it returns True for are kept (and counted against `limit`).
-    During a scan or update (the run lock is held), it also looks every few
+    During a run (the run lock is held), it also looks every few
     seconds whether the plugin was removed, and if so stops the program.
     """
     if not argv or not argv[0].startswith("/") or STOP["on"]:
@@ -1159,7 +1164,7 @@ _PACMAN_TS = re.compile(r"^\[(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})")
 
 
 def pending_updates(last_update):
-    """(count, omarchy) from the last update check, if it ran after the last
+    """(count, omarchy) from the last system update lookup, if it ran after the last
     full update (an older check is out of date by then), else None."""
     cache = feed_cache("pending-updates") if feed_available("pending-updates") else None
     if not cache or not isinstance(cache.get("count"), int) or isinstance(cache.get("count"), bool):
@@ -1174,7 +1179,7 @@ def pending_updates(last_update):
 
 @check
 def check_updates():
-    cid, cat, title = "updates", "harden", "System update check"
+    cid, cat, title = "updates", "harden", "System updates"
     why = ("Most attacks use security holes that already have a fix. Updating every week or two "
            "keeps those fixes on your machine.")
     try:
@@ -1338,7 +1343,8 @@ def check_persistence():
     if hits:
         return result(cid, cat, title, "warn", "%d suspicious line%s in startup files." % (
             len(hits), "" if len(hits) == 1 else "s"), why, clean_block(hits, 3000), weight=3)
-    return result(cid, cat, title, "pass", "No suspicious lines in %d startup files." % scanned, why, weight=3)
+    return result(cid, cat, title, "pass", "No suspicious lines in %d startup file%s." % (
+        scanned, "" if scanned == 1 else "s"), why, weight=3)
 
 
 @check
@@ -1358,34 +1364,290 @@ def check_ld_preload():
     return result(cid, cat, title, "pass", "Nothing is preloaded system-wide.", why, weight=3)
 
 
+# --- Pick lists ---------------------------------------------------------------
+# Leftover app data, orphaned packages, AUR and other foreign packages, other
+# Omarchy plugins and infected files are listed one item each, with a box to
+# tick. Keeping an item (or marking a detection as a false positive) changes
+# only Vigil's own notes: it stays on the list, with a lock and last, and stops
+# counting. The helper lists, keeps, marks false positives and moves leftovers
+# to the trash (named only by ids); removing packages and plugins is the
+# panel's job, on a card that shows the exact command first.
+
+REMOVABLE_PACKAGE = re.compile(r"[A-Za-z0-9@_+][A-Za-z0-9@._+-]{0,99}")   # Arch's package name rules
+REMOVABLE_PLUGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")         # omarchy-plugin-remove's ids
+PICK_MAX = 300                      # = ITEMS_MAX: Remove all and Keep all can take a whole list
+
+
+# --- Ids ----------------------------------------------------------------------
+# Every id Vigil gives the panel, puts on a command line or writes to its notes
+# is a keyed hash (HMAC-SHA256) under a random key made for this install
+# (id-key in the state folder: 32 bytes, mode 0600). Without that key an id
+# cannot be matched to a name by guessing, which plain hashes of public names
+# (packages, plugins) could be in seconds: a copied notes file, a backup, or
+# another account reading a command line learns nothing from them. It does not
+# hide anything from a program running as you, which can read the key the
+# way Vigil does.
+
+ID_KEY_FILE = "id-key"
+ID_KEY_BYTES = 32
+_ID_KEY = {}
+
+
+def _read_id_key(dirfd):
+    """The key, or None when it is missing or not a 32-byte regular file of yours."""
+    try:
+        fd = os.open(ID_KEY_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dirfd)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_size != ID_KEY_BYTES:
+            return None
+        data = os.read(fd, ID_KEY_BYTES + 1)
+        return data if len(data) == ID_KEY_BYTES else None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _make_id_key(dirfd):
+    """A new key, written whole to a private temporary and linked into place,
+    so another run never reads half a key; if one appeared meanwhile, that one."""
+    key = secrets.token_bytes(ID_KEY_BYTES)
+    tmp = ".id-key.%s" % secrets.token_hex(8)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
+    try:
+        os.write(fd, key)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        try:
+            os.link(tmp, ID_KEY_FILE, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        except FileExistsError:
+            existing = _read_id_key(dirfd)
+            if existing is not None:
+                return existing
+            os.unlink(ID_KEY_FILE, dir_fd=dirfd)           # not a key (a link, the wrong size): replace it
+            os.link(tmp, ID_KEY_FILE, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        os.fsync(dirfd)
+    finally:
+        os.unlink(tmp, dir_fd=dirfd)
+    return key
+
+
+def id_key(make=False):
+    """This install's key, made the first time it is needed. A look-only check
+    (--peek) never creates the state folder, so before Vigil's first full
+    check it, like a run without a state folder, gets a key for this run only:
+    its ids hold until the helper exits. make: create it even then."""
+    if "key" not in _ID_KEY:
+        peek = INTEGRITY_PEEK["value"] and not make
+        key = None
+        try:
+            dirfd = _open_home_dir(list(STATE_DIR)) if peek else _state_dir()
+        except (OSError, Refused):
+            dirfd = None
+        if dirfd is not None:
+            try:
+                key = _read_id_key(dirfd) or (None if peek else _make_id_key(dirfd))
+            except OSError:
+                key = None
+            finally:
+                os.close(dirfd)
+        _ID_KEY["key"] = key or secrets.token_bytes(ID_KEY_BYTES)
+    return _ID_KEY["key"]
+
+
+def keyed_hex(text, n=16):
+    return hmac.new(id_key(), text.encode("utf-8", "surrogateescape"), hashlib.sha256).hexdigest()[:n]
+
+
+def item_id(kind, *parts):
+    """A short stable id for one item of a list: keyed, so it says nothing about the item."""
+    return keyed_hex("\0".join((kind,) + parts))
+
+
+# Before 0.30, ids were plain SHA-256 hashes. Vigil still recognises them in
+# its notes, once, to carry what you kept, marked or reviewed over to keyed
+# ids (see migrate_notes); LEGACY maps them to this run's keyed ids.
+LEGACY = {"kept": {}, "ignored": {}, "complete": set()}
+
+
+def legacy_id(*parts):
+    return hashlib.sha256("\0".join(parts).encode("utf-8", "surrogateescape")).hexdigest()[:16]
+
+
+def quiet_last(items):
+    """Kept items and false positives go to the bottom; the rest keep their order."""
+    return sorted(items, key=lambda i: bool(i.get("kept") or i.get("ignored")))
+
+
+def _pacman_info(flags):
+    """[{name, version, description, size}] from `pacman -Q<flags>i`, or None
+    when pacman could not answer. Only names Arch allows are listed."""
+    rc, out = run(["/usr/bin/pacman", "-Q" + flags + "i"], timeout=10, limit=4 * 1024 * 1024)
+    if rc is None or (rc != 0 and out.strip()):
+        return None
+    blocks, cur = [], {}
+    for line in out.splitlines():
+        if not line.strip():
+            if cur:
+                blocks.append(cur)
+            cur = {}
+            continue
+        m = re.match(r"([A-Za-z][A-Za-z ]*?)\s*:\s?(.*)$", line)
+        if m and not line[0].isspace():
+            cur[m.group(1)] = m.group(2).strip()
+    if cur:
+        blocks.append(cur)
+    out = []
+    for b in blocks[:2000]:
+        name = b.get("Name", "")
+        if not REMOVABLE_PACKAGE.fullmatch(name):
+            continue
+        desc = b.get("Description", "")
+        out.append({"name": name, "version": clean(b.get("Version", ""), 60),
+                    "description": "" if desc in ("", "None") else clean(desc, 160),
+                    "size": clean(b.get("Installed Size", ""), 20)})
+    return out
+
+
+def _package_records(kind, flags, extra=None):
+    """Pick-list records for packages, or None."""
+    if not is_trusted_executable(sys_path("/usr/bin/pacman")):
+        return None
+    pkgs = _pacman_info(flags)
+    if pkgs is None:
+        return None
+    recs = []
+    for p in pkgs:
+        head = " \u00b7 ".join(x for x in (p["name"], p["version"], p["size"]) if x)
+        tail = "; ".join(x for x in (p["description"], (extra or {}).get(p["name"], "")) if x)
+        recs.append({"id": item_id(kind, p["name"]), "legacy": legacy_id(kind, p["name"]), "kind": kind,
+                     "name": p["name"], "shown": p["name"], "text": head + "\n" + (tail or "no description")})
+    LEGACY["complete"].add(kind)
+    return recs
+
+
+def orphan_records():
+    return _package_records("orphan", "dt")
+
+
+def foreign_records():
+    """Foreign packages, each with what the last AUR lookup said about it."""
+    cache = feed_cache("aur") or {}
+    said = {}
+    for key, words in (("gone", "no longer in the AUR"), ("official", "now in the official repositories"),
+                       ("orphans", "no maintainer in the AUR")):
+        v = cache.get(key)
+        for n in v if isinstance(v, list) else []:
+            if isinstance(n, str):
+                said[n] = words
+    return _package_records("foreign", "m", said)
+
+
+ITEMS_MAX = 300                  # per row: the panel takes 500, and the whole report must stay under 512 KiB
+
+
+def item_text(text):
+    """Two lines of at most 199 characters each, within the panel's 400."""
+    return "\n".join(clean(line, 199) for line in text.split("\n")[:2])
+
+
+MARK_LEVELS = ("high", "medium", "low")
+THEME_COLORS = (".local", "state", "omarchy", "current", "theme", "colors.toml")
+
+
+def theme_colors():
+    """The theme's yellow and green, for the panel's severity colors (red is
+    already Omarchy's urgent color). Only a line that is exactly
+    `name = "#rrggbb"` counts; the file is read as text, capped, through the
+    theme link Omarchy keeps (current/theme)."""
+    try:
+        text = read_text(home_path(*THEME_COLORS), SMALL_FILE_MAX, follow=True) or ""
+    except Refused:
+        text = ""
+    out = {}
+    for name in ("yellow", "green"):
+        m = re.search(r"^[ \t]*%s[ \t]*=[ \t]*[\"']?(#[0-9A-Fa-f]{6})[\"']?[ \t]*$" % name, text, re.M)
+        out[name] = m.group(1) if m else ""
+    return out
+
+
+def add_marks(item, marks):
+    """The item's second line in parts, each with a level for its color.
+    Only when the parts read exactly as that line, so color never adds or
+    changes a word."""
+    lines = item["text"].split("\n")
+    if marks and len(lines) == 2 and len(marks) <= 8 and all(m["level"] in MARK_LEVELS for m in marks) \
+            and ", ".join(m["text"] for m in marks) == lines[1]:
+        item["marks"] = [{"text": m["text"], "level": m["level"]} for m in marks]
+
+
+def detection_level(signature):
+    """ClamAV's heuristic rules (and potentially-unwanted ones, if a user turned
+    them on in ClamUI) guess; every other signature matches known malware."""
+    return "medium" if signature.startswith(("Heuristics.", "PUA.")) else "high"
+
+
+def pick_items(records, kept, note_kept):
+    """Items for the panel and the records still counted (not kept)."""
+    items, live = [], []
+    for r in records:
+        is_kept = is_kept_record(r, kept)
+        item = {"id": r["id"], "kind": r["kind"], "text": item_text(r["text"]), "kept": is_kept, "ignored": False}
+        if "name" in r:
+            item["name"] = r["name"]
+        add_marks(item, r.get("marks"))
+        items.append(item)
+        if not is_kept:
+            live.append(r)
+    n = len(records) - len(live)
+    note = note_kept % n if n else ""
+    if len(items) > ITEMS_MAX:
+        note += " The first %d are listed." % ITEMS_MAX
+    return quiet_last(items)[:ITEMS_MAX], live, note
+
+
 @check
 def check_foreign_packages():
     cid, cat, title = "aur-packages", "supply", "AUR and other foreign packages"
     why = ("Packages from the AUR are written by volunteers and are not checked by Arch, and "
            "malicious ones have happened.")
-    tool = "/usr/bin/pacman"
-    if not is_trusted_executable(sys_path(tool)):
+    howto = ("Remove what you no longer use: tick it, then Remove selected (it asks first and shows the exact "
+             "command). Keep what you trust: it stays installed and on the list, with a lock, and Vigil stops "
+             "counting it.")
+    if not is_trusted_executable(sys_path("/usr/bin/pacman")):
         return result(cid, cat, title, "na", "pacman is not available.", why, weight=0)
-    rc, out = run([tool, "-Qmq"], timeout=8, limit=CMD_MAX)
-    if rc is None:
+    recs = foreign_records()
+    if recs is None:
         return result(cid, cat, title, "unknown", "Could not list foreign packages.", why, weight=0)
-    names = [clean(n, 80) for n in out.split()][:2000]
-    if not names:
+    if not recs:
         return result(cid, cat, title, "pass", "Every installed package comes from the official repositories.", why, weight=0)
-    return result(cid, cat, title, "info", "%d package%s from outside the official repositories." % (
-        len(names), "" if len(names) == 1 else "s"), why, clean_block(names), weight=0)
+    items, live, note = pick_items(recs, kept_items(), " %d kept.")
+    if live:
+        out = result(cid, cat, title, "info", "%d package%s from outside the official repositories.%s" % (
+            len(live), "" if len(live) == 1 else "s", note), why,
+            clean_block([r["text"].replace("\n", ", ") for r in live]), weight=0, howto=howto)
+    else:
+        out = result(cid, cat, title, "pass", "Every foreign package is one you kept.%s" % note, why, weight=0)
+    out["items"] = items
+    return out
 
 
 SCANNERS = [
     # id, binary, category, title, why, run action, install action
-    ("clamav", "clamscan", "detect", "ClamAV signatures (virus engine)",
+    ("clamav", "clamscan", "detect", "Virus signatures (ClamAV)",
      ("ClamAV checks files against a database of known malware, mostly Windows malware, so it "
       "matters most for downloads and files you pass on. ClamUI is the easiest way to use it."),
      "", "install-clamav"),
-    ("arch-audit", "arch-audit", "supply", "Arch security list (known vulnerabilities)",
+    ("arch-audit", "arch-audit", "supply", "Known vulnerabilities (arch-audit)",
      "arch-audit checks your installed packages against the Arch security team's tracker and lists the "
-     "ones where an update fixes a published vulnerability. Vigil refreshes it once a week (it contacts "
-     "security.archlinux.org); Check now does it straight away.", "run-arch-audit", "install-arch-audit"),
+     "ones where an update fixes a published vulnerability. Each daily check downloads the tracker again "
+     "(from security.archlinux.org) right before it compares; Scan now does it straight away.",
+     "run-arch-audit", "install-arch-audit"),
 ]
 
 
@@ -1399,25 +1661,28 @@ def _scanner_check(sid, binary, cat, title, why, run_action, install_action):
     if sid == "arch-audit":
         return _arch_audit_check(cid, cat, title, why)
     if sid == "clamav":
-        newest = 0
-        for name in ("daily.cld", "daily.cvd"):
-            try:
-                newest = max(newest, os.stat(sys_path("/var/lib/clamav/" + name)).st_mtime)
-            except OSError:
-                pass
+        # ClamAV's own update service keeps the signatures current; Vigil only
+        # watches. Over STALE_HOURS old, the service has fallen behind: Run all
+        # then updates them first (behind your password), and the panel sends
+        # one notification a day saying so.
+        stamp = signatures_updated()
+        age = _hours_since(stamp) if stamp[0] else None
+        days = int(age // 24) if age is not None else None
+        old = age is None or age > STALE_HOURS
         auto = systemctl("is-enabled", "clamav-freshclam.service") == "enabled"
-        days = int((time.time() - newest) // 86400) if newest else None
         if not auto:
-            return result(cid, cat, title, "warn" if days is None or days > 7 else "info",
+            return result(cid, cat, title, "warn" if old else "info",
                           ("The virus signatures are missing" if days is None else
                            "The virus signatures are %d day%s old" % (days, "" if days == 1 else "s"))
                           + " and do not update by themselves.", why,
                           fix=fix("terminal", "freshclam-service", "Update them automatically"), weight=0)
-        if days is None or days > 7:
-            return result(cid, cat, title, "warn", "Automatic updates are on, but the signatures are %s." % (
-                "missing" if days is None else "%d days old" % days) + " Check your internet connection.",
-                why, fix=fix("terminal", "freshclam", "Update now"), weight=0)
-        summary = "Signatures update automatically (last %s)." % (
+        if old:
+            return result(cid, cat, title, "warn", "ClamAV's update service is on, but the signatures are %s." % (
+                "missing" if days is None else "%d days old" % days), why,
+                fix=fix("docs", "arch-clamav", "Learn more"), weight=0,
+                howto="Check your internet connection. Then press Run all on the Overview: when the signatures are "
+                      "over two days old, it updates them first, behind your password.")
+        summary = "ClamAV's update service keeps them current (last updated %s)." % (
             "today" if days == 0 else "%d day%s ago" % (days, "" if days == 1 else "s"))
     if not run_action:                       # ClamAV: healthy signatures; the scan itself is Vigil's job
         return result(cid, cat, title, "pass", summary, why, weight=0)
@@ -1426,7 +1691,7 @@ def _scanner_check(sid, binary, cat, title, why, run_action, install_action):
 
 # --- Accounts, shell history and old network services -----------------------
 # What a newcomer gains from a full audit tool, done Vigil's own way. Only the
-# empty-password check needs root (/etc/shadow): Run all (one password prompt)
+# empty-password scan needs root (/etc/shadow): Run all (one password prompt)
 # writes just the names of such accounts to NO_PASSWORD_NAME in the state
 # folder, and the date of that file is when the check last ran.
 
@@ -1452,7 +1717,7 @@ def _passwd_entries():
 
 
 def no_password_scan():
-    """(date, names) from the last password check (Run all), or ("", None) if it never ran."""
+    """(date, names) from the last password scan (Run all), or ("", None) if it never ran."""
     try:
         dirfd = _open_home_dir(list(STATE_DIR))
     except (OSError, Refused):
@@ -1472,10 +1737,12 @@ def no_password_scan():
 
 
 PKEXEC = "/usr/bin/pkexec"
-# The one root step: a constant, read-only awk over /etc/shadow that prints the
-# names of accounts whose password field is empty. pkexec shows Omarchy's own
-# password dialog; nothing else runs as root.
-# /usr/bin/bash, not awk: on Arch awk is a link, which Vigil never runs as root.
+# The password scan's root step: a constant, read-only awk over /etc/shadow that
+# prints the names of accounts whose password field is empty. pkexec shows
+# Omarchy's own password dialog. (The helper's only other root step is the
+# virus signatures update in Run all, SIGNATURES_ARGV.) pkexec starts
+# /usr/bin/bash, a regular file, rather than /usr/bin/awk, which on Arch is a
+# link; bash then runs awk by its absolute path.
 ROOT_STEP = "/usr/bin/awk -F: '$2 == \"\" { print $1 }' /etc/shadow"
 NO_PASSWORD_ARGV = [PKEXEC, "/usr/bin/bash", "-c", ROOT_STEP]
 # ClamAV's own update service holds freshclam's log locked, so a second
@@ -1501,37 +1768,21 @@ def can_update_signatures():
     return can_ask_password() and is_trusted_executable(sys_path("/usr/bin/freshclam"))
 
 
-def root_updates_argv(signatures, bumblebee):
-    """One password prompt for everything Run update check (and Run all) does as root. Each part
-    runs in its own subshell and reports its own exit code on a marker line."""
-    parts = []
-    if signatures:
-        parts.append("( %s ) >/dev/null 2>&1; echo \"VIGIL-SIG $?\"" % SIGNATURES_SCRIPT)
-    if bumblebee:
-        parts.append("( set -e\n%s) >/dev/null 2>&1; echo \"VIGIL-BEE $?\"" % BUMBLEBEE_SCRIPT)
-    return [PKEXEC, "/usr/bin/bash", "-c", "\n".join(parts)]
+# The one root step a run can take besides the password scan: updating the
+# virus signatures, only from Run all (its card shows this exact command
+# first) and only when they are over two days old. ClamAV's own update
+# service keeps them current; no other run asks.
+SIGNATURES_ARGV = [PKEXEC, "/usr/bin/bash", "-c", SIGNATURES_SCRIPT]
 
 
-def refresh_root_updates(signatures, bumblebee):
-    """Virus signatures and/or a Bumblebee update behind one password prompt.
-    Returns notes for the result message; raises only when nothing could run."""
-    rc, out = run(root_updates_argv(signatures, bumblebee), timeout=600, limit=64 * 1024)
+def refresh_signatures():
+    rc, _ = run(SIGNATURES_ARGV, timeout=600, limit=64 * 1024)
     if rc in (126, 127):
         raise Refused("no password was given")
-    codes = dict(re.findall(r"^VIGIL-(SIG|BEE) (\d{1,3})$", out or "", re.M))
-    notes = []
-    if signatures:
-        if codes.get("SIG") == "0":
-            save_feed("signatures", {})
-        else:
-            notes.append("The virus signatures were not updated: %s." % SIGNATURE_ERRORS.get(
-                int(codes.get("SIG", "1")), "ClamAV could not update them"))
-    if bumblebee:
-        notes.append("Bumblebee was updated." if codes.get("BEE") == "0"
-                     else "Bumblebee could not be updated now; Vigil tries again with the next update.")
-    if signatures and codes.get("SIG") != "0" and not (bumblebee and codes.get("BEE") == "0"):
-        raise Refused(notes[0][len("The virus signatures were not updated: "):-1])
-    return notes
+    if rc != 0:
+        raise Refused(SIGNATURE_ERRORS.get(rc, "ClamAV could not update them"))
+    save_feed("signatures", {})
+    return "Virus signatures updated."
 
 
 def missing_helpers():
@@ -1563,7 +1814,7 @@ def refresh_no_password():
         raise Refused("pkexec is not available")
     rc, out = run(NO_PASSWORD_ARGV, timeout=180, limit=64 * 1024)
     if rc != 0:
-        raise Refused("the password check was cancelled or not allowed")
+        raise Refused("the password scan was cancelled or not allowed")
     names = [n for n in out.split() if _USER_NAME.match(n)][:50]
     dirfd = _state_dir()
     try:
@@ -1694,9 +1945,9 @@ def parse_arch_audit(text):
 
 def _arch_audit_check(cid, cat, title, why):
     cache = feed_cache("arch-audit")
-    refresh = fix("helper", "arch-audit-refresh", "Check now")
+    refresh = fix("helper", "arch-audit-refresh", "Scan now")
     if cache is None:
-        return result(cid, cat, title, "info", "Installed. The first check runs within a day.", why,
+        return result(cid, cat, title, "info", "Installed. Not scanned yet: press Scan now, or Daily check under Run now.", why,
                       fix=refresh, weight=0)
     pkgs = cache.get("packages") if isinstance(cache.get("packages"), list) else []
     good = [p for p in pkgs if isinstance(p, dict) and isinstance(p.get("name"), str) and _PKG_NAME.match(p["name"])
@@ -1724,20 +1975,24 @@ for _spec in SCANNERS:
 
 
 # ---------------------------------------------------------------------------
-# Maintained sources ("feeds"). Vigil keeps no threat lists of its own. Each
-# feed is refreshed from the people who maintain it: once a week in the
-# background (the panel's autoUpdate setting, on by default) or when you
-# press Check now. A failed refresh is retried after a day. Results are
-# cached in the state folder; checks read only the cache.
+# Scans and lookups ("feeds"). Vigil keeps no threat lists of its own: each
+# scan gets the newest list from the people who maintain it right before it
+# runs. arch-audit, osv-scanner and the AUR lookup fetch theirs as they run;
+# the Bumblebee scan runs right after its list is downloaded (if that download
+# fails, it uses the last good list and says how old it is); every ClamAV scan
+# first checks that the virus signatures exist and how old they are (ClamAV's
+# own update service keeps them current; only Run all updates them, when they
+# are over two days old). Results are cached in
+# the state folder; checks read only the cache. A failed step is tried again
+# the next day.
 
 FEED_FILES = {"arch-audit": "arch-audit.json", "osv": "osv.json", "aur": "aur.json", "virus-scan": "virus-scan.json",
               "full-scan": "full-scan.json", "signatures": "signatures.json",
               "bumblebee-list": "bumblebee-list.json", "bumblebee": "bumblebee.json",
               "pending-updates": "pending-updates.json", "firmware": "firmware.json", "flatpak": "flatpak.json",
               "downloads-scan": "downloads-scan.json"}
-# Two weekly timers: the update check, and the weekly check
-# (the virus scan of the home folder and firmware); the daily check daily.
-SOURCE_FEEDS = ("pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee-list")
+# Two timers: the daily check (each step a day after it last finished) and
+# the weekly check (firmware and the virus scan of the home folder).
 FEED_DAYS = 7
 FEED_RETRY_DAYS = 1
 
@@ -1791,10 +2046,11 @@ def feed_available(name):
     return False
 
 
-# The daily check: light work, no password, seconds (a scan of what is new in
-# Downloads, the update and Flatpak checks, Bumblebee over your packages).
-# Everything else is weekly: the lists, the whole home folder, firmware.
-DAILY_FEEDS = ("downloads-scan", "pending-updates", "flatpak", "bumblebee")
+# The daily check, in the order it runs: the update lookups, then each scan
+# right after its list (a minute or two, no password in the background). The
+# weekly check is firmware and the whole home folder.
+DAILY_FEEDS = ("pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee", "downloads-scan")
+WEEKLY_FEEDS = ("firmware", "virus-scan")
 FEED_INTERVAL = {n: 1 for n in DAILY_FEEDS}
 
 
@@ -1827,11 +2083,6 @@ def feed_due(name):
     return _due_at(_state_json(FEED_FILES[name]) or {}, FEED_INTERVAL.get(name, FEED_DAYS)) is None
 
 
-def next_update():
-    """When the next weekly update falls due: the earliest of the available weekly sources."""
-    return _next_due([n for n in SOURCE_FEEDS if n not in DAILY_FEEDS])
-
-
 def next_daily():
     """When the next daily check falls due."""
     return _next_due(DAILY_FEEDS)
@@ -1855,32 +2106,6 @@ def _next_due(names):
     return nxt.strftime("%Y-%m-%d %H:%M") if nxt else ""
 
 
-RUN_NAME = "last-run.json"
-
-
-def save_last_run(ok, forced):
-    try:
-        dirfd = _state_dir()
-    except (OSError, Refused):
-        return
-    try:
-        _lock(dirfd)
-        body = {"schema": SCHEMA, "at": time.strftime("%Y-%m-%d %H:%M"), "ok": bool(ok), "forced": bool(forced)}
-        write_atomic(dirfd, RUN_NAME, json.dumps(body, separators=(",", ":")).encode())
-    except OSError:
-        pass
-    finally:
-        os.close(dirfd)
-
-
-def last_run():
-    data = _state_json(RUN_NAME)
-    if not isinstance(data, dict) or not isinstance(data.get("at"), str) \
-            or not re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", data["at"]):
-        return {"at": "", "ok": False}
-    return {"at": data["at"], "ok": data.get("ok") is True}
-
-
 def _mtime_stamp(paths):
     """(date, HH:MM) of the newest of paths, or ("", "")."""
     newest = 0
@@ -1893,10 +2118,6 @@ def _mtime_stamp(paths):
         return "", ""
     t = time.localtime(newest)
     return time.strftime("%Y-%m-%d", t), time.strftime("%H:%M", t)
-
-
-def _mtime_date(paths):
-    return _mtime_stamp(paths)[0]
 
 
 CLAMUI_LOG_INDEXES = ((".local", "share", "clamui", "logs", "log_index.json"),
@@ -1933,20 +2154,74 @@ def _newer(a, b):
     return a if (a[0], a[1]) >= (b[0], b[1]) else b
 
 
+SIGNATURE_FILES = ("daily.cld", "daily.cvd", "main.cld", "main.cvd", "bytecode.cld", "bytecode.cvd", "freshclam.dat")
+# Older than this, a list or the virus signatures count as old: a scan says
+# which one it used, and Run all updates the signatures first.
+STALE_HOURS = 48
+
+
+def signatures_updated():
+    """(date, HH:MM) when ClamAV's virus signatures were last brought up to date,
+    or ("", ""): by ClamAV's own update service (freshclam.dat changes on every
+    check, even when nothing new came out), by Vigil, or by ClamUI."""
+    d, t = _mtime_stamp([sys_path("/var/lib/clamav/" + n) for n in SIGNATURE_FILES])
+    meta = _state_json(FEED_FILES["signatures"]) or {}
+    mine = (meta.get("at", ""), meta.get("time", "")) if isinstance(meta.get("at"), str) and \
+        _DATE.match(meta.get("at", "")) and isinstance(meta.get("time"), str) else ("", "")
+    return _newer(clamui_last("update"), _newer(mine, (d, t)))
+
+
+def _hours_since(stamp):
+    """Hours since a (date, HH:MM) pair (a list, once read back from JSON), or None."""
+    try:
+        return (time.time() - time.mktime(time.strptime("%s %s" % tuple(stamp), "%Y-%m-%d %H:%M"))) / 3600.0
+    except (TypeError, ValueError):
+        return None
+
+
+def signatures_due():
+    """True when Run all would update the virus signatures first: ClamAV is
+    installed and its signatures are over two days old, which means its own
+    update service has fallen behind (off, or offline). Only ever behind your
+    password, and only from Run all: the daily and weekly checks never ask."""
+    if not (feed_available("virus-scan") and can_update_signatures()):
+        return False
+    age = _hours_since(signatures_updated())
+    return age is None or age > STALE_HOURS
+
+
+def used_note(meta, what):
+    """("with the list from Oct 12", old) for a scan's cache: which list (or
+    signatures) it used, always, and whether that list was over STALE_HOURS
+    old when the scan ran. ("", False) if the scan did not record one."""
+    stamp = meta.get("used") if isinstance(meta.get("used"), list) else None
+    if not stamp or len(stamp) != 2 or not isinstance(stamp[0], str) or not _DATE.match(stamp[0]):
+        return "", False
+    try:
+        text = "with %s from %s" % (what, time.strftime("%b %-d", time.strptime(stamp[0], "%Y-%m-%d")))
+        used = time.mktime(time.strptime("%s %s" % tuple(stamp), "%Y-%m-%d %H:%M"))
+        ran = time.mktime(time.strptime("%s %s" % (meta.get("at"), meta.get("time")), "%Y-%m-%d %H:%M"))
+    except (TypeError, ValueError):
+        return "", False
+    return text, (ran - used) / 3600.0 > STALE_HOURS
+
+
 def source_status():
-    """When each scan last ran and each source last updated, for the Overview.
-    Scans first, then updates; each in schedule order."""
+    """When each scan and lookup last ran, for the Overview's Last run list,
+    grouped by the run that does it (daily check, weekly check, Run all) and in
+    the order it runs them. Each scan says which list it used (note); old is
+    whether that list was over STALE_HOURS old when it ran (shown in red)."""
     out = []
 
-    def add(sid, label, date_, time_, state, tried="", by=""):
-        out.append({"id": sid, "label": label, "date": date_, "time": time_, "state": state, "tried": tried,
-                    "by": by})
+    def add(sid, run_, date_, time_, state, tried="", by="", note="", old=False):
+        out.append({"id": sid, "label": ITEM_NAME[sid], "run": run_, "date": date_, "time": time_, "state": state,
+                    "tried": tried, "by": by, "note": note, "old": old})
 
     def fresh(d, days):
         age = _days_since(d)
         return "never" if not d else ("ok" if age is not None and age <= days else "stale")
 
-    def feed(name, label):
+    def feed(name, run_, note=""):
         meta = _state_json(FEED_FILES[name]) or {}
         at = meta.get("at") if isinstance(meta.get("at"), str) and _DATE.match(meta.get("at")) else ""
         tm = meta.get("time") if isinstance(meta.get("time"), str) and re.fullmatch(r"\d{2}:\d{2}", meta["time"]) else ""
@@ -1957,59 +2232,28 @@ def source_status():
             state = "failed"
         else:
             state = fresh(at, FEED_INTERVAL.get(name, FEED_DAYS) + FEED_RETRY_DAYS)
-        add(name, label, at, tm if at else "", state, tried if state == "failed" else "")
+        # The Bumblebee list is fetched right before its scan: worth a mention
+        # only when the download failed and the scan used the last good one.
+        quiet = name == "bumblebee" and not meta.get("fallback")
+        text, old = used_note(meta, note) if note and at and not quiet else ("", False)
+        add(name, run_, at, tm if at else "", state, tried if state == "failed" else "", note=text, old=old)
 
-    # Each group in the order of the schedule lines: daily check, weekly check,
-    # update check.
-    if feed_available("downloads-scan"):
-        feed("downloads-scan", ITEM_NAME["downloads-scan"] + DAILY)
-    if feed_available("bumblebee"):
-        feed("bumblebee", ITEM_NAME["bumblebee"] + DAILY)
+    for name in DAILY_FEEDS:
+        if feed_available(name):
+            feed(name, "daily", {"bumblebee": "the list", "downloads-scan": "signatures"}.get(name, ""))
+    if feed_available("firmware"):
+        feed("firmware", "weekly")
     if feed_available("virus-scan"):
-        feed("virus-scan", ITEM_NAME["virus-scan"] + WEEKLY)
+        feed("virus-scan", "weekly", "signatures")
         ext = clamui_last("scan")                       # a scan you ran in ClamUI counts too
         mine = out[-1]
         if ext[0] and _newer(ext, (mine["date"], mine["time"])) == ext and ext != (mine["date"], mine["time"]):
             out[-1] = dict(mine, date=ext[0], time=ext[1], state=fresh(ext[0], FEED_DAYS + FEED_RETRY_DAYS),
-                           tried="", by="ClamUI")
-    if feed_available("firmware"):
-        feed("firmware", ITEM_NAME["firmware"] + WEEKLY)
+                           tried="", by="ClamUI", note="", old=False)
     d, _ = no_password_scan()
     _, t = _mtime_stamp([home_path(*STATE_DIR, NO_PASSWORD_NAME)]) if d else ("", "")
-    add("password-check", ITEM_NAME["password-check"] + " (Run all only)", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
-    for name in ("pending-updates", "flatpak"):
-        if feed_available(name):
-            feed(name, ITEM_NAME[name] + DAILY)
-    if is_trusted_executable(sys_path("/usr/bin/clamscan")):
-        # Whoever updated them: ClamAV's own service (freshclam.dat changes on
-        # every check, even when nothing new came out), Vigil, or ClamUI.
-        d, t = _mtime_stamp([sys_path("/var/lib/clamav/" + n) for n in
-                             ("daily.cld", "daily.cvd", "main.cld", "main.cvd", "bytecode.cld", "bytecode.cvd",
-                              "freshclam.dat")])
-        meta = _state_json(FEED_FILES["signatures"]) or {}
-        mine = (meta.get("at", ""), meta.get("time", "")) if isinstance(meta.get("at"), str) and \
-            _DATE.match(meta.get("at", "")) and isinstance(meta.get("time"), str) else ("", "")
-        d, t = _newer(mine, (d, t))
-        ext = clamui_last("update")
-        by = "ClamUI" if ext[0] and _newer(ext, (d, t)) == ext and ext != (d, t) else ""
-        d, t = _newer(ext, (d, t))
-        add("signatures", ITEM_NAME["signatures"] + UPDATE, d, t, fresh(d, FEED_DAYS), by=by)
-    for name in ("arch-audit", "osv", "aur", "bumblebee-list"):
-        if feed_available(name):
-            feed(name, ITEM_NAME[name] + UPDATE)
+    add("password-check", "all", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
     return out
-
-
-def feeds_updated():
-    """The oldest completed date among the available feeds, or ''."""
-    dates = []
-    for name in SOURCE_FEEDS:
-        if feed_available(name):
-            cache = feed_cache(name)
-            if cache is None:
-                return ""
-            dates.append(cache["at"])
-    return min(dates) if dates else ""
 
 
 def save_feed(name, body, ok=True, retry_days=None):
@@ -2039,7 +2283,7 @@ def refresh_arch_audit():
         save_feed("arch-audit", {}, ok=False)
         raise Refused("arch-audit did not finish (no network, or it took too long)")
     save_feed("arch-audit", {"packages": pkgs})
-    return "Vulnerability database refreshed. " + (
+    return "Checked your packages against the newest Arch security list. " + (
         "Updating would fix %d known vulnerabilit%s on this machine." % (len(pkgs), "y" if len(pkgs) == 1 else "ies")
         if pkgs else "No updates are waiting that fix a known vulnerability on this machine.")
 
@@ -2138,7 +2382,7 @@ def refresh_osv():
 
 @check
 def check_osv():
-    cid, cat, title = "malicious-packages", "supply", "OSV malware list (npm, Bun packages)"
+    cid, cat, title = "malicious-packages", "supply", "Known-malicious packages (OSV)"
     why = ("Attackers publish poisoned npm and Bun packages that steal passwords and keys; the "
            "2026 Atomic Arch attack pulled one into AUR builds. Vigil asks OSV.dev about the "
            "packages in your AUR build folders and global npm and Bun installs, sending names and "
@@ -2150,9 +2394,10 @@ def check_osv():
         return result(cid, cat, title, "pass", "No AUR build folders or global npm and Bun installs to check.",
                       why, weight=0)
     cache = feed_cache("osv")
-    refresh = fix("helper", "osv-refresh", "Check now")
+    refresh = fix("helper", "osv-refresh", "Scan now")
     if cache is None:
-        return result(cid, cat, title, "info", "The first check runs within a day.", why, fix=refresh, weight=0)
+        return result(cid, cat, title, "info", "Not scanned yet: press Scan now, or Daily check under Run now.", why,
+                      fix=refresh, weight=0)
     mal = [m for m in cache.get("malicious", []) if isinstance(m, dict)][:500] \
         if isinstance(cache.get("malicious"), list) else []
     if mal:
@@ -2222,9 +2467,10 @@ def check_aur_status():
     if not feed_available("aur"):
         return result(cid, cat, title, "na", "pacman or curl is not available.", why, weight=0)
     cache = feed_cache("aur")
-    refresh = fix("helper", "aur-refresh", "Check now")
+    refresh = fix("helper", "aur-refresh", "Look up now")
     if cache is None:
-        return result(cid, cat, title, "info", "The first check runs within a day.", why, fix=refresh, weight=0)
+        return result(cid, cat, title, "info", "Not looked up yet: press Look up now, or Daily check under Run now.",
+                      why, fix=refresh, weight=0)
 
     def names(key):
         v = cache.get(key)
@@ -2242,13 +2488,14 @@ def check_aur_status():
         bits.append("%d no longer in the AUR" % len(gone))
     if orphans:
         bits.append("%d without a maintainer" % len(orphans))
-    return result(cid, cat, title, "info", "; ".join(bits).capitalize() + " (%s)." % feed_when(cache), why,
+    return result(cid, cat, title, "info", bits[0][:1].upper() + "; ".join(bits)[1:] + " (%s)." % feed_when(cache), why,
                   clean_block(lines), fix=refresh, weight=0,
                   howto="Switch to the official package where Arch now ships it, or to a maintained "
                         "replacement. If you need it as it is, mark it as reviewed.")
 
 
-# Weekly virus scan: ClamAV scans ~/Downloads as you (never as root), with
+# Virus scans: ClamAV scans ~ every week and what is new in ~/Downloads every
+# day, as you (never as root), with
 # the signatures ClamAV's own service keeps current. A detection is a match
 # against ClamAV's published signatures; potentially-unwanted-program rules
 # stay off (ClamAV's default), so adware-style guesses do not show up.
@@ -2381,7 +2628,8 @@ def refresh_downloads_scan(on_progress=None):
         last = time.time() - 86400
     files = new_downloads(min(last, time.time() - 3600) - 3600)      # an hour of overlap, never a gap
     if not files:
-        save_feed("downloads-scan", {"found": [], "files": 0})
+        # Nothing to hand ClamAV, but the line still says which signatures it had.
+        save_feed("downloads-scan", {"found": [], "files": 0, "used": list(signatures_updated())})
         return "No new downloads to scan."
     dirfd = _state_dir()
     try:
@@ -2406,7 +2654,7 @@ def refresh_downloads_scan(on_progress=None):
         save_feed("downloads-scan", {}, ok=False)
         raise Refused("the scan of new downloads did not finish (missing signatures?)")
     found = confirm_detections(parse_clamscan(out)) if rc == 1 else []
-    save_feed("downloads-scan", {"found": found, "files": len(files)})
+    save_feed("downloads-scan", {"found": found, "files": len(files), "used": list(signatures_updated())})
     return "Scanned %d new download%s." % (len(files), "" if len(files) == 1 else "s")
 
 
@@ -2485,7 +2733,8 @@ def refresh_virus_scan(on_progress=None):
         raise Refused("the virus scan did not finish (missing signatures?)")
     found = confirm_detections(parse_clamscan(out)) if rc == 1 else []
     odd_shown = [clean(_shown(p).replace("\n", "\\n").replace("\r", "\\r"), 200) for p in odd]
-    save_feed("virus-scan", {"found": found, "scanned": "~", "files": seen[0], "oddNames": odd_shown})
+    save_feed("virus-scan", {"found": found, "scanned": "~", "files": seen[0], "oddNames": odd_shown,
+                             "used": list(signatures_updated())})
     ignored = ignored_detections()
     live = sum(1 for f in found if not detection_ignored(f, ignored))
     note = " %d marked as a false positive." % (len(found) - live) if len(found) > live else ""
@@ -2495,7 +2744,7 @@ def refresh_virus_scan(on_progress=None):
 
 @check
 def check_virus_scan():
-    cid, cat, title = "virus-scan", "detect", "ClamAV scans of ~ and ~/Downloads"
+    cid, cat, title = "virus-scan", "detect", "Infected files (ClamAV)"
     why = ("Every week, and in each Run all, ClamAV scans your home folder for known malware, as you and "
            "in the background; every day it scans what is new in Downloads. Caches, game libraries, "
            "node_modules and .git folders are skipped.")
@@ -2504,51 +2753,67 @@ def check_virus_scan():
     cache = feed_cache("virus-scan")
     now = fix("helper", "virus-scan-now", "Scan now")
     if cache is None:
-        return result(cid, cat, title, "info", "The first scan runs within a day.", why, fix=now, weight=0,
+        return result(cid, cat, title, "info", "Not scanned yet.", why, fix=now, weight=0,
                       howto="Press Scan now to scan your home folder now, or wait for the next weekly check.")
+    scanned = _virus_scans_line(cache)
     found = current_detections()
     ignored = ignored_detections()
     items, live = [], []
     for f in found:
-        text = "%s: %s" % (clean(f.get("path"), 200), clean(f.get("signature"), 120))
+        # Two lines: the file, then what ClamAV found in it.
+        sig = clean(str(f.get("signature") or "").replace("\n", "\\n"), 120)
+        text = "%s\n%s" % (clean(str(f.get("path") or "").replace("\n", "\\n"), 200), sig)
         did = detection_id(f)
         is_ignored = did is not None and detection_ignored(f, ignored)
-        items.append({"id": did or "", "text": text, "ignored": is_ignored})
+        item = {"id": did or "", "kind": "detection", "text": text, "ignored": is_ignored}
+        add_marks(item, [{"text": sig, "level": detection_level(sig)}] if sig else None)
+        items.append(item)
         if not is_ignored:
-            live.append(text)
+            live.append(text.replace("\n", ": "))
+    LEGACY["complete"].add("detection")
     n_ignored = len(found) - len(live)
     note = " %d marked as a false positive." % n_ignored if n_ignored else ""
     odd = [clean(x, 200) for x in cache.get("oddNames", []) if isinstance(x, str)][:20] \
         if isinstance(cache.get("oddNames"), list) else []
     if odd and not live:
-        out = result(cid, cat, title, "warn", "No infected files, but %d file name%s contain%s a line break (%s)." % (
-            len(odd), "" if len(odd) == 1 else "s", "s" if len(odd) == 1 else "", feed_when(cache).replace(
-                "checked", "scanned")), why, clean_block(odd), fix=now, weight=1,
+        out = result(cid, cat, title, "warn", "No infected files, but %d file name%s contain%s a line break. %s." % (
+            len(odd), "" if len(odd) == 1 else "s", "s" if len(odd) == 1 else "", scanned), why, clean_block(odd),
+            fix=now, weight=1,
             howto="Normal programs never name files like this; it is a trick to confuse virus scanners. "
                   "Look at where these files came from, and delete them if you do not know them.")
-        out["items"] = items
+        out["items"] = quiet_last(items)
         return out
     if live:
         handoff = fix("app", "open-clamui", "Open ClamUI to quarantine them") if clamui_install() else now
-        out = result(cid, cat, title, "fail", "%d infected file%s in %s (%s).%s" % (
-            len(live), "" if len(live) == 1 else "s", _scanned_where(cache),
-            feed_when(cache).replace("checked", "scanned"), note),
+        out = result(cid, cat, title, "fail", "%d infected file%s. %s.%s" % (
+            len(live), "" if len(live) == 1 else "s", scanned, note),
             why, clean_block(live), handoff, weight=3,
             howto="Do not open these files. Quarantine or delete them in ClamUI; if you downloaded them "
                   "on purpose, get them again from the official site. Only if you are sure a file is safe "
-                  "(for example a game file ClamAV mistakes for malware), press False positive next to it.")
+                  "(for example a game file ClamAV mistakes for malware), tick it and press False positive selected.")
     else:
-        daily = feed_cache("downloads-scan")
-        daily_note = " New downloads scanned %s." % feed_when(daily).replace("checked ", "") if daily else ""
-        out = result(cid, cat, title, "pass", "No infected files in %s (%s).%s%s" % (
-            _scanned_where(cache), feed_when(cache).replace("checked", "scanned"), note, daily_note), why,
-            fix=now, weight=3)
-    out["items"] = items
+        out = result(cid, cat, title, "pass", "No infected files. %s.%s" % (scanned, note), why, fix=now, weight=3)
+    out["items"] = quiet_last(items)
     return out
 
 
+def _virus_scans_line(cache):
+    """Both virus scans behind the row, each with its run: "~ scanned yesterday
+    at 19:58 (weekly check); ~/Downloads today at 00:30 (daily check)". A scan
+    that used signatures over two days old says so."""
+    def when(meta):
+        text, old = used_note(meta, "signatures")
+        return feed_when(meta).replace("checked ", "") + ((", " + text) if old else "")
+    parts = ["~ scanned %s (weekly check)" % when(cache)]
+    # "~ scanned ..." starts a sentence in the summary.
+    daily = feed_cache("downloads-scan")
+    if daily and not daily.get("byFullScan"):
+        parts.append("~/Downloads %s (daily check)" % when(daily))
+    return "; ".join(parts)
+
+
 # --- Marking a virus detection as a false positive ---------------------------
-# One detection at a time, and only while the file is exactly the one you
+# Up to PICK_MAX detections at once, each only while its file is exactly the one you
 # looked at: its SHA-256 is recorded, and a file that changes (an update, or
 # something replacing it) is reported again.
 
@@ -2592,12 +2857,13 @@ def detection_file(f):
     return None
 
 
-def detection_id(f):
-    """A short stable id for one detection (file and signature), or None."""
+def detection_id(f, legacy=False):
+    """A short stable id for one detection (file and signature), keyed; or None.
+    legacy: the plain SHA-256 id from before keyed ids."""
     path, sig = detection_file(f), f.get("signature")
     if not isinstance(path, str) or not isinstance(sig, str):
         return None
-    return hashlib.sha256(("%s\0%s" % (path, sig)).encode("utf-8", "surrogateescape")).hexdigest()[:16]
+    return legacy_id(path, sig) if legacy else item_id("detection", path, sig)
 
 
 def _file_identity(path):
@@ -2636,14 +2902,29 @@ def _stat_key(path):
 
 
 def ignored_detections():
+    """id -> {"id", "sha256", "stat", "at", "old"}: the file's hash and how it
+    looked, nothing that names it. "old" marks an id from before keyed ids."""
     data = _state_json(IGNORED_FILE)
+    keyed = isinstance(data, dict) and data.get("ids") == "keyed"
     entries = data.get("ignored") if isinstance(data, dict) else None
     out = {}
     for e in (entries if isinstance(entries, list) else [])[:IGNORED_MAX]:
         if isinstance(e, dict) and isinstance(e.get("id"), str) and re.fullmatch(r"[0-9a-f]{16}", e["id"]) \
                 and isinstance(e.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", e["sha256"]):
-            out[e["id"]] = e
+            st = e.get("stat")
+            out[e["id"]] = {"id": e["id"], "sha256": e["sha256"],
+                            "stat": st if isinstance(st, list) and len(st) == 5 and all(
+                                isinstance(x, int) and not isinstance(x, bool) for x in st) else None,
+                            "at": e.get("at") if isinstance(e.get("at"), str) and _DATE.match(e["at"]) else "",
+                            "old": not keyed or e.get("old") is True}
     return out
+
+
+def write_ignored(dirfd, entries):
+    body = {"schema": SCHEMA, "ids": "keyed",
+            "ignored": [dict({"id": e["id"], "sha256": e["sha256"], "stat": e["stat"], "at": e["at"]},
+                             **({"old": True} if e["old"] else {})) for e in entries[-IGNORED_MAX:]]}
+    write_atomic(dirfd, IGNORED_FILE, json.dumps(body, separators=(",", ":")).encode())
 
 
 def detection_ignored(f, ignored):
@@ -2651,6 +2932,11 @@ def detection_ignored(f, ignored):
     An unchanged stat key (ctime included, which a program cannot set back)
     skips re-reading the file; anything else re-hashes it."""
     e = ignored.get(detection_id(f) or "")
+    old = detection_id(f, legacy=True)
+    if old:
+        LEGACY["ignored"][old] = detection_id(f)
+    if not e and old and ignored.get(old, {}).get("old"):
+        e = ignored[old]
     if not e:
         return False
     path = detection_file(f)
@@ -2670,37 +2956,60 @@ def _current_detection(did):
     return None
 
 
-def set_ignored(did, on):
-    """`vigil ignore <id>` / `vigil unignore <id>` for one detection of the last scan."""
-    if not re.fullmatch(r"[0-9a-f]{16}", did):
+def set_ignored(dids, on):
+    """`vigil ignore <id>...` / `vigil unignore <id>...` for detections of the last scan.
+    Marking takes only detections listed now whose file Vigil could read."""
+    dids = [dids] if isinstance(dids, str) else list(dids)
+    if not dids or not all(re.fullmatch(r"[0-9a-f]{16}", x) for x in dids):
         return {"ok": False, "action": "", "message": "Unknown detection."}
-    f = _current_detection(did) if on else None
-    if on and f is None:
-        return {"ok": False, "action": "", "message": "That detection is no longer in the last scan."}
+    marked, unread = [], 0
     if on:
-        key, digest = _file_identity(detection_file(f))
-        if digest is None:
-            return {"ok": False, "action": "", "message": "Could not read the file, so it was not ignored."}
+        current_found = {detection_id(f): f for f in current_detections()}
+        if not any(x in current_found for x in dids):
+            return {"ok": False, "action": "", "message": "That detection is no longer in the last scan."
+                    if len(dids) == 1 else "Those detections are no longer in the last scan."}
+        for did in dids:
+            f = current_found.get(did)
+            if f is None:
+                continue
+            key, digest = _file_identity(detection_file(f))
+            if digest is None:
+                unread += 1
+                continue
+            marked.append({"id": did, "sha256": digest, "stat": key, "at": time.strftime("%Y-%m-%d"),
+                           "old": False})
+        if not marked:
+            return {"ok": False, "action": "", "message": "Could not read the file, so it was not marked."
+                    if len(dids) == 1 else "Could not read the files, so none was marked."}
     try:
         dirfd = _state_dir()
     except (OSError, Refused):
         return {"ok": False, "action": "", "message": "Could not open the Vigil state folder."}
     try:
         _lock(dirfd)
-        current = [e for e in ignored_detections().values() if e["id"] != did]
-        if on:
-            current.append({"id": did, "file": detection_file(f), "signature": f["signature"], "sha256": digest,
-                            "stat": key, "at": time.strftime("%Y-%m-%d")})
-        write_atomic(dirfd, IGNORED_FILE, json.dumps({"schema": SCHEMA, "ignored": current[-IGNORED_MAX:]},
-                                                     separators=(",", ":")).encode())
+        # Each detection's id from before keyed ids goes too.
+        olds = {detection_id(f, legacy=True) for f in current_detections() if detection_id(f) in dids}
+        current = [e for e in ignored_detections().values() if e["id"] not in dids and e["id"] not in olds] + marked
+        write_ignored(dirfd, current)
     finally:
         os.close(dirfd)
     # You just looked at this row: what it shows now is not "new", so no notification follows.
     c = next((x for x in audit(peek=True)["checks"] if x["id"] == "virus-scan"), None)
     if c is not None and c["status"] in ("fail", "warn"):
         mark_seen(fingerprint(c))
-    return {"ok": True, "action": "", "message": "Marked as a false positive. It comes back if the file changes." if on
-            else "Counting it again."}
+    n = len(marked) if on else len(dids)
+    if not on:
+        msg = "Counting it again." if n == 1 else "Counting %d detections again." % n
+    elif n == 1:
+        msg = "Marked as a false positive. It comes back if the file changes."
+    else:
+        msg = "Marked %d files as false positives. Each comes back if it changes." % n
+    left = len(dids) - n - unread if on else 0
+    if unread:
+        msg += " %d could not be read, so %s not marked." % (unread, "it was" if unread == 1 else "they were")
+    if left > 0:
+        msg += " %d %s no longer in the last scan." % (left, "is" if left == 1 else "are")
+    return {"ok": True, "action": "", "message": msg}
 
 
 # --- Waiting updates and firmware --------------------------------------------
@@ -2777,12 +3086,12 @@ def refresh_firmware():
         save_feed("firmware", {}, ok=False)
         raise Refused("fwupd could not check")
     save_feed("firmware", {"updates": updates[:50]})
-    return "Firmware checked."
+    return "Looked up firmware updates."
 
 
 # --- Flatpak apps --------------------------------------------------------------
-# Omarchy's updater does not update Flatpak apps, and Vigil installs ClamUI
-# (which carries its own ClamAV) as one. Your own (--user) apps update without
+# Omarchy's updater does not update Flatpak apps (ClamUI is one, if you
+# installed it from Flathub). Your own (--user) apps update without
 # a password, in Run daily check and Run all; apps installed for every account (--system)
 # need Omarchy's password dialog, so only their button does that.
 
@@ -2832,16 +3141,16 @@ def update_user_flatpaks():
 
 @check
 def check_flatpak():
-    cid, cat, title = "flatpak-apps", "harden", "Flatpak update check"
-    why = ("Omarchy's own updater does not update apps installed with Flatpak, ClamUI among them. An app that "
-           "is never updated keeps its security holes, so Vigil checks them with each update and Update "
-           "sources installs the updates for your own apps.")
+    cid, cat, title = "flatpak-apps", "harden", "Flatpak updates"
+    why = ("Omarchy's own updater does not update apps installed with Flatpak. An app that is never updated "
+           "keeps its security holes, so the daily check looks up their updates, and Daily check under Run now "
+           "(or Run all) also installs those for your own apps.")
     if not feed_available("flatpak"):
         return result(cid, cat, title, "na", "No Flatpak apps are installed.", why, weight=0)
     cache = feed_cache("flatpak")
     if cache is None:
-        return result(cid, cat, title, "info", "Checked with the next update.", why, weight=0,
-                      howto="Press Run daily check on the Overview.")
+        return result(cid, cat, title, "info", "Not looked up yet: the next daily check does it.", why, weight=0,
+                      howto="Press Daily check under Run now on the Overview.")
     ids = {w: [x for x in cache.get(w, []) if isinstance(x, str) and _APP_ID.match(x)][:200]
            if isinstance(cache.get(w), list) else [] for w in ("user", "system")}
     total = len(ids["user"]) + len(ids["system"])
@@ -2853,24 +3162,24 @@ def check_flatpak():
     return result(cid, cat, title, "warn", "%d Flatpak app%s %s updates waiting (%s)." % (
         total, "" if total == 1 else "s", "has" if total == 1 else "have", when), why, clean_block(lines),
         fix=fix("terminal", "update-flatpaks", "Update apps"), weight=1,
-        howto="Press Update apps, or Run daily check on the Overview (it updates your own apps; apps "
+        howto="Press Update apps, or Daily check under Run now on the Overview (it updates your own apps; apps "
               "installed for every account ask for your password, so only Update apps does those).")
 
 
 @check
 def check_firmware():
-    cid, cat, title = "firmware", "harden", "Firmware check"
+    cid, cat, title = "firmware", "harden", "Firmware updates"
     why = ("Firmware is the software inside your hardware: the BIOS, the SSD, the Thunderbolt chip. Hardware "
            "makers publish security fixes for it on LVFS, and fwupd installs them.")
     if not feed_available("firmware"):
         return result(cid, cat, title, "info", "Not checked: fwupd is not installed.", why,
                       fix=fix("terminal", "install-helpers", "Install"), weight=0,
-                      howto="Press Install: Vigil installs fwupd from the Arch repositories, and the next Full "
-                            "scan checks your firmware.")
+                      howto="Press Install: Vigil installs every missing helper it works with, fwupd among them "
+                            "(the card lists each), and the next weekly check looks up your firmware.")
     cache = feed_cache("firmware")
     if cache is None:
         return result(cid, cat, title, "info", "Checked in the next weekly check.", why, weight=0,
-                      howto="Press Run weekly check on the Overview.")
+                      howto="Press Weekly check under Run now on the Overview.")
     ups = [u for u in cache.get("updates", []) if isinstance(u, dict)][:50] \
         if isinstance(cache.get("updates"), list) else []
     when = feed_when(cache)
@@ -2892,13 +3201,13 @@ def check_firmware():
 
 FEED_REFRESH = {"arch-audit": refresh_arch_audit, "osv": refresh_osv, "aur": refresh_aur}
 FEED_REFRESH["pending-updates"] = refresh_pending_updates
-FEED_LABELS = {"pending-updates": "the list of waiting updates", "firmware": "the firmware check",
-               "downloads-scan": "the scan of new downloads",
-               "flatpak": "the Flatpak app check", "flatpak-update": "your Flatpak apps",
-               "arch-audit": "the Arch vulnerability database", "osv": "the OSV malicious-package database",
-               "aur": "your AUR package status", "virus-scan": "the virus scan", "bumblebee": "the Bumblebee scan",
-               "bumblebee-list": "the Bumblebee list of compromised packages",
-               "password-check": "the password check", "signatures": "the ClamAV virus signatures"}
+FEED_LABELS = {"pending-updates": "the system update lookup", "flatpak": "the Flatpak update lookup",
+               "firmware": "the firmware lookup", "downloads-scan": "the virus scan of ~/Downloads",
+               "flatpak-update": "your Flatpak apps", "arch-audit": "the Arch security scan",
+               "osv": "the OSV malware scan", "aur": "the AUR status lookup", "virus-scan": "the virus scan of ~",
+               "bumblebee": "the Bumblebee scan", "bumblebee-list": "the Bumblebee list",
+               "password-check": "the password scan", "signatures": "the virus signatures",
+               "signatures-update": "the virus signatures update"}
 
 
 def _and(items):
@@ -2930,8 +3239,8 @@ def feed_findings():
 # installed packages, lockfiles, editor and browser extensions and MCP configs
 # against exposure catalogs of known-compromised releases that Perplexity
 # maintains in the same repository (threat_intel/). The Install button puts
-# the pinned release binary, checksum-verified, at BUMBLEBEE_BIN; the update check
-# fetches the current catalogs; the daily check runs it as you, read-only.
+# the pinned release binary, checksum-verified, at BUMBLEBEE_BIN; each daily
+# check downloads the current catalogs and then runs it as you, read-only.
 BUMBLEBEE_BIN = "/usr/local/bin/bumblebee"
 # The one Bumblebee version Vigil installs, with the SHA-256 of each release
 # archive written here, in the reviewed code (from Perplexity's checksums.txt
@@ -2944,8 +3253,9 @@ BUMBLEBEE_SHA256 = {"amd64": "53b080cf3ddb692b0c4e5492ef4785b4c54daf1624fcd0fcba
 BUMBLEBEE_MAX_BYTES = 64 * 1024 * 1024
 _VERSION_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}$")
 
-# Installs or updates Bumblebee, as root (Install, Update Bumblebee, and the
-# update check when the installed one is older). It never takes anything from
+# Installs the pinned Bumblebee, as root, only from a button you press (Install,
+# or Install Bumblebee on its row when a Vigil update has raised the pinned
+# version). No run installs or updates it. It never takes anything from
 # the report. The download is capped in bytes while it streams; the archive
 # must match the SHA-256 above; only a regular file is installed; and the
 # installed program is never run as root (a byte comparison decides whether
@@ -3127,7 +3437,13 @@ def refresh_bumblebee():
         raise Refused("it is not installed")
     catalog = home_path(*STATE_DIR, BUMBLEBEE_CATALOG)
     if not exists(catalog):
-        raise Refused("its list has not been downloaded yet; press Run update check")
+        raise Refused("its list could not be downloaded")
+    listed = feed_cache("bumblebee-list") or {}
+    used = [listed.get("at", ""), listed.get("time", "")]
+    # The list is downloaded right before every scan, so it is the newest and
+    # not worth a mention, unless that download failed and this is the last
+    # good one (fallback): then the row and the Last run line say which.
+    fallback = LIST_FALLBACK["bumblebee"]
     rc, out = run([BUMBLEBEE_BIN, "scan", "--profile", "baseline", "--exposure-catalog", catalog,
                    "--findings-only", "--output", "stdout", "--max-duration", "5m"],
                   timeout=360, limit=4 * 1024 * 1024)
@@ -3135,73 +3451,99 @@ def refresh_bumblebee():
     if rc not in (0, 1) or status in (None, "error"):
         save_feed("bumblebee", {}, ok=False)
         raise Refused("its scan did not finish")
-    save_feed("bumblebee", {"findings": findings, "status": status})
+    save_feed("bumblebee", {"findings": findings, "status": status, "used": used, "fallback": fallback})
     return "Bumblebee scanned."
 
 
-STEP_WEIGHT = {"virus-scan": 30, "downloads-scan": 3, "osv": 2, "bumblebee": 2, "firmware": 2, "signatures": 2, "flatpak": 4}
+STEP_WEIGHT = {"virus-scan": 30, "downloads-scan": 3, "osv": 2, "bumblebee": 2, "bumblebee-list": 2, "firmware": 2,
+               "signatures-update": 2, "flatpak": 4, "arch-audit": 2}
 
 # One name for each thing Vigil runs, used everywhere: the progress line, the
-# Last run list and (in Model.js) the schedule lines, so what will run, what
-# ran and what is running now always read the same. Must match Model.js.
-ITEM_NAME = {"downloads-scan": "ClamAV scan of ~/Downloads", "virus-scan": "ClamAV scan of ~",
-             "bumblebee": "Bumblebee scan", "firmware": "Firmware check", "password-check": "Password check",
-             "signatures": "ClamAV signatures", "pending-updates": "System update check",
-             "flatpak": "Flatpak update check", "arch-audit": "Arch security list",
-             "osv": "OSV malware list", "aur": "AUR package status", "bumblebee-list": "Bumblebee list"}
+# Last run list and (in Model.js) the run cards, so what will run, what ran
+# and what is running now always read the same. A scan reads this computer, a
+# lookup asks a tool or a service, and a list is downloaded. arch-audit and
+# osv-scanner download their lists as they scan, so each is one step.
+# Must match Model.js.
+ITEM_NAME = {"pending-updates": "System update lookup", "flatpak": "Flatpak update lookup",
+             "arch-audit": "Arch security scan", "osv": "OSV malware scan", "aur": "AUR status lookup",
+             "bumblebee-list": "Bumblebee list", "bumblebee": "Bumblebee scan",
+             "signatures": "Virus signatures", "downloads-scan": "Virus scan of ~/Downloads",
+             "firmware": "Firmware lookup", "virus-scan": "Virus scan of ~", "password-check": "Password scan"}
 ASKS = " (Omarchy asks for your password)"
-# Which schedule line runs each Last run row.
-DAILY, WEEKLY, UPDATE = " (daily check)", " (weekly check)", " (update check)"
 STEP_TEXT = dict(ITEM_NAME, **{
     "flatpak-update": "Flatpak app updates",
     "password-check": ITEM_NAME["password-check"] + ASKS,
-    "signatures": ITEM_NAME["signatures"] + ASKS,
-    "bumblebee-update": "Bumblebee update" + ASKS,
-    "signatures-and-bumblebee": "ClamAV signatures and Bumblebee update" + ASKS})
+    "signatures-update": "Virus signatures update" + ASKS})
+CLAM_SCANS = ("downloads-scan", "virus-scan")
+# Set during a run when the Bumblebee list could not be downloaded and the
+# scan uses the last good one.
+LIST_FALLBACK = {"bumblebee": False}
 
 
-def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=False, daily_only=False,
-                      weekly_only=False):
-    """Run what is due (the background run), or what a button asks for:
-    sources_only (Run update check), daily_only (Run daily check), weekly_only
-    (Run weekly check), full or force (Run all), scan_only (the virus scan of
-    your home folder alone). Emits progress lines when asked to."""
-    full = full or force
-    background = not (full or sources_only or scan_only or daily_only or weekly_only)
+def run_plan(full=False, scan_only=False, daily_only=False, weekly_only=False, signatures=False):
+    """The steps a run takes, in order. With no flag it is the background run:
+    only what is due, never a password. Each scan comes right after its list:
+    the Bumblebee list before the Bumblebee scan, the virus signatures before
+    each ClamAV scan. ClamAV's own update service keeps the signatures
+    current, so no run forces an update, except Run all when they are over two
+    days old (the service has fallen behind), and only when the panel says its
+    card showed that command (signatures): no root step runs that the card did
+    not show. Run all also runs the password scan first. The daily and weekly
+    checks and a row's Scan now never ask for a password."""
+    background = not (full or scan_only or daily_only or weekly_only)
     pressed = not background
-    # The update check: the lists. The daily check: the update and Flatpak
-    # checks, Bumblebee over your packages, a scan of what is new in Downloads.
-    # The weekly check: firmware and the whole home folder.
-    want_update = full or sources_only or background
-    want_daily = full or daily_only or background
-    run_full = full or weekly_only or (background and feed_due("full-scan"))
-    update = [n for n in SOURCE_FEEDS if n not in DAILY_FEEDS and feed_available(n) and (pressed or feed_due(n))] \
-        if want_update else []
-    daily = [n for n in SOURCE_FEEDS if n in DAILY_FEEDS and feed_available(n) and (pressed or feed_due(n))] \
-        if want_daily else []
-    # Steps that ask for your password come first, while you are at the screen,
-    # and only when you press a button: never in the background run. The one
-    # password step of the update check includes Bumblebee when the installed
-    # one is older than the version Vigil pins.
-    early = []
-    # The password step: what it includes is decided when it is reached (see the loop).
-    root_step = "root-updates" if (full or sources_only) and can_ask_password() \
-        and (can_update_signatures() or bumblebee_ok()) else ""
-    steps = early + ([root_step] if root_step else []) \
-        + (["password-check"] if full and can_ask_password() else []) + update + daily
-    sources = [n for n in steps if n in SOURCE_FEEDS]
-    catalog = exists(home_path(*STATE_DIR, BUMBLEBEE_CATALOG))
-    if bumblebee_ok() and (full or (daily_only and catalog) or
-                           (background and (run_full or (feed_due("bumblebee") and catalog)))):
-        steps.append("bumblebee")
-    # Run all scans the whole home folder, Downloads included, so not Downloads twice.
-    if (daily_only or (background and not run_full)) and feed_available("downloads-scan") and \
-            (daily_only or feed_due("downloads-scan")):
-        steps.append("downloads-scan")
-    if run_full and feed_available("firmware"):
+    run_weekly = full or weekly_only or (background and feed_due("full-scan"))
+    steps = []
+    if full or daily_only or background:
+        for name in DAILY_FEEDS:
+            if not feed_available(name) or not (pressed or feed_due(name)):
+                continue
+            if name == "bumblebee":
+                steps += (["bumblebee-list"] if feed_available("bumblebee-list") else []) + ["bumblebee"]
+            elif name == "downloads-scan":
+                if not run_weekly:                 # the weekly scan of ~ covers Downloads
+                    steps += ["signatures", "downloads-scan"]
+            else:
+                steps.append(name)
+    if run_weekly and feed_available("firmware"):
         steps.append("firmware")
-    if (run_full or scan_only) and feed_available("virus-scan"):
-        steps.append("virus-scan")                    # last: it takes longest
+    if (run_weekly or scan_only) and feed_available("virus-scan"):
+        steps += ["signatures", "virus-scan"]      # last: it takes longest
+    first = []
+    if signatures and full and any(n in steps for n in CLAM_SCANS) and signatures_due():
+        first.append("signatures-update")
+    if full and can_ask_password():
+        first.append("password-check")
+    return first + steps
+
+
+def verify_signatures():
+    """Right before a ClamAV scan: are the virus signatures there and current?
+    Returns a note when they are over two days old; raises when there are none."""
+    stamp = signatures_updated()
+    if not stamp[0]:
+        raise Refused("ClamAV has no virus signatures yet")
+    age = _hours_since(stamp)
+    if age is not None and age > STALE_HOURS:
+        days = max(1, int(age // 24))
+        return ("The virus signatures are %d day%s old (ClamAV's update service has fallen behind), so the "
+                "virus scan used them as they were; Run all updates them." % (days, "" if days == 1 else "s"))
+    return ""
+
+
+def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False, weekly_only=False,
+                      signatures=False):
+    """Run what is due (the background run), or what a button asks for:
+    daily_only (Daily check), weekly_only (Weekly check), full or force
+    (Run all), scan_only (the virus scan of your home folder alone, its row's
+    Scan now). signatures: the card you confirmed showed the signatures update.
+    Emits progress lines when asked to."""
+    full = full or force
+    background = not (full or scan_only or daily_only or weekly_only)
+    pressed = not background
+    run_weekly = full or weekly_only or (background and feed_due("full-scan"))
+    steps = run_plan(full=full, scan_only=scan_only, daily_only=daily_only, weekly_only=weekly_only,
+                     signatures=signatures)
 
     # Each step's share of the progress bar: the virus scan takes most of the
     # time, so it gets most of the bar, and the quick steps a sliver each.
@@ -3212,34 +3554,52 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
         acc += w
     PROGRESS["spans"] = spans
     done, failed, why, timed_out, notes = [], [], {}, [], []
+    no_signatures = ""
+    LIST_FALLBACK["bumblebee"] = False
     for i, name in enumerate(steps, 1):
         if not STOP["on"] and plugin_removed():
             STOP["on"] = True                        # the plugin was removed: start nothing more
         if STOP["on"]:
             break
-        if name == "root-updates":
-            # Include Bumblebee only when the installed one is older than the pinned version.
-            sig, bee = can_update_signatures(), bool(bumblebee_update_ready())
-            name = steps[i - 1] = ("signatures-and-bumblebee" if sig and bee else "signatures" if sig
-                                   else "bumblebee-update" if bee else "")
-            if not name:
-                continue
         progress(i, len(steps), STEP_TEXT[name])
         try:
+            if name in CLAM_SCANS and no_signatures:
+                # No signatures at all: scanning would only fail. Tried again tomorrow.
+                save_feed(name, {}, ok=False)
+                raise Refused(no_signatures)
             if name == "virus-scan":
                 refresh_virus_scan(lambda n, of, i=i: progress(i, len(steps), STEP_TEXT["virus-scan"], n, of))
+            elif name == "downloads-scan":
+                refresh_downloads_scan(lambda n, of, i=i: progress(i, len(steps), STEP_TEXT["downloads-scan"], n, of))
+            elif name == "signatures":
+                no_signatures = ""
+                try:
+                    note = verify_signatures()
+                except Refused as e:
+                    no_signatures = str(e)
+                    raise
+                if note and note not in notes:
+                    notes.append(note)
+            elif name == "signatures-update":
+                refresh_signatures()
+            elif name == "bumblebee-list":
+                try:
+                    refresh_bumblebee_list()
+                except Refused:
+                    old = feed_cache("bumblebee-list")
+                    if old is None or not exists(home_path(*STATE_DIR, BUMBLEBEE_CATALOG)):
+                        raise
+                    LIST_FALLBACK["bumblebee"] = True
+                    notes.append("Bumblebee's list could not be downloaded, so the Bumblebee scan used the one "
+                                 "from %s." % old["at"])
             elif name == "bumblebee":
                 refresh_bumblebee()
             elif name == "firmware":
                 refresh_firmware()
-            elif name == "downloads-scan":
-                refresh_downloads_scan(lambda n, of, i=i: progress(i, len(steps), STEP_TEXT["downloads-scan"], n, of))
             elif name == "password-check":
                 refresh_no_password()
             elif name == "flatpak" and (full or daily_only) and "user" in flatpak_installations():
                 update_user_flatpaks()
-            elif name in ("signatures", "bumblebee-update", "signatures-and-bumblebee"):
-                notes.extend(refresh_root_updates(name != "bumblebee-update", name != "signatures"))
             else:
                 FEED_REFRESH[name]()
             done.append(name)
@@ -3256,74 +3616,61 @@ def refresh_due_feeds(force=False, sources_only=False, full=False, scan_only=Fal
                     save_feed(name, {}, ok=False)
                 except (OSError, Refused):
                     pass
-    # The password step under whatever name it ran as counts as the signatures for the message.
-    for lst in (done, failed):
-        if "signatures-and-bumblebee" in lst:
-            lst.append("signatures")
-    if "signatures-and-bumblebee" in why:
-        why["signatures"] = why["signatures-and-bumblebee"]
     stopped = STOP["on"]
     if stopped:
-        # What was stopped or never ran counts as tried today, so the weekly run
-        # does not start it again straight away; it tries again tomorrow.
+        # What was stopped or never ran counts as tried today, so the background
+        # run does not start it again straight away; it tries again tomorrow.
         for name in steps:
             if name in FEED_FILES and name not in done:
                 save_feed(name, {}, ok=False)
-    if sources:
-        save_last_run(not stopped and not [n for n in failed if n in SOURCE_FEEDS], pressed)
-    if run_full and "virus-scan" in done and feed_available("downloads-scan"):
-        save_feed("downloads-scan", {"found": [], "files": 0, "byFullScan": True})
-    if run_full:
-        save_feed("full-scan", {}, ok=not stopped and not [n for n in failed if n in ("virus-scan", "bumblebee")],
+    if run_weekly and "virus-scan" in done and feed_available("downloads-scan"):
+        save_feed("downloads-scan", {"found": [], "files": 0, "byFullScan": True,
+                                     "used": (feed_cache("virus-scan") or {}).get("used")})
+    if run_weekly:
+        save_feed("full-scan", {}, ok=not stopped and not [n for n in failed if n in ("virus-scan", "firmware")],
                   retry_days=FEED_DAYS if timed_out else None)
-    no_pkexec = " The password check could not run: pkexec is missing." if full and not can_ask_password() else ""
+    no_pkexec = " The password scan could not run: pkexec is missing." if full and not can_ask_password() else ""
     if stopped and not done:
         return {"ok": True, "stopped": True, "action": "", "message": "Stopped."}
     if not done and not failed:
-        if run_full:
-            return {"ok": True, "action": "", "message": "Checked every setting. Install ClamUI (Detect tab) "
-                    "to add a virus scan to the weekly check." + no_pkexec}
+        if run_weekly:
+            return {"ok": True, "action": "", "message": "Nothing to run yet: none of the tools these scans "
+                    "need is installed. Press Install on the Overview to add them." + no_pkexec}
         return {"ok": True, "action": "", "message": "Everything is up to date."}
-    refreshed = [FEED_LABELS[n] for n in done if n in SOURCE_FEEDS or n == "signatures"]
-    parts = []
-    if refreshed:
-        parts.append("refreshed " + _and(refreshed))
-    if "downloads-scan" in done:
-        parts.append("scanned what is new in Downloads")
-    if "virus-scan" in done:
-        parts.append("scanned your home folder")
-    if "firmware" in done:
-        parts.append("checked for firmware updates")
-    if "bumblebee" in done:
-        parts.append("checked your packages with Bumblebee")
-    if "password-check" in done:
-        parts.append("checked for accounts without a password")
+    said = {"signatures-update": "updated the virus signatures",
+            "pending-updates": "looked up waiting updates", "flatpak": "looked up Flatpak updates",
+            "arch-audit": "checked your packages against the Arch security list",
+            "osv": "checked your npm and Bun packages against OSV",
+            "aur": "looked up your AUR packages", "bumblebee": "checked your packages with Bumblebee",
+            "downloads-scan": "scanned what is new in Downloads", "firmware": "checked for firmware updates",
+            "virus-scan": "scanned your home folder", "password-check": "checked for accounts without a password"}
+    parts = [said[n] for n in done if n in said]
     msg = (_and(parts)[0].upper() + _and(parts)[1:] + ".") if parts else ""
-    retried = [n for n in failed if n not in ("password-check", "signatures", "bumblebee", "bumblebee-update",
-                                              "signatures-and-bumblebee") and n not in timed_out]
+    retried = [n for n in failed if n not in ("password-check", "signatures-update", "signatures")
+               and n not in timed_out]
     if retried:
-        msg += " Could not finish %s; Vigil tries again tomorrow." % _and([FEED_LABELS[n] for n in retried])
+        msg += " Could not finish %s; it runs again with the next check." % _and([FEED_LABELS[n] for n in retried])
     if "password-check" in failed:
-        msg += " The password check was skipped: no password was given."
+        msg += " The password scan was skipped: no password was given."
     if "virus-scan" in timed_out:
         msg += " The virus scan took longer than %d hours, so it was stopped; it tries again next week." % (
             VIRUS_SCAN_SECONDS // 3600)
     if "bumblebee" in failed:
         msg += " Bumblebee could not scan: %s." % why.get("bumblebee", "it did not finish")
+    if "signatures-update" in failed:
+        msg += " The virus signatures were not updated: %s." % why.get("signatures-update",
+                                                                         "ClamAV could not update them")
     if "signatures" in failed:
-        msg += " The virus signatures were not updated: %s." % why.get("signatures", "ClamAV could not update them")
-    if "bumblebee-update" in failed:
-        msg += " Bumblebee was not updated: %s." % why.get("bumblebee-update", "it could not run")
+        msg += " The virus scan could not run: %s." % why.get("signatures", "ClamAV has no virus signatures yet")
     for note in notes:
-        if not ("signatures" in failed and note.startswith("The virus signatures")):
-            msg += " " + note
+        msg += " " + note
     msg += no_pkexec
     found = feed_findings()
     msg += (" On this machine: %s. See the tabs for details." % "; ".join(found)) if found \
         else " Nothing on this machine needs attention."
     if stopped:
         msg = "Stopped." + (" Done before that: %s." % _and(parts) if parts else "")
-    return {"ok": not failed or stopped, "stopped": stopped, "action": "", "message": clean(msg.strip())}
+    return {"ok": not failed or stopped, "stopped": stopped, "action": "", "message": clean(msg.strip(), MESSAGE_MAX)}
 
 
 CLAMUI_APP_ID = "io.github.linx_systems.ClamUI"
@@ -3363,22 +3710,25 @@ def check_clamui():
 
 @check
 def check_bumblebee():
-    cid, cat, title = "bumblebee", "supply", "Bumblebee scan (known-compromised packages)"
+    cid, cat, title = "bumblebee", "supply", "Known-compromised packages (Bumblebee)"
     why = ("Attackers sometimes take over a popular npm, PyPI or other package and publish a poisoned version. "
            "Perplexity's Bumblebee checks your packages, editor and browser extensions and MCP configs "
            "against the compromised releases Perplexity tracks.")
     if not bumblebee_ok():
         return result(cid, cat, title, "info", "Not installed.", why,
                       fix=fix("terminal", "install-helpers", "Install"), weight=0,
-                      howto="Press Install: Vigil downloads Bumblebee " + BUMBLEBEE_VERSION + " from Perplexity, checks "
-                            "it against the checksum written in Vigil's code, and installs it.")
+                      howto="Press Install: Vigil installs every missing helper it works with (the card lists "
+                            "each), including Bumblebee " + BUMBLEBEE_VERSION + " from Perplexity, checked against the "
+                            "checksum written in Vigil's code.")
     cache = feed_cache("bumblebee")
     if cache is None:
-        return result(cid, cat, title, "info", "Installed. Its first check runs with the next daily check.", why,
-                      weight=0, howto="Press Run daily check on the Overview, or wait for the next one.")
+        return result(cid, cat, title, "info", "Installed. Not scanned yet: the next daily check runs it.", why,
+                      weight=0, howto="Press Daily check under Run now on the Overview, or wait for the next one.")
     found = [f for f in cache.get("findings", []) if isinstance(f, dict)][:500] \
         if isinstance(cache.get("findings"), list) else []
     when = feed_when(cache).replace("checked", "scanned")
+    used, _ = used_note(cache, "the list") if cache.get("fallback") else ("", False)
+    when += (", " + used) if used else ""
     if found:
         lines = ["%s: %s %s %s in %s" % (clean(f.get("catalog_name"), 120), clean(f.get("ecosystem"), 30),
                                           clean(f.get("package_name"), 100), clean(f.get("version"), 40),
@@ -3389,17 +3739,19 @@ def check_bumblebee():
                   "the passwords and keys used on this computer from another device.")
     ready = bumblebee_update_ready()
     if ready:
-        return result(cid, cat, title, "info", "Bumblebee %s is ready to install (you have %s)." % (
-            ready, bumblebee_installed_version()), why, "No known-compromised packages (%s)." % when,
-            fix=fix("terminal", "update-bumblebee", "Update Bumblebee"), weight=0,
-            howto="Press Update Bumblebee, or Run update check on the Overview, which does it behind the same "
-                  "password prompt. Vigil installs the version it was reviewed with, checked against the checksum "
-                  "written in its code; newer Bumblebee versions come with Vigil updates.")
+        # A Vigil update raised the pinned version. Nothing installs it by itself:
+        # only this button, after its card, behind your password.
+        return result(cid, cat, title, "info", "Bumblebee %s is installed; this Vigil was reviewed with %s." % (
+            bumblebee_installed_version(), ready), why, "No known-compromised packages (%s)." % when,
+            fix=fix("terminal", "update-bumblebee", "Install Bumblebee " + ready), weight=0,
+            howto="Press Install Bumblebee %s. Vigil installs only the version it was reviewed with, checked "
+                  "against the checksum written in its code. No check updates Bumblebee by itself: a newer "
+                  "version reaches you only with a Vigil update." % ready)
     return result(cid, cat, title, "pass", "No known-compromised packages (%s)." % when, why, weight=3)
 
 
-# --- Scans scheduled twice --------------------------------------------------
-# Other tools that schedule what Vigil's weekly run already does. Vigil only
+# --- Duplicate scan schedules --------------------------------------------------
+# Other tools that schedule what Vigil's daily and weekly checks already do. Vigil only
 # reads their files here; turning them off is a confirmed panel action
 # ("hand-over-schedules" in Model.js), which leaves a marker per change in
 # HANDOVER_DIR so Undo restores exactly those.
@@ -3510,8 +3862,8 @@ def handover_marks():
 
 @check
 def check_other_schedules():
-    cid, cat, title = "other-schedules", "detect", "Scans scheduled twice"
-    why = ("Vigil already runs a weekly virus scan of your home folder and a Bumblebee check. When another "
+    cid, cat, title = "other-schedules", "detect", "Duplicate scan schedules"
+    why = ("Vigil already runs a weekly virus scan of your home folder and a daily Bumblebee scan. When another "
            "app runs the same scan on its own schedule, your computer does the work twice, sometimes at "
            "the same time.")
     twice, kept = [], []
@@ -3547,17 +3899,43 @@ def check_plugins():
     why = ("Omarchy plugins run inside the desktop shell with everything your account can reach, "
            "and they are not sandboxed. Vigil reads each one's code without running it; "
            "downloading and running code, or shipping compiled binaries, deserve a closer look.")
+    howto = ("Remove a plugin you no longer use: tick it, then Remove selected (it asks first and shows the "
+             "exact command, Omarchy's own omarchy-plugin-remove). Keep one you have looked at and trust: it "
+             "stays on the list, with a lock, and Vigil stops counting it until its code gains a new capability.")
+    recs = plugin_records()
+    if not recs:
+        return result(cid, cat, title, "pass", "No other third-party plugins are installed.", why, weight=0)
+    items, live, note = pick_items(recs, kept_items(), " %d kept.")
+    lines = [r["text"].replace("\n", ": ") for r in live]
+    if not live:
+        out = result(cid, cat, title, "pass", "Every other plugin is one you kept.%s" % note, why, weight=0)
+        out["items"] = items
+        return out
+    summary = "%d third-party plugin%s installed." % (len(live), "" if len(live) == 1 else "s")
+    risky = sum(1 for r in live if r["risky"])
+    if risky:
+        summary += " %d download%s and run%s code or ship%s binaries." % (
+            risky, "s" if risky == 1 else "", "s" if risky == 1 else "", "s" if risky == 1 else "")
+    out = result(cid, cat, title, "info", summary + note, why, clean_block(lines), weight=0, howto=howto)
+    out["items"] = items
+    return out
+
+
+def plugin_records():
+    """One record per other plugin: its name, then what its code can do. The
+    id covers what it can do, so a plugin you kept that gains a capability is
+    counted again."""
     base = home_path(".config", "omarchy", "plugins")
     names = [n for n in list_dir(base, 200) if not n.startswith(".") and n != PLUGIN_ID]
     budget = [8 * 1024 * 1024, time.monotonic() + 3.0]
-    lines, risky = [], 0
+    recs = []
     for name in names[:100]:
-        label = clean(name, 80)
+        label = clean(name.replace("\n", "\\n"), 80)
         try:
             text = read_text(base + "/" + name + "/manifest.json", SMALL_FILE_MAX, follow=True)
             m = json.loads(text) if text else None
             if isinstance(m, dict) and isinstance(m.get("name"), str):
-                label = "%s (%s)" % (clean(m["name"], 60), clean(name, 80))
+                label = "%s (%s)" % (clean(m["name"].replace("\n", " "), 60), label)
         except (Refused, ValueError, OSError):
             pass
         try:
@@ -3567,20 +3945,19 @@ def check_plugins():
         if linked:
             # A development install links to a checkout elsewhere. Vigil does
             # not follow the link, so it says so rather than reporting "clean".
-            lines.append(label + ": linked from another folder (development install), not scanned")
-            continue
-        caps = plugin_capabilities(base + "/" + name, budget)
-        if "downloads and runs code" in caps or "compiled binaries" in caps:
-            risky += 1
-        lines.append(label + (": " + ", ".join(caps) if caps else ": no network, root or shell use found"))
-    if not lines:
-        return result(cid, cat, title, "pass", "No other third-party plugins are installed.", why, weight=0)
-    summary = "%d third-party plugin%s installed." % (len(lines), "" if len(lines) == 1 else "s")
-    if risky:
-        return result(cid, cat, title, "info", summary + " %d download%s and run%s code or ship%s binaries." % (
-            risky, "s" if risky == 1 else "", "s" if risky == 1 else "", "s" if risky == 1 else ""),
-            why, clean_block(lines), weight=0)
-    return result(cid, cat, title, "info", summary, why, clean_block(lines), weight=0)
+            caps, marks = ["linked"], [{"text": PLUGIN_LINKED, "level": "medium"}]
+        else:
+            caps = plugin_capabilities(base + "/" + name, budget)
+            marks = [{"text": c, "level": PLUGIN_LEVELS.get(c, "medium")} for c in caps] \
+                or [{"text": PLUGIN_NONE, "level": "low"}]
+        said = ", ".join(m["text"] for m in marks)
+        removable = bool(REMOVABLE_PLUGIN.fullmatch(name)) and ".." not in name
+        recs.append({"id": item_id("plugin", name, ",".join(caps)), "legacy": legacy_id("plugin", name, ",".join(caps)),
+                     "kind": "plugin", "shown": label,
+                     "name": name if removable else "", "text": label + "\n" + said, "marks": marks,
+                     "risky": "downloads and runs code" in caps or "compiled binaries" in caps})
+    LEGACY["complete"].add("plugin")
+    return recs
 
 
 # --- Phase 4: secrets, known-bad packages, file changes, plugin code --------
@@ -3766,21 +4143,6 @@ def _read_json_file(dirfd, name, cap=STATE_FILE_MAX):
     return data if isinstance(data, dict) else None
 
 
-def _state_text(name, cap=STATE_FILE_MAX):
-    """Read-only load of a text file from the state folder; "" when absent or unusable."""
-    try:
-        dirfd = _open_home_dir(list(STATE_DIR))
-    except (OSError, Refused):
-        return ""
-    try:
-        raw = _read_state_bytes(dirfd, name, cap)
-    except Refused:
-        return ""
-    finally:
-        os.close(dirfd)
-    return raw.decode("utf-8", "replace") if raw else ""
-
-
 def _state_json(name):
     """Read-only load of a JSON file from the state folder; None when absent or unusable."""
     try:
@@ -3803,20 +4165,6 @@ def save_baseline(snap):
         write_atomic(dirfd, BASELINE_NAME, json.dumps(body, separators=(",", ":")).encode())
     finally:
         os.close(dirfd)
-
-
-def _last_upgrade_date():
-    try:
-        text = read_tail(sys_path("/var/log/pacman.log"), PACMAN_LOG_TAIL) or ""
-    except Refused:
-        return ""
-    last = ""
-    for line in text.splitlines():
-        if "starting full system upgrade" in line or "] [ALPM] upgraded " in line:
-            m = _PACMAN_TS.match(line)
-            if m:
-                last = m.group(1)
-    return last
 
 
 def package_verified(paths):
@@ -3873,7 +4221,7 @@ def check_file_changes():
     files = base.get("files") if isinstance(base, dict) else None
     if not isinstance(files, dict) or not files:
         if INTEGRITY_PEEK["value"]:
-            return result(cid, cat, title, "na", "Vigil records how these files look on its next full check.",
+            return result(cid, cat, title, "na", "Vigil records how these files look the next time the panel on your main screen checks.",
                           why, weight=2)
         try:
             save_baseline(snap)
@@ -3890,8 +4238,9 @@ def check_file_changes():
     changed = [k for k in changed if k not in from_packages]
     added = [k for k in added if k not in from_packages]
     lines = ["changed: " + k for k in changed] + ["new: " + k for k in added] + ["removed: " + k for k in removed]
-    note = (" %d other change%s came from package updates and match what the package shipped." % (
-        len(from_packages), "" if len(from_packages) == 1 else "s")) if from_packages else ""
+    note = (" %d other change%s came from package updates and match%s what the package shipped." % (
+        len(from_packages), "" if len(from_packages) == 1 else "s", "es" if len(from_packages) == 1 else "")) \
+        if from_packages else ""
     if not lines:
         return result(cid, cat, title, "pass", "No unexpected changes to %d watched files since %s.%s" % (
             len(snap), since, note), why, weight=2)
@@ -3902,7 +4251,7 @@ def check_file_changes():
         if risky else "", note)
     accept = fix("helper", "integrity-accept", "Accept these changes")
     howto = ("Read the list under Details. If you recognise every change (an update, or something you did), "
-             "press Accept. If not, ask for help before changing anything.")
+             "press Accept these changes. If not, ask for help before changing anything.")
     if risky:
         return result(cid, cat, title, "warn", summary, why, clean_block(lines), accept, weight=2, howto=howto)
     return result(cid, cat, title, "info", summary, why, clean_block(lines), accept, weight=0, howto=howto)
@@ -3918,6 +4267,14 @@ PLUGIN_CAPABILITIES = [
     ("downloads and runs code", PERSISTENCE_PATTERNS[0][0]),
 ]
 PLUGIN_CODE_SUFFIXES = (".qml", ".js", ".mjs", ".py", ".sh", ".bash", ".lua")
+# How much each capability deserves a look, for the color the panel gives
+# it: high (the theme's red) can act as root or run code nobody reviewed;
+# medium (yellow) reaches the network or runs commands; low (green) is a
+# plugin where none of these were found.
+PLUGIN_LEVELS = {"root (sudo/pkexec)": "high", "downloads and runs code": "high", "compiled binaries": "high",
+                 "network": "medium", "shell commands": "medium"}
+PLUGIN_NONE = "no network, root or shell use found"
+PLUGIN_LINKED = "linked from another folder (development install), not scanned"
 
 
 def _plugin_files(root):
@@ -4285,6 +4642,597 @@ def check_user_cache():
                   fix=fix("helper", "clean-app-cache", "Clear unused"), weight=0)
 
 
+# --- Leftover app data --------------------------------------------------------
+# Apps you remove leave their settings and data in your home folder. A file's
+# age says nothing about whether you still use an app (settings are written
+# once and read for years), so Vigil asks instead whether anything on this
+# machine still claims the folder: an installed package or what it provides,
+# a program, a desktop entry, a Flatpak, Omarchy's own config set, a running
+# process, or a startup file that names it. Only what nothing claims, and
+# nothing has changed for a month, is listed. It is information, never a
+# problem: each item can be kept (it stays listed, locked, and Vigil stops
+# counting it) or moved to the trash, never deleted.
+
+LEFTOVER_DAYS = 30
+LEFTOVER_MAX = 150
+LEFTOVER_SECONDS = 4.0
+KEPT_FILE = "kept.json"                 # every pick list's kept items
+KEPT_LEGACY = "kept-leftovers.json"     # earlier builds' file, leftovers only: read, then folded into kept.json
+KEPT_MAX = 1000
+
+# (key, folder under home, what is listed there)
+LEFTOVER_ROOTS = (
+    ("config", (".config",), "names"),
+    ("share", (".local", "share"), "names"),
+    ("state", (".local", "state"), "names"),
+    ("home", (), "dotdirs"),
+    ("flatpak", (".var", "app"), "flatpak"),
+    ("bin", (".local", "bin"), "links"),
+    ("launchers", (".local", "share", "applications"), "launchers"),
+)
+
+# Shared folders that no single app owns, and folders that hold your keys,
+# your shell or Omarchy itself. Never listed, whatever is installed.
+LEFTOVER_NEVER = {
+    "config": {"autostart", "systemd", "environment.d", "user-dirs.dirs", "user-dirs.locale", "user-dirs.conf",
+               "mimeapps.list", "gtk-2.0", "gtk-3.0", "gtk-4.0", "gtkrc", "gtkrc-2.0", "fontconfig", "dconf",
+               "pulse", "pipewire", "wireplumber", "xdg-desktop-portal", "menus", "omarchy", "uwsm", "hypr",
+               "kdeglobals", "qtproject.conf", "trolltech.conf", "qt5ct", "qt6ct", "kvantum", "ibus", "fcitx",
+               "fcitx5", "gnome-session", "procps", "enchant", "user-tmpfiles.d", "containers",
+               "xdg-terminals.list", "monitors.xml", "session", "configstore", "kwalletrc", "kwinrc"},
+    "share": {"applications", "icons", "fonts", "themes", "mime", "trash", "recently-used.xbel", "keyrings",
+              "gvfs-metadata", "flatpak", "omarchy", "sounds", "backgrounds", "color-schemes",
+              "desktop-directories", "xorg", "systemd", "containers", "man", "bash-completion", "zsh", "fish",
+              "dbus-1", "pki", "user-places.xbel", "locale", "doc", "help", "info", "vulkan", "webapps",
+              "nautilus-python", "kservices5", "kxmlgui5", "glib-2.0", "mime-types"},
+    "state": {"omarchy-vigil", "omarchy", "wireplumber", "lesshst", "python_history", "bash", "zsh", "fish",
+              "systemd", "pipewire", "uwsm"},
+    "home": {".ssh", ".gnupg", ".local", ".config", ".cache", ".var", ".pki", ".password-store", ".icons",
+             ".themes", ".fonts", ".terminfo", ".trash", ".dbus", ".git", ".dotfiles", ".oh-my-zsh", ".zsh",
+             ".bashrc.d", ".nvm", ".pyenv", ".rbenv", ".sdkman", ".asdf", ".nix-profile", ".nix-defexpr",
+             ".gnome", ".kde", ".kde4", ".x11", ".xmonad", ".mail", ".maildir", ".tor", ".secrets"},
+}
+
+# Folder names that do not resemble the package or program they belong to.
+LEFTOVER_ALIASES = {
+    "mozilla": ("firefox", "thunderbird", "librewolf", "floorp", "zenbrowser", "seamonkey"),
+    "m2": ("maven", "mvn"),
+    "vscode": ("code", "codium", "vscodium", "visualstudiocode"),
+    "vscodeoss": ("code", "codium", "vscodium"),
+    "vscodium": ("codium",),
+    "ohmyzsh": ("zsh",),
+    "azure": ("az", "azurecli"),
+    "jetbrains": ("idea", "pycharm", "clion", "goland", "webstorm", "rider", "phpstorm", "rubymine", "datagrip",
+                  "rustrover", "jetbrainstoolbox", "intellijidea", "android"),
+    "google": ("googlechrome", "googleearth", "chrome"),
+    "android": ("androidstudio", "adb", "androidtools"),
+    "gnupg": ("gpg", "gnupg"),
+}
+
+_NORM = re.compile(r"[^a-z0-9]")
+_FILE_SUFFIX = re.compile(r"(\.[A-Za-z0-9]{1,8})+$")
+PROGRAM_DIRS = ("/usr/bin", "/usr/local/bin", "/usr/sbin", "/bin", "/opt", "/usr/share/omarchy/bin")
+CLAIM_DIRS = ("/usr/share", "/usr/local/share", "/usr/lib", "/usr/lib32", "/usr/libexec", "/etc", "/etc/xdg",
+              "/usr/share/omarchy/config", "/usr/share/omarchy/default")
+DESKTOP_DIRS = ("/usr/share/applications", "/usr/local/share/applications",
+                "/var/lib/flatpak/exports/share/applications")
+
+
+def _norm(name):
+    return _NORM.sub("", name.lower())
+
+
+def flatpak_app_ids():
+    """Installed Flatpak app ids, for you and for the whole system."""
+    ids = set()
+    for d in (home_path(".local", "share", "flatpak", "app"), sys_path("/var/lib/flatpak/app")):
+        ids.update(n for n in list_dir(d, 2000) if _APP_ID.match(n))
+    return ids
+
+
+def _desktop_keys(text):
+    """Exec, TryExec, StartupWMClass and Icon of a desktop entry's main group."""
+    out, group = {}, ""
+    for line in text.splitlines()[:2000]:
+        s = line.strip()
+        if s.startswith("["):
+            group = s
+            continue
+        if group == "[Desktop Entry]" and "=" in s:
+            k, _, val = s.partition("=")
+            k = k.strip()
+            if k in ("Exec", "TryExec", "StartupWMClass", "Icon", "Hidden") and k not in out:
+                out[k] = val.strip()
+    return out
+
+
+def _exec_program(cmd):
+    """(program, flatpak app id or "") from an Exec line: env and VAR=value
+    are skipped; field codes and quotes are dropped."""
+    tokens = [t.strip("\"'") for t in cmd.split() if not t.startswith("%")]
+    while tokens and (tokens[0] == "env" or tokens[0].endswith("/env") or
+                      ("=" in tokens[0] and not tokens[0].startswith("/"))):
+        tokens.pop(0)
+    if not tokens:
+        return "", ""
+    prog, app = tokens[0], ""
+    if prog.rsplit("/", 1)[-1] == "flatpak" and "run" in tokens:
+        rest = tokens[tokens.index("run") + 1:]
+        app = next((t for t in rest if not t.startswith("-")), "")
+    return prog, app
+
+
+def _claims(deadline):
+    """Normalised names that something installed or running answers to,
+    the raw text of your startup files, and whether the survey finished."""
+    words = set()
+
+    def add(name):
+        n = _norm(name)
+        if n:
+            words.add(n)
+        for suffix in ("bin", "git", "desktop", "appimage", "nightly", "beta", "stable", "browser"):
+            if len(n) > len(suffix) + 2 and n.endswith(suffix):
+                words.add(n[: -len(suffix)])
+
+    pkgdir = sys_path("/var/lib/pacman/local")
+    for pkg in list_dir(pkgdir, 10000):
+        if time.monotonic() > deadline:
+            return words, "", False
+        try:
+            text = read_text("%s/%s/desc" % (pkgdir, pkg), SMALL_FILE_MAX)
+        except Refused:
+            continue
+        section = ""
+        for line in (text or "").splitlines():
+            if line.startswith("%") and line.endswith("%"):
+                section = line
+            elif line and section in ("%NAME%", "%PROVIDES%", "%REPLACES%"):
+                add(re.split(r"[<>=]", line, maxsplit=1)[0])
+    for d in PROGRAM_DIRS + CLAIM_DIRS:
+        for name in list_dir(sys_path(d), 20000):
+            add(name)
+    for name in list_dir(home_path(".local", "bin"), 5000):
+        if exists_followed(home_path(".local", "bin", name)):
+            add(name)
+    for name in list_dir(home_path(".local", "share", "omarchy", "config"), 2000):
+        add(name)
+    for app in flatpak_app_ids():
+        add(app)
+        add(app.rsplit(".", 1)[-1])
+    desktop = [sys_path(d) for d in DESKTOP_DIRS] + [home_path(".local", "share", "flatpak", "exports", "share",
+                                                               "applications")]
+    for d in desktop:
+        for name in list_dir(d, 3000):
+            if not name.endswith(".desktop") or time.monotonic() > deadline:
+                continue
+            base = name[:-len(".desktop")]
+            add(base)
+            add(base.rsplit(".", 1)[-1])
+            try:
+                keys = _desktop_keys(read_text(d + "/" + name, SMALL_FILE_MAX, follow=True) or "")
+            except Refused:
+                continue
+            for k in ("StartupWMClass", "Icon"):
+                if keys.get(k) and "/" not in keys[k]:
+                    add(keys[k])
+            prog, app = _exec_program(keys.get("Exec", ""))
+            if prog:
+                add(prog.rsplit("/", 1)[-1])
+            if app:
+                add(app.rsplit(".", 1)[-1])
+    for pid in list_dir(sys_path("/proc"), 5000):
+        if pid.isdigit() and time.monotonic() <= deadline:
+            try:
+                add((read_text(sys_path("/proc/%s/comm" % pid), 256) or "").strip())
+            except Refused:
+                pass
+    texts, total = [], 0
+    files = [home_path(*p) for p in STARTUP_FILES]
+    for parts, suffix in STARTUP_DIRS:
+        d = home_path(*parts)
+        files += [d + "/" + n for n in list_dir(d, 300) if not suffix or n.endswith(suffix)]
+    for path in files[:600]:
+        try:
+            t = read_text(path, FILE_MAX, follow=True)
+        except Refused:
+            continue
+        if t and total < 8 * FILE_MAX:
+            texts.append(t)
+            total += len(t)
+    return words, "\n".join(texts), time.monotonic() <= deadline
+
+
+def exists_followed(path):
+    try:
+        os.stat(path)
+        return True
+    except OSError:
+        return False
+
+
+def _name_variants(name, is_file):
+    """The names an entry may answer to: itself, without a file's extension
+    (pavucontrol.ini), and the last part of a reverse-DNS name
+    (org.gnome.TextEditor)."""
+    bare = name.lstrip(".")
+    out = [_norm(bare)]
+    if is_file:
+        out.append(_norm(_FILE_SUFFIX.sub("", bare)))
+    dotted = bare.split(".")
+    if len(dotted) >= 3 and all(dotted):
+        out.append(_norm(dotted[-1]))
+    return [n for n in dict.fromkeys(out) if n]
+
+
+def _is_claimed(name, is_file, words, ordered, mentions):
+    variants = _name_variants(name, is_file)
+    if not variants:
+        return True                        # nothing to go by: never guess
+    bare = name.lstrip(".")
+    if len(bare) >= 3 and bare in mentions:
+        return True                        # a startup file names it (an installer that lives in ~, say)
+    return any(_word_claimed(n, words, ordered) for n in variants)
+
+
+def _word_claimed(n, words, ordered):
+    for candidate in (n,) + LEFTOVER_ALIASES.get(n, ()):
+        if candidate in words:
+            return True
+        if len(candidate) >= 4:
+            # A claim that begins the name ("brave" for BraveSoftware), or a
+            # name that begins a claim ("signal" for signal-desktop).
+            if any(candidate[:k] in words for k in range(4, len(candidate))):
+                return True
+            i = bisect.bisect_left(ordered, candidate)
+            if i < len(ordered) and ordered[i].startswith(candidate):
+                return True
+    return False
+
+
+def _tree_stats(path, deadline, limit=100000):
+    """(bytes, newest mtime, complete) under a path, never following a link."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return 0, 0.0, False
+    if not stat.S_ISDIR(st.st_mode):
+        return st.st_blocks * 512, st.st_mtime, True
+    total, newest, count, stack = 0, st.st_mtime, 0, [path]
+    while stack:
+        if count >= limit or time.monotonic() > deadline:
+            return total, newest, False
+        cur = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                for e in it:
+                    count += 1
+                    try:
+                        s = e.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    newest = max(newest, s.st_mtime)
+                    if stat.S_ISDIR(s.st_mode):
+                        stack.append(e.path)
+                    else:
+                        total += s.st_blocks * 512
+        except OSError:
+            continue
+    return total, newest, True
+
+
+def leftover_id(key, name):
+    return item_id("leftover", key, name)
+
+
+def _launcher_gone(path, apps):
+    """Why a desktop entry of yours starts nothing any more, or ""."""
+    try:
+        keys = _desktop_keys(read_text(path, SMALL_FILE_MAX) or "")
+    except Refused:
+        return ""
+    for k in ("TryExec", "Exec"):
+        prog, app = _exec_program(keys.get(k, ""))
+        if app and _APP_ID.match(app) and app not in apps:
+            return "starts a Flatpak app that is no longer installed"
+        if prog.startswith("/"):
+            real = prog if prog.startswith(HOME + "/") else sys_path(prog)
+            if not exists_followed(real):
+                return "starts a program that is gone"
+    return ""
+
+
+def leftovers():
+    """Everything listed, kept or not, largest first. Internal records."""
+    deadline = time.monotonic() + LEFTOVER_SECONDS
+    words, mentions, complete = _claims(deadline)
+    if not complete:
+        return None
+    ordered = sorted(words)
+    apps = flatpak_app_ids()
+    cutoff = time.time() - LEFTOVER_DAYS * 86400
+    found = []
+    for key, parts, kind in LEFTOVER_ROOTS:
+        base = home_path(*parts)
+        never = LEFTOVER_NEVER.get(key, set())
+        for name in list_dir(base, 3000):
+            if len(found) >= LEFTOVER_MAX * 2 or time.monotonic() > deadline + WALK_MAX_SECONDS:
+                break
+            path = os.path.join(base, name)
+            try:
+                st = os.lstat(path)
+            except OSError:
+                continue
+            if st.st_uid != os.geteuid() or name.lower() in never:
+                continue
+            reason = ""
+            if kind == "links":
+                if stat.S_ISLNK(st.st_mode) and not exists_followed(path):
+                    reason = "a link to a program that is gone"
+            elif kind == "launchers":
+                if stat.S_ISREG(st.st_mode) and name.endswith(".desktop"):
+                    gone = _launcher_gone(path, apps)
+                    reason = "a launcher that %s" % gone if gone else ""
+            elif kind == "flatpak":
+                if stat.S_ISDIR(st.st_mode) and _APP_ID.match(name) and name not in apps:
+                    reason = "data of a Flatpak app that is no longer installed"
+            elif stat.S_ISLNK(st.st_mode):
+                continue                    # a dotfile manager's link: deliberate
+            elif kind == "dotdirs" and not (name.startswith(".") and stat.S_ISDIR(st.st_mode)):
+                continue
+            elif not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
+                continue
+            elif not _is_claimed(name, stat.S_ISREG(st.st_mode), words, ordered, mentions):
+                reason = "no installed app uses it"
+            if not reason:
+                continue
+            size, newest, whole = _tree_stats(path, deadline + WALK_MAX_SECONDS)
+            if kind in ("names", "dotdirs") and (not whole or newest >= cutoff):
+                continue                    # changed this month, or too big to be sure: still in use
+            found.append({"id": leftover_id(key, name), "legacy": legacy_id(key, name), "kind": "leftover",
+                          "parts": parts, "name": name,
+                          "shown": "~/" + "/".join(parts + (name,)), "size": size,
+                          "newest": newest, "reason": reason})
+    found.sort(key=lambda f: (-f["size"], f["shown"]))
+    LEGACY["complete"].add("leftover")
+    return found[:LEFTOVER_MAX]
+
+
+def kept_items():
+    """id -> {"id", "at", "old"} of everything you kept, on any list. "old" marks
+    an id from before keyed ids, still to be carried over."""
+    out = {}
+    for name in (KEPT_LEGACY, KEPT_FILE):
+        data = _state_json(name)
+        keyed = name == KEPT_FILE and isinstance(data, dict) and data.get("ids") == "keyed"
+        entries = data.get("kept") if isinstance(data, dict) else None
+        for e in (entries if isinstance(entries, list) else [])[:KEPT_MAX]:
+            if isinstance(e, dict) and isinstance(e.get("id"), str) and re.fullmatch(r"[0-9a-f]{16}", e["id"]):
+                at = e.get("at") if isinstance(e.get("at"), str) and _DATE.match(e["at"]) else ""
+                out[e["id"]] = {"id": e["id"], "at": at, "old": not keyed or e.get("old") is True}
+    return out
+
+
+def is_kept_record(r, kept):
+    """Kept by its keyed id, or by its id from before keyed ids."""
+    old = r.get("legacy")
+    if old:
+        LEGACY["kept"][old] = r["id"]
+    return r["id"] in kept or bool(old and kept.get(old, {}).get("old"))
+
+
+def write_kept(dirfd, entries):
+    """kept.json: ids and dates only, nothing that names an item."""
+    body = {"schema": SCHEMA, "ids": "keyed",
+            "kept": [dict({"id": e["id"], "at": e["at"]}, **({"old": True} if e["old"] else {}))
+                     for e in entries[-KEPT_MAX:]]}
+    write_atomic(dirfd, KEPT_FILE, json.dumps(body, separators=(",", ":")).encode())
+    try:
+        os.unlink(KEPT_LEGACY, dir_fd=dirfd)         # now folded into kept.json
+    except FileNotFoundError:
+        pass
+
+
+def _leftover_text(f):
+    """Two lines for the panel: where and how big, then why and since when.
+    A line break in the name is shown as \\n, so a name cannot add a line."""
+    when = time.strftime("%Y-%m", time.localtime(f["newest"])) if f["newest"] else ""
+    age = " \u00b7 unchanged since %s" % when if when and f["reason"] == "no installed app uses it" else ""
+    shown = clean(f["shown"].replace("\r", "\\r").replace("\n", "\\n"), 200)
+    return "%s \u00b7 %s\n%s%s" % (shown, human(f["size"]), f["reason"], age)
+
+
+@check
+def check_leftovers():
+    cid, cat, title = "leftovers", "care", "Leftover app data"
+    why = ("Apps you remove leave their settings and data behind. Vigil lists what no installed app, program, "
+           "Flatpak or startup file uses and nothing has changed for a month, in ~/.config, ~/.local/share, "
+           "~/.local/state, ~/.var/app, ~/.local/bin, your launchers and the folders in ~ that start with a dot.")
+    howto = ("Tick what to remove and press Trash selected, or press Trash all: it goes to the trash, not away; "
+             "restore it from the trash in your file manager if you were wrong. Keep what you want to hold on to "
+             "(settings you would want back if you reinstall an app): it stays where it is, locked at the bottom "
+             "of the list, and Vigil stops counting it. Emptying the trash, on the Trash row or with Clean all, "
+             "deletes it for good.")
+    learn = fix("docs", "arch-xdg", "Learn more")
+    found = leftovers()
+    if found is None:
+        return result(cid, cat, title, "unknown", "Could not finish checking what is installed.", why, weight=0)
+    kept = kept_items()
+    items, live, live_size = [], [], 0
+    for f in found:
+        text = _leftover_text(f)
+        is_kept = is_kept_record(f, kept)
+        items.append({"id": f["id"], "kind": "leftover", "text": text, "kept": is_kept, "ignored": False})
+        if not is_kept:
+            live.append(text.replace("\n", ", "))
+            live_size += f["size"]
+    note = " %d kept." % (len(found) - len(live)) if len(found) > len(live) else ""
+    if live:
+        out = result(cid, cat, title, "info", "%d item%s left behind by apps that are gone (%s).%s" % (
+            len(live), "" if len(live) == 1 else "s", human(live_size), note), why, clean_block(live), learn, weight=0, howto=howto)
+    else:
+        out = result(cid, cat, title, "pass", ("Nothing new left behind.%s" % note) if note
+                     else "Nothing left behind.", why, fix=learn, weight=0)
+    out["items"] = quiet_last(items)
+    return out
+
+
+def listed_items(wanted):
+    """id -> record of the pick-list items listed right now, looking only as
+    far as it takes to find every wanted id."""
+    found = {}
+    for source in (orphan_records, foreign_records, plugin_records, leftovers):
+        for r in source() or []:
+            found[r["id"]] = r
+        if all(x in found for x in wanted):
+            break
+    return found
+
+
+def set_kept(lids, on):
+    """`vigil keep <id>...` / `vigil unkeep <id>...`: only Vigil's own notes change.
+    Keeping takes only ids a pick list shows right now."""
+    lids = [lids] if isinstance(lids, str) else list(lids)
+    if not lids or not all(re.fullmatch(r"[0-9a-f]{16}", x) for x in lids):
+        return {"ok": False, "action": "", "message": "Unknown item."}
+    # Unkeeping looks too, to find the item's id from before keyed ids.
+    listed = listed_items(lids)
+    if on:
+        lids = [x for x in lids if x in listed]
+        if not lids:
+            return {"ok": False, "action": "", "message": "That item is no longer on the list."}
+    try:
+        dirfd = _state_dir()
+    except (OSError, Refused):
+        return {"ok": False, "action": "", "message": "Could not open the Vigil state folder."}
+    try:
+        _lock(dirfd)
+        # The item's id from before keyed ids goes too: keeping replaces it,
+        # and stopping removes both.
+        old = {listed[x]["legacy"] for x in lids if x in listed and listed[x].get("legacy")}
+        current = [e for e in kept_items().values() if e["id"] not in lids and e["id"] not in old]
+        if on:
+            current += [{"id": x, "at": time.strftime("%Y-%m-%d"), "old": False} for x in lids]
+        write_kept(dirfd, current)
+    finally:
+        os.close(dirfd)
+    n = len(lids)
+    if on:
+        msg = ("Kept. It stays where it is, locked at the bottom of the list, and Vigil stops counting it."
+               if n == 1 else "Kept %d items. They stay where they are, locked at the bottom of the list, "
+               "and Vigil stops counting them." % n)
+    else:
+        msg = "Counting it again." if n == 1 else "Counting %d items again." % n
+    return {"ok": True, "action": "", "message": msg}
+
+
+def _trash_url(path):
+    """The trash spec's Path=: the absolute path, percent-encoded byte by byte."""
+    keep = set(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-._~")
+    return "".join(chr(b) if b in keep else "%%%02X" % b for b in os.fsencode(path))
+
+
+def move_to_trash(parts, name):
+    """Move one entry of yours into the home trash (freedesktop.org layout:
+    files/ and info/<name>.trashinfo), the way a file manager does. One
+    rename relative to held folders; a link is moved as a link, never
+    followed. Nothing is copied or deleted: on another disk it stays put."""
+    where = tuple(parts) + (name,)
+    if where == tuple(TRASH[:len(where)]) or name in ("", ".", "..") or "/" in name:
+        raise Refused("that holds the trash itself")
+    parent = _open_home_dir(list(parts))
+    try:
+        st = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        if st.st_uid != os.geteuid():
+            raise Refused("it is not yours")
+        files = _open_home_dir(list(TRASH) + ["files"], create=True)
+        try:
+            info = _open_home_dir(list(TRASH) + ["info"], create=True)
+            try:
+                if os.fstat(files).st_dev != st.st_dev:
+                    raise Refused("it is on another disk than the trash, so it was left where it is")
+                base = name if len(os.fsencode(name)) <= 200 else "leftover-" + secrets.token_hex(6)
+                for n in range(100):
+                    tname = base if n == 0 else "%s.%d" % (base, n + 1)
+                    try:
+                        ifd = os.open(tname + ".trashinfo", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                                      | os.O_CLOEXEC, 0o600, dir_fd=info)
+                    except FileExistsError:
+                        continue
+                    try:
+                        os.stat(tname, dir_fd=files, follow_symlinks=False)
+                        taken = True
+                    except FileNotFoundError:
+                        taken = False
+                    if taken:
+                        os.close(ifd)
+                        os.unlink(tname + ".trashinfo", dir_fd=info)
+                        continue
+                    break
+                else:
+                    raise Refused("the trash already holds too many items of that name")
+                try:
+                    body = "[Trash Info]\nPath=%s\nDeletionDate=%s\n" % (
+                        _trash_url(os.path.join(HOME, *(tuple(parts) + (name,)))), time.strftime("%Y-%m-%dT%H:%M:%S"))
+                    os.write(ifd, body.encode("ascii"))
+                    os.fsync(ifd)
+                    os.close(ifd)
+                    ifd = None
+                    os.rename(name, tname, src_dir_fd=parent, dst_dir_fd=files)
+                except BaseException:
+                    if ifd is not None:
+                        os.close(ifd)
+                    try:
+                        os.unlink(tname + ".trashinfo", dir_fd=info)
+                    except OSError:
+                        pass
+                    raise
+                for fd in (files, info, parent):
+                    os.fsync(fd)
+            finally:
+                os.close(info)
+        finally:
+            os.close(files)
+    finally:
+        os.close(parent)
+
+
+def trash_leftovers(ids):
+    """`vigil trash <id>...`: move listed, not kept items to the trash. Each id
+    must name an item the check lists right now, so nothing that an app has
+    since claimed, or that you chose to keep, is ever moved."""
+    found = {f["id"]: f for f in leftovers() or []}
+    kept = kept_items()
+    moved, problems = [], []
+    for lid in ids:
+        f = found.get(lid)
+        if f is None:
+            problems.append("one item is no longer on the list")
+            continue
+        if is_kept_record(f, kept):
+            problems.append("%s is kept (click its lock first)" % clean(f["shown"], 80))
+            continue
+        try:
+            move_to_trash(f["parts"], f["name"])
+            moved.append(f)
+        except Refused as e:
+            problems.append("%s: %s" % (clean(f["shown"], 80), e))
+        except OSError as e:
+            problems.append("%s: %s" % (clean(f["shown"], 80), os.strerror(e.errno or 0) or "failed"))
+    if len(moved) == 1:
+        msg = "Moved %s to the trash." % clean(moved[0]["shown"], 120)
+    elif moved:
+        msg = "Moved %d items to the trash." % len(moved)
+    else:
+        msg = "Nothing was moved."
+    if problems:
+        msg += " Left where %s: %s." % ("it was" if len(problems) == 1 else "they were", "; ".join(problems[:3]))
+    if moved:
+        msg += " To put %s back, open the trash in your file manager and choose Restore." % (
+            "it" if len(moved) == 1 else "one")
+    return {"ok": bool(moved) or not problems, "action": "", "message": clean(msg, MESSAGE_MAX)}
+
+
 _UNITS = {"B": 1, "KiB": 1024, "MiB": 1024 ** 2, "GiB": 1024 ** 3, "TiB": 1024 ** 4}
 _PACCACHE_SAVED = re.compile(r"disk space saved: ([0-9]+(?:\.[0-9]+)?) (B|KiB|MiB|GiB|TiB)\)")
 
@@ -4336,17 +5284,25 @@ def check_orphans():
     cid, cat, title = "orphans", "care", "Orphaned packages"
     why = ("Packages that were installed as dependencies of something you have since removed. They still "
            "get updates and still count as installed software.")
-    tool = "/usr/bin/pacman"
-    if not is_trusted_executable(sys_path(tool)):
+    howto = ("Remove all, or tick some and Remove selected: it asks first, lists each package and shows the exact "
+             "command (pacman -Rns, behind your password). Keep a package you want: it stays installed and on "
+             "the list, with a lock, and Vigil stops counting it.")
+    if not is_trusted_executable(sys_path("/usr/bin/pacman")):
         return result(cid, cat, title, "na", "pacman is not available.", why, weight=0)
-    rc, out = run([tool, "-Qdtq"], timeout=8, limit=CMD_MAX)
-    if rc is None:
+    recs = orphan_records()
+    if recs is None:
         return result(cid, cat, title, "unknown", "Could not list orphaned packages.", why, weight=0)
-    names = out.split()
-    if not names:
+    if not recs:
         return result(cid, cat, title, "pass", "None.", why, weight=0)
-    return result(cid, cat, title, "info", "%d orphaned package%s." % (len(names), "" if len(names) == 1 else "s"),
-                  why, clean_block(names), fix("terminal", "clean-orphans", "Review and remove"), weight=0)
+    items, live, note = pick_items(recs, kept_items(), " %d kept.")
+    if live:
+        out = result(cid, cat, title, "info", "%d orphaned package%s.%s" % (
+            len(live), "" if len(live) == 1 else "s", note), why,
+            clean_block([r["text"].replace("\n", ", ") for r in live]), weight=0, howto=howto)
+    else:
+        out = result(cid, cat, title, "pass", "Only ones you kept.%s" % note, why, weight=0)
+    out["items"] = items
+    return out
 
 
 @check
@@ -4360,8 +5316,23 @@ def check_journal():
     m = re.search(r"take up ([0-9.]+[KMGT]?B?)", out or "")
     if rc is None or not m:
         return result(cid, cat, title, "unknown", "Could not read the journal size.", why, weight=0)
+    size = _journal_bytes(m.group(1))
+    if size is not None and size < JOURNAL_TIDY_BYTES:
+        return result(cid, cat, title, "pass", "Logs take up %s." % clean(m.group(1), 20), why, weight=0)
     return result(cid, cat, title, "info", "Logs take up %s." % clean(m.group(1), 20), why,
                   fix=fix("terminal", "clean-journal", "Keep two weeks"), weight=0)
+
+
+# Under this the journal is tidy enough: no cleanup offered, not in Clean all.
+JOURNAL_TIDY_BYTES = 500 * 1024 * 1024
+
+
+def _journal_bytes(text):
+    """Bytes in journalctl's size ("172.6M", "1.2G", "512.0K"), or None."""
+    m = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([KMGT]?)B?", text)
+    if not m:
+        return None
+    return int(float(m.group(1)) * 1024 ** " KMGT".index(m.group(2) or " "))
 
 
 # ---------------------------------------------------------------------------
@@ -4423,11 +5394,14 @@ def undo_available(action):
 # something new turns up, the finding comes back.
 EVIDENCE_CHECKS = {"open-ports", "persistence", "file-changes", "exposed-secrets", "malicious-packages",
                    "virus-scan", "ld-preload", "bumblebee", "scanner-arch-audit", "aur-status",
-                   "omarchy-plugins", "aur-packages", "accounts", "shell-history", "old-services"}
+                   "accounts", "shell-history", "old-services"}
+# Rows reviewed item by item instead (Keep on each item of a pick list), so
+# the row itself has no Mark as reviewed.
+ITEM_REVIEWED = {"leftovers", "orphans", "aur-packages", "omarchy-plugins"}
 
 
 def dismissible(c):
-    return c["status"] not in ("pass", "na")
+    return c["status"] not in ("pass", "na") and c["id"] not in ITEM_REVIEWED
 
 
 # ---------------------------------------------------------------------------
@@ -4517,7 +5491,7 @@ def load_state():
 
 
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_FP = re.compile(r"^[a-z0-9-]{1,40}:[0-9a-f]{12}$")
+_FP = re.compile(r"^[a-z0-9-]{1,40}:(?:[0-9a-f]{16}|[0-9a-f]{12})$")   # keyed: 16; before keyed ids: 12
 
 
 def state_dismissed(state):
@@ -4545,12 +5519,76 @@ def state_history(state):
     return [{"date": d, "score": days[d]} for d in sorted(days)][-HISTORY_MAX:]
 
 
-def fingerprint(c):
-    """What a review covers: the check and its status, plus what was found for evidence checks."""
+def fingerprint(c, legacy=False):
+    """What a review covers: the check and its status, plus what was found for
+    evidence checks, as a keyed hash, so the notes do not say what was found.
+    legacy: the plain SHA-256 form from before keyed ids."""
     basis = c["status"]
     if c["id"] in EVIDENCE_CHECKS:
         basis += "\n" + (c["detail"] or c["summary"])
-    return c["id"] + ":" + hashlib.sha256(basis.encode()).hexdigest()[:12]
+    if legacy:
+        return c["id"] + ":" + hashlib.sha256(basis.encode()).hexdigest()[:12]
+    return c["id"] + ":" + keyed_hex("fingerprint\0" + basis)
+
+
+def migrate_notes(checks):
+    """Once, after a full check: carry what you kept, marked as a false
+    positive or reviewed over from plain SHA-256 ids to keyed ids, and drop
+    the names older notes kept beside them. An old id whose item is no longer
+    listed is dropped only when every list it could belong to was read in
+    full; otherwise it waits for the next check."""
+    try:
+        dirfd = _state_dir()
+    except (OSError, Refused):
+        return
+    try:
+        _lock(dirfd)
+        kept = list(kept_items().values())
+        if any(e["old"] for e in kept) or _exists_in(dirfd, KEPT_LEGACY) or _plain_notes(dirfd, KEPT_FILE, "kept"):
+            whole = {"orphan", "foreign", "plugin", "leftover"} <= LEGACY["complete"]
+            out, have = [], {e["id"] for e in kept if not e["old"]}
+            for e in kept:
+                if not e["old"]:
+                    out.append(e)
+                elif e["id"] in LEGACY["kept"]:
+                    new = LEGACY["kept"][e["id"]]
+                    if new not in have:
+                        out.append({"id": new, "at": e["at"], "old": False})
+                        have.add(new)
+                elif not whole:
+                    out.append(e)
+            write_kept(dirfd, out)
+        ignored = list(ignored_detections().values())
+        if any(e["old"] for e in ignored) or _plain_notes(dirfd, IGNORED_FILE, "ignored"):
+            out = []
+            for e in ignored:
+                if not e["old"]:
+                    out.append(e)
+                elif e["id"] in LEGACY["ignored"]:
+                    out.append(dict(e, id=LEGACY["ignored"][e["id"]], old=False))
+                elif "detection" not in LEGACY["complete"]:
+                    out.append(e)
+            write_ignored(dirfd, out)
+    except (OSError, Refused):
+        pass
+    finally:
+        os.close(dirfd)
+
+
+def _exists_in(dirfd, name):
+    try:
+        os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+        return True
+    except OSError:
+        return False
+
+
+def _plain_notes(dirfd, name, key):
+    """True when a notes file exists but is not yet in the keyed form."""
+    if not _exists_in(dirfd, name):
+        return False
+    data = _state_json(name)
+    return isinstance(data, dict) and isinstance(data.get(key), list) and data.get("ids") != "keyed"
 
 
 def update_state(report):
@@ -4565,8 +5603,12 @@ def update_state(report):
             state = _read_state(dirfd)
         except Refused:
             return [], False
-        seen = set(s for s in state.get("seen", []) if isinstance(s, str))
-        dismissed = state_dismissed(state)
+        # Fingerprints from before keyed ids count as the keyed ones they match,
+        # and are replaced by them here (a review of a finding not showing now
+        # keeps its old form until it shows again).
+        old = {fingerprint(c, legacy=True): fingerprint(c) for c in report["checks"]}
+        seen = set(old.get(s, s) for s in state.get("seen", []) if isinstance(s, str))
+        dismissed = {old.get(f, f): a for f, a in state_dismissed(state).items()}
         current = [fingerprint(c) for c in report["checks"] if c["status"] in ("fail", "warn") and c["weight"] > 0]
         first_run = "seen" not in state
         new = [] if first_run else [f.split(":", 1)[0] for f in current if f not in seen and f not in dismissed]
@@ -4613,7 +5655,8 @@ def mark_seen(fp):
 
 def set_dismissed(check_id, on):
     """Mark the current warning of `check_id` as reviewed, or show it again."""
-    report = audit(peek=True)
+    id_key(make=True)       # made now if missing: a look-only check never makes it, and a
+    report = audit(peek=True)   # fingerprint under a throwaway key would never match again
     c = next((x for x in report["checks"] if x["id"] == check_id), None)
     if c is None:
         return {"ok": False, "action": "", "message": "Unknown check."}
@@ -4664,15 +5707,16 @@ def score_of(checks):
     return max(0, min(100, score))
 
 
-UNKNOWN_HOWTO = ("Vigil could not finish this check. Press R to check again; if it keeps happening, "
-                 "mark it as reviewed.")
+UNKNOWN_HOWTO = ("Vigil could not finish this check. Middle-click the lighthouse to read it again; if it keeps "
+                 "happening, mark it as reviewed.")
+UNKNOWN_HOWTO_ITEMS = "Vigil could not finish this check. Middle-click the lighthouse to read it again."
 
 # For findings Vigil cannot fix itself: how to fix it, and a button that
 # helps (a read-only command in a terminal, or a maintained guide).
 CHECK_HELP = {
-    "ssh-keys": ("Make ~/.ssh a normal folder owned by you, not a link, then press R.",
+    "ssh-keys": ("Make ~/.ssh a normal folder owned by you, not a link, then middle-click the lighthouse.",
                  ("docs", "arch-ssh-keys", "Learn more")),
-    "gnupg": ("Make ~/.gnupg a normal folder owned by you, not a link, then press R.",
+    "gnupg": ("Make ~/.gnupg a normal folder owned by you, not a link, then middle-click the lighthouse.",
               ("docs", "arch-gnupg", "Learn more")),
     "disk-encryption": ("Encryption can only be turned on when installing: back up, then reinstall Omarchy "
                         "with encryption on. If this machine never leaves home, mark it as reviewed.",
@@ -4687,10 +5731,11 @@ CHECK_HELP = {
     "ld-preload": ("If you did not set this up, look at the file (Show file). Do not delete it blindly: get "
                    "help first, because something may be hiding in every program.",
                    ("terminal", "show-ld-preload", "Show file")),
-    "aur-packages": ("Keep only the ones you recognise and still use; remove the rest with "
-                     "omarchy pkg drop <name>.",
+    "aur-packages": ("Remove what you no longer use (tick it, then Remove selected); keep what you trust.",
                      ("docs", "arch-aur", "Learn more")),
-    "flatpak-apps": ("The daily check looks for Flatpak updates; Run daily check also installs those for your own apps. The Arch Wiki explains Flatpak.",
+    "orphans": ("Remove them (Remove all, or tick some and Remove selected); keep one you want installed.",
+                ("docs", "arch-orphans", "Learn more")),
+    "flatpak-apps": ("The daily check looks for Flatpak updates; Daily check under Run now also installs those for your own apps. The Arch Wiki explains Flatpak.",
                      ("docs", "arch-flatpak", "Learn more")),
     "firmware": ("The weekly check looks for firmware updates. The Arch Wiki explains fwupd and LVFS.",
                  ("docs", "arch-fwupd", "Learn more")),
@@ -4699,7 +5744,7 @@ CHECK_HELP = {
                    ("terminal", "install-clamui", "Install ClamUI")),
     "bumblebee": ("Bumblebee runs with the daily check. Perplexity explains what it checks and how its list "
                   "is kept.", ("docs", "bumblebee", "Learn more")),
-    "omarchy-plugins": ("Nothing to fix. Remove plugins you do not use with omarchy plugin remove <id>.",
+    "omarchy-plugins": ("Remove plugins you do not use (tick them, then Remove selected); keep the ones you trust.",
                         ("terminal", "show-plugins", "List plugins")),
     "accounts": ("Get help before changing accounts; a mistake can lock you out.",
                  ("docs", "arch-users", "Learn more")),
@@ -4718,7 +5763,9 @@ def add_help(c):
     if c["fix"]["kind"] == "none" and learn and c["status"] != "unknown":
         c["fix"] = fix(*learn)
     if not c.get("howto"):
-        c["howto"] = UNKNOWN_HOWTO if c["status"] == "unknown" else howto
+        # The lists reviewed item by item have no Mark as reviewed to suggest.
+        c["howto"] = ((UNKNOWN_HOWTO_ITEMS if c["id"] in ITEM_REVIEWED else UNKNOWN_HOWTO)
+                      if c["status"] == "unknown" else howto)
     return c
 
 
@@ -4726,7 +5773,8 @@ def tidy(c):
     add_help(c)
     c.setdefault("howto", "")
     for k in ("title", "summary", "why", "howto"):
-        c[k] = clean(c[k], 400 if k in ("why", "howto") else STR_MAX)
+        # The panel's own limits (Model.js MAX_STR), so nothing is cut short.
+        c[k] = clean(c[k], 800 if k in ("why", "howto") else 400 if k == "summary" else STR_MAX)
     c["detail"] = clean(c["detail"], 3000) if "\n" not in c["detail"] else "\n".join(
         clean(x, STR_MAX) for x in c["detail"].splitlines()[:LIST_MAX + 1])
     return c
@@ -4736,6 +5784,8 @@ def audit(peek=False):
     started = time.monotonic()
     _SYSTEMCTL_MEMO.clear()
     INTEGRITY_PEEK["value"] = peek
+    for k in ("kept", "ignored", "complete"):
+        LEGACY[k].clear()
     checks = []
     for fn in CHECKS:
         try:
@@ -4751,6 +5801,8 @@ def audit(peek=False):
     for c in checks:
         c["dismissible"] = dismissible(c)
         fp = fingerprint(c)
+        if fp not in dismissed and fingerprint(c, legacy=True) in dismissed:
+            fp = fingerprint(c, legacy=True)                # reviewed before keyed ids
         c["dismissed"] = c["dismissible"] and fp in dismissed
         c["dismissedAt"] = dismissed.get(fp, "") if c["dismissed"] else ""
         own = c.pop("_undo", None)
@@ -4771,8 +5823,9 @@ def audit(peek=False):
                  "omarchy-remove-security-fido2", "omarchy-setup-security-fingerprint",
                  "omarchy-remove-security-fingerprint",
                  "omarchy-sudo-passwordless", "omarchy-remove-security-sudoless-docker", "omarchy-update",
-                 "omarchy-pkg-add", "omarchy-update-orphan-pkgs", "omarchy-toggle-idle", "omarchy-shell-config",
-                 "omarchy-plugin-list", "omarchy-plugin-disable", "omarchy-plugin-enable", "xdg-open", "pkexec"):
+                 "omarchy-pkg-add", "omarchy-toggle-idle", "omarchy-shell-config",
+                 "omarchy-plugin-list", "omarchy-plugin-disable", "omarchy-plugin-enable", "omarchy-plugin-remove",
+                 "xdg-open", "pkexec"):
         p = find_tool(name)
         tools[name] = p.rsplit("/", 1)[0] if p else ""
     running = run_in_progress()
@@ -4781,14 +5834,11 @@ def audit(peek=False):
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "durationMs": int((time.monotonic() - started) * 1000),
         "score": score_of(checks), "level": level, "counts": counts,
-        "checks": checks, "tools": tools, "apps": {"clamui": clamui_install()},
+        "checks": checks, "tools": tools, "apps": {"clamui": clamui_install()}, "themeColors": theme_colors(),
         "new": [], "stateSaved": False, "history": state_history(state),
-        "feedsDue": running is None and (any(feed_due(n) for n in SOURCE_FEEDS + DAILY_FEEDS)
-                                         or feed_due("full-scan")),
-        "feedsUpdated": feeds_updated(),
+        "feedsDue": running is None and (any(feed_due(n) for n in DAILY_FEEDS) or feed_due("full-scan")),
         "sources": source_status(),
-        "lastRun": last_run(),
-        "nextUpdate": next_update(),
+        "signaturesDue": signatures_due(),
         "nextFullScan": next_full_scan(),
         "nextDaily": next_daily(),
         "missing": missing_helpers(),
@@ -4796,6 +5846,7 @@ def audit(peek=False):
     }
     if not peek:
         report["new"], report["stateSaved"] = update_state(report)
+        migrate_notes(checks)
     return report
 
 
@@ -5179,7 +6230,7 @@ def run_fix(action):
         return {"ok": False, "action": "", "message": "Unknown action."}
     try:
         msg = fn()
-        return {"ok": True, "action": action, "message": clean(msg)}
+        return {"ok": True, "action": action, "message": clean(msg, MESSAGE_MAX)}
     except FileNotFoundError:
         return {"ok": False, "action": action, "message": "Nothing to change."}
     except Refused as e:
@@ -5246,7 +6297,7 @@ def _on_stop(signum, frame):
 
 
 def stop_run():
-    """`vigil stop`: stop the scan or update that holds the run lock, whoever
+    """`vigil stop`: stop the run that holds the run lock, whoever
     started it. Only processes recorded by that run, still running as you with
     the start time recorded, are signalled."""
     if run_in_progress() is None:
@@ -5282,7 +6333,7 @@ def stop_run():
 
 
 def take_run_lock():
-    """One scan or update at a time, across panels, monitors and shell
+    """One run at a time, across panels, monitors and shell
     restarts: an exclusive flock on a directory of our own (no lock file to
     plant a link at). The kernel drops it when the last process holding it
     ends. The programs a run starts (clamscan, Bumblebee, the scanners)
@@ -5303,7 +6354,7 @@ def take_run_lock():
 
 
 def run_in_progress():
-    """What a scan or update started elsewhere is doing, or None if none runs."""
+    """What a run started elsewhere is doing, or None if none runs."""
     try:
         fd = _open_home_dir(list(STATE_DIR) + [BUSY_DIR])
     except (OSError, Refused):
@@ -5389,19 +6440,31 @@ def main(argv):
     if len(argv) == 3 and argv[1] == "fix" and re.fullmatch(r"[a-z][a-z0-9-]{0,31}", argv[2]):
         emit(run_fix(argv[2]))
         return 0
-    if len(argv) == 3 and argv[1] in ("ignore", "unignore") and re.fullmatch(r"[0-9a-f]{16}", argv[2]):
-        emit(set_ignored(argv[2], argv[1] == "ignore"))
+    if 3 <= len(argv) <= 2 + PICK_MAX and argv[1] in ("ignore", "unignore") \
+            and len(set(argv[2:])) == len(argv) - 2 and all(re.fullmatch(r"[0-9a-f]{16}", a) for a in argv[2:]):
+        emit(set_ignored(argv[2:], argv[1] == "ignore"))
+        return 0
+    if 3 <= len(argv) <= 2 + PICK_MAX and argv[1] in ("keep", "unkeep") \
+            and len(set(argv[2:])) == len(argv) - 2 and all(re.fullmatch(r"[0-9a-f]{16}", a) for a in argv[2:]):
+        emit(set_kept(argv[2:], argv[1] == "keep"))
+        return 0
+    if 3 <= len(argv) <= 2 + PICK_MAX and argv[1] == "trash" and len(set(argv[2:])) == len(argv) - 2 \
+            and all(re.fullmatch(r"[0-9a-f]{16}", a) for a in argv[2:]):
+        emit(trash_leftovers(argv[2:]))
         return 0
     if len(argv) == 3 and argv[1] in ("dismiss", "undismiss") and re.fullmatch(r"[a-z0-9-]{1,40}", argv[2]):
         emit(set_dismissed(argv[2], argv[1] == "dismiss"))
         return 0
-    if len(argv) in (2, 3) and argv[1] == "refresh-feeds" and argv[2:] in (
-            [], ["--force"], ["--sources"], ["--full"], ["--scan"], ["--daily"], ["--weekly"]):
+    # --signatures: the confirmed Run all card showed the virus signatures
+    # update, so Run all may run it (only when they are over two days old).
+    if 2 <= len(argv) <= 4 and argv[1] == "refresh-feeds" and argv[2:] in (
+            [], ["--force"], ["--full"], ["--scan"], ["--daily"], ["--weekly"],
+            ["--full", "--signatures"]):
         PROGRESS["on"] = True
-        flag = argv[2] if len(argv) == 3 else ""
+        flag = argv[2] if len(argv) >= 3 else ""
         if not take_run_lock():
             emit({"ok": True, "busy": True, "action": "",
-                  "message": "Vigil is already running a scan or update. This one was not started."})
+                  "message": "Vigil is already running a check or scan. This one was not started."})
             return 0
         signal.signal(signal.SIGTERM, _on_stop)
         try:
@@ -5409,9 +6472,9 @@ def main(argv):
         except OSError:
             pass
         save_run_info()
-        emit(refresh_due_feeds(force=flag == "--force", sources_only=flag == "--sources", full=flag == "--full",
+        emit(refresh_due_feeds(force=flag == "--force", full=flag == "--full",
                                scan_only=flag == "--scan", daily_only=flag == "--daily",
-                               weekly_only=flag == "--weekly"))
+                               weekly_only=flag == "--weekly", signatures=argv[3:] == ["--signatures"]))
         return 0
     if len(argv) == 2 and argv[1] == "stop":
         emit(stop_run())
@@ -5423,7 +6486,7 @@ def main(argv):
     if len(argv) == 2 and argv[1] == "version":
         emit({"version": VERSION})
         return 0
-    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection> | vigil refresh-feeds [--force|--sources|--daily|--weekly|--full|--scan] | vigil running | vigil stop | vigil version\n")
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection>... | vigil keep|unkeep <item>... | vigil trash <leftover>... | vigil refresh-feeds [--force|--daily|--weekly|--full|--scan] [--signatures] | vigil running | vigil stop | vigil version\n")
     return 2
 
 

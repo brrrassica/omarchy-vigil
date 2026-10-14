@@ -158,7 +158,6 @@ test("ordering and counts", () => {
     check({ id: "d", status: "warn", weight: 0 }),
     check({ id: "e", status: "info", category: "detect", weight: 0 })
   ] }))
-  assert.deepEqual(M.topFindings(r).map((c) => c.id), ["c", "b"])
   assert.deepEqual(M.checksFor(r, "harden").map((c) => c.id), ["c", "b", "d", "a"])
   assert.equal(M.countBy(r, "harden", "warn"), 2)
   assert.equal(M.countBy(r, "", "info"), 1)
@@ -276,7 +275,6 @@ test("reviewed warnings drop out of findings and counts", () => {
     check({ id: "c", status: "info", weight: 0 }),
     check({ id: "d", status: "pass", weight: 1 })
   ] }))
-  assert.deepEqual(M.topFindings(r).map((c) => c.id), ["b"])
   assert.equal(M.countBy(r, "harden", "warn"), 1)
   assert.deepEqual(M.checksFor(r, "harden").map((c) => c.id), ["b", "c", "a", "d"])
 })
@@ -284,10 +282,6 @@ test("reviewed warnings drop out of findings and counts", () => {
 test("history helpers", () => {
   assert.equal(M.shortDate("2026-10-12"), "Oct 12")
   assert.equal(M.shortDate("2026-13-01"), "")
-  assert.equal(M.historySummary([]), "")
-  assert.match(M.historySummary([{ date: "2026-10-12", score: 80 }]), /^Today 80/)
-  assert.equal(M.historySummary([{ date: "2026-10-01", score: 60 }, { date: "2026-10-12", score: 85 }, { date: "2026-10-05", score: 40 }].slice(0, 2)),
-    "Oct 1 60 → Oct 12 85 · low 60, high 85")
 })
 
 test("every pillar and tab label is one word", () => {
@@ -311,37 +305,42 @@ test("feedsDue is a strict boolean", () => {
   assert.equal(parse(report({ feedsDue: "yes" })), null)
 })
 
-test("feedsUpdated is a date or empty", () => {
-  assert.equal(parse(report()).feedsUpdated, "")
-  assert.equal(parse(report({ feedsUpdated: "2026-10-12" })).feedsUpdated, "2026-10-12")
-  assert.equal(parse(report({ feedsUpdated: "<b>soon</b>" })), null)
+test("signaturesDue is a strict boolean", () => {
+  assert.equal(parse(report()).signaturesDue, false)
+  assert.equal(parse(report({ signaturesDue: true })).signaturesDue, true)
+  assert.equal(parse(report({ signaturesDue: "yes" })), null)
   assert.ok(M.confirmation("helper", "virus-scan-now"))
 })
 
-test("sources and last run are validated and worded plainly", () => {
-  const good = { id: "arch-audit", label: "Known vulnerabilities", date: "2026-10-12", state: "ok", tried: "" }
-  const r = parse(report({ sources: [good], lastRun: { at: "2026-10-12 09:41", ok: true } }))
-  assert.equal(r.sources[0].label, "Known vulnerabilities")
-  assert.equal(r.lastRun.at, "2026-10-12 09:41")
+test("the Last run list is validated and worded plainly", () => {
+  const good = { id: "arch-audit", label: "Arch security scan", run: "daily", date: "2026-10-12", state: "ok", tried: "" }
+  const r = parse(report({ sources: [good] }))
+  assert.equal(r.sources[0].label, "Arch security scan")
+  assert.equal(r.sources[0].run, "daily")
   assert.deepEqual(parse(report()).sources, [])
-  assert.equal(parse(report()).lastRun.at, "")
   // A source a newer helper reports is skipped, not a reason to reject everything.
   assert.deepEqual(parse(report({ sources: [Object.assign({}, good, { id: "some-new-source" }), good] })).sources.map(x => x.id), [good.id])
   assert.equal(parse(report({ sources: [Object.assign({}, good, { id: { evil: 1 } })] })), null)
   assert.equal(parse(report({ sources: [Object.assign({}, good, { state: "great" })] })), null)
   assert.equal(parse(report({ sources: [Object.assign({}, good, { date: "<img>" })] })), null)
-  assert.equal(parse(report({ lastRun: { at: "now", ok: true } })), null)
-  assert.equal(parse(report({ lastRun: { at: "2026-10-12 09:41", ok: "yes" } })), null)
+  assert.equal(parse(report({ sources: [Object.assign({}, good, { run: "hourly" })] })), null)
+  // The lists themselves are no longer rows: an old helper's are skipped.
+  assert.deepEqual(parse(report({ sources: [Object.assign({}, good, { id: "signatures" })] })).sources, [])
+  // A scan that used an old list says so, in the helper's fixed words only.
+  assert.equal(parse(report({ sources: [Object.assign({}, good, { note: "with the list from Oct 1" })] })).sources[0].note,
+    "with the list from Oct 1")
+  assert.equal(parse(report({ sources: [Object.assign({}, good, { note: "<b>pwned</b>" })] })), null)
 
   const now = new Date(2026, 9, 12, 15, 0)
-  assert.equal(M.sourceLine({ state: "ok", date: "2026-10-12" }, now), "updated today")
-  assert.equal(M.sourceLine({ state: "ok", date: "2026-10-11" }, now), "updated yesterday")
-  assert.equal(M.sourceLine({ state: "failed", date: "2026-10-03", tried: "2026-10-12" }, now), "last update failed; last good Oct 3")
-  assert.equal(M.sourceLine({ state: "never", date: "" }, now), "not updated yet")
-  assert.match(M.lastRunLine({ at: "2026-10-12 09:41", ok: true }, now), /^Last update today at 09:41\. Every source refreshed\.$/)
-  assert.match(M.lastRunLine({ at: "2026-10-05 09:41", ok: false }, now), /did not refresh/)
-  assert.equal(M.sourceLine({ id: "virus-scan", state: "ok", date: "2026-10-12" }, now), "ran today")
-  assert.equal(M.sourceLine({ id: "virus-scan", state: "never", date: "" }, now), "not run yet")
+  assert.equal(M.sourceLine({ state: "ok", date: "2026-10-12", note: "" }, now), "ran today")
+  assert.equal(M.sourceLine({ state: "ok", date: "2026-10-11", note: "" }, now), "ran yesterday")
+  assert.equal(M.sourceLine({ state: "failed", date: "2026-10-03", tried: "2026-10-12" }, now), "last run failed; last good Oct 3")
+  assert.equal(M.sourceLine({ state: "never", date: "" }, now), "not run yet")
+  // The list it used goes on a line of its own, so the time never wraps.
+  const used = { state: "ok", date: "2026-10-12", time: "09:40", note: "with signatures from Oct 9" }
+  assert.equal(M.sourceLine(used, now), "ran today at 09:40")
+  assert.equal(M.sourceNote(used), "with signatures from Oct 9")
+  assert.equal(M.sourceNote(Object.assign({}, used, { state: "failed" })), "")
 })
 
 // ---------------------------------------------------------------------------
@@ -357,7 +356,7 @@ function careReport(extra = {}) {
       care("thumbnails", "Thumbnail cache", "12.0 MB.", "helper", "clean-thumbnails"),
       care("trash", "Trash", "Empty.", null),
       care("pacman-cache", "Package cache", "3.1 GB.", "terminal", "clean-pacman-cache"),
-      care("orphans", "Orphaned packages", "2 orphaned packages.", "terminal", "clean-orphans"),
+      care("orphans", "Orphaned packages", "2 orphaned packages.", "docs", "arch-orphans"),
       care("journal", "System logs", "Logs take up 400M.", "terminal", "clean-journal"),
       check()
     ]
@@ -367,18 +366,18 @@ function careReport(extra = {}) {
 test("clean all covers the offered cleanups and never orphans", () => {
   const plan = M.cleanAllPlan(careReport())
   assert.equal(plan.user, true)
-  assert.equal(plan.system, true)
+  assert.equal(plan.system, "clean-system")                     // both root rows: one step, one password
   assert.deepEqual(plan.items, ["Thumbnail cache: 12.0 MB", "Package cache: 3.1 GB", "System logs: Logs take up 400M"])
   const card = M.confirmation("clean-all", "care", careReport())
   assert.equal(card.title, "Clean all")
-  assert.ok(card.lines.some(l => l.startsWith("Orphaned packages are left out")))
+  assert.ok(card.lines.some(l => l.startsWith("Orphaned packages and leftover app data are left out")))
   assert.ok(card.lines.some(l => l.includes("Omarchy asks for your password once")))
 })
 
 test("clean all without a terminal launcher keeps only the no-root part", () => {
   const plan = M.cleanAllPlan(careReport({ tools: {} }))
   assert.equal(plan.user, true)
-  assert.equal(plan.system, false)
+  assert.equal(plan.system, "")
   assert.deepEqual(plan.items, ["Thumbnail cache: 12.0 MB"])
   assert.ok(!M.confirmation("clean-all", "care", careReport({ tools: {} })).lines.some(l => l.includes("asks for your password")))
 })
@@ -435,24 +434,54 @@ test("pillar rows count what each pillar shows", () => {
 })
 
 
-test("run cards: each lists its own schedule; Run all scans ~ but not ~/Downloads again", () => {
-  const src = id => ({ id, label: "x", date: "", time: "", state: "never", tried: "" })
-  const r = parse(report({ sources: ["downloads-scan", "virus-scan", "firmware", "password-check", "signatures",
+test("run cards: each scan right after its list; Run all scans ~ but not ~/Downloads again", () => {
+  const src = id => ({ id, label: "x", run: "daily", date: "", time: "", state: "never", tried: "" })
+  const r = parse(report({ sources: ["downloads-scan", "virus-scan", "firmware", "password-check", "bumblebee",
                                      "arch-audit", "pending-updates"].map(src) }))
+  const names = card => card.lines.filter(l => /^\d+\. /.test(l)).map(l => l.replace(/^\d+\. /, "").split(/[:.]/)[0])
   const all = M.confirmation("full-scan", "all", r)
   assert.equal(all.title, "Run all")
-  const steps = all.lines.filter(l => /^\d+\. /.test(l)).map(l => l.replace(/^\d+\. /, "").split(/[:.]/)[0])
-  assert.deepEqual(steps, ["ClamAV signatures", "Password check", "Arch security list", "System update check",
-                           "Settings checks", "Firmware check", "ClamAV scan of ~"])
+  assert.deepEqual(names(all), ["Password scan", "System update lookup", "Arch security scan", "Bumblebee list",
+                                "Bumblebee scan", "Firmware lookup", "Virus signatures", "Virus scan of ~"])
   assert.ok(all.lines.some(l => l.includes("notification")))
   const daily = M.confirmation("daily-check", "all", r)
   assert.equal(daily.title, "Run daily check")
-  assert.ok(daily.lines.some(l => l.startsWith("2. ClamAV scan of ~/Downloads")))
-  assert.ok(!daily.lines.some(l => /password\./.test(l) && !/No password/.test(l)))
+  assert.deepEqual(names(daily), ["System update lookup", "Arch security scan", "Bumblebee list", "Bumblebee scan",
+                                  "Virus signatures", "Virus scan of ~/Downloads"])
+  assert.ok(daily.lines.some(l => l.startsWith("No password needed.")))
+  assert.deepEqual(daily.commands, [])
   const weekly = M.confirmation("weekly-check", "all", r)
-  assert.deepEqual(weekly.lines.slice(1, 3).map(l => l.split(":")[0]), ["1. Firmware check", "2. ClamAV scan of ~"])
-  for (const k of ["full-scan", "daily-check", "weekly-check", "update-sources"])
+  assert.deepEqual(names(weekly), ["Firmware lookup", "Virus signatures", "Virus scan of ~"])
+  for (const k of ["full-scan", "daily-check", "weekly-check"])
     assert.equal(M.confirmation(k, "all", null), null)
+  assert.equal(M.confirmation("update-sources", "all", r), null)          // there is no list update any more
+  // Bumblebee is never updated by a run.
+  for (const k of ["full-scan", "daily-check", "weekly-check"])
+    assert.ok(!JSON.stringify(M.confirmation(k, "all", r)).includes("releases/download"), k)
+})
+
+test("old signatures: only the Run all card asks for the password, and shows the command", () => {
+  const src = id => ({ id, label: "x", run: "daily", date: "", time: "", state: "never", tried: "" })
+  const r = parse(report({ signaturesDue: true, sources: ["downloads-scan", "virus-scan", "password-check"].map(src) }))
+  const all = M.confirmation("full-scan", "all", r, "/home/a")
+  assert.match(all.lines[1], /^1\. Virus signatures update: they are over two days old/)
+  assert.deepEqual(all.commands.map(c => c.text), ["/usr/bin/pkexec /usr/bin/bash -c\n" + M.SIGNATURES_SCRIPT,
+                                                    "/usr/bin/pkexec /usr/bin/bash -c\n" + M.NO_PASSWORD_STEP])
+  assert.ok(all.lines.some(l => /password at the start, twice/.test(l)))
+  assert.equal(M.cardShowsSignatures(all), true)
+  // The daily and weekly checks never ask: ClamAV's own service keeps them current.
+  for (const k of ["daily-check", "weekly-check"]) {
+    const card = M.confirmation(k, "all", r, "/home/a")
+    assert.deepEqual(card.commands, [], k)
+    assert.ok(!card.lines.some(l => /Virus signatures update/.test(l)), k)
+    assert.ok(card.lines.some(l => l.startsWith("No password needed.")), k)
+    assert.equal(M.cardShowsSignatures(card), false, k)
+  }
+  assert.equal(M.cardShowsSignatures(M.confirmation("full-scan", "all", parse(report({ sources: r.sources })), "/home/a")), false)
+  assert.equal(M.cardShowsSignatures(null), false)
+  // The notification: constant words, pointing to Run all.
+  assert.match(M.SIGNATURES_NOTICE, /over two days\. Open Vigil and press Run all/)
+  assert.doesNotMatch(M.SIGNATURES_NOTICE, /[<>&]/)
 })
 
 test("every terminal says what it does, plainly, then the technical part", () => {
@@ -461,53 +490,52 @@ test("every terminal says what it does, plainly, then the technical part", () =>
     assert.ok(!a.what[0].startsWith("Technical:") && !a.what[0].startsWith("Runs:"), id)
     assert.ok(a.what[a.what.length - 1].startsWith("Technical: "), id)
     const script = M.terminalScript(id, TOOLS)
-    if (script) assert.match(script, /'(You will be asked for your password\.|No password needed\.)'/, id)
+    if (script) assert.match(script, /'(You will be asked for your password\.|No password needed\.|Omarchy asks for your password when a step needs it\.)'/, id)
   }
 })
 
-test("schedule lines: countdowns with the time, in local time", () => {
+test("countdowns: with the time, in local time", () => {
   const now = new Date(2026, 9, 12, 10, 0)
-  const r = { generatedAt: "2026-10-12T09:58:00+0200", lastRun: { at: "2026-10-12 09:52", ok: true },
-              nextUpdate: "2026-10-19 09:52", nextFullScan: "2026-10-12 21:15", nextDaily: "2026-10-13 07:40" }
-  assert.deepEqual(M.scheduleLines(r, true, now, 30), [
-    "Next daily check: tomorrow at 07:40",
-    "Next weekly check: today at 21:15",
-    "Next update check: in 7 days"])
+  const r = { generatedAt: "2026-10-12T09:58:00+0200", nextFullScan: "2026-10-12 21:15", nextDaily: "2026-10-13 07:40" }
+  assert.deepEqual(M.runCaptions(r, true, now, 30), { daily: "next\ntomorrow 07:40", weekly: "next\ntoday 21:15", all: "both\nnow" })
   // Already due: it runs at the next background check, 30 minutes after the last one.
-  assert.equal(M.scheduleLines(Object.assign({}, r, { nextDaily: "now" }), true, now, 30)[0],
-    "Next daily check: today at 10:28")
-  assert.equal(M.scheduleLines(Object.assign({}, r, { nextDaily: "" }), true, now, 30).length, 2)  // nothing daily set up
+  assert.equal(M.runCaptions(Object.assign({}, r, { nextDaily: "now" }), true, now, 30).daily, "next\ntoday 10:28")
   assert.equal(M.countdown("2026-10-13 08:05", now, null), "tomorrow at 08:05")
   assert.equal(M.countdown("2026-10-12", now, null), "today at 10:00")       // older helper: date only
   assert.equal(M.countdown("", now, null), "")
-  assert.deepEqual(M.scheduleLines(r, false, now, 30), ["Automatic updates and scans are off (Vigil settings)."])
-  assert.match(M.scheduleLines(Object.assign({}, r, { lastRun: { at: "2026-10-12 09:52", ok: false } }), true, now, 30)[3],
-    /could not reach every source/)
   assert.equal(parse(report({ nextFullScan: "2026-10-19 08:00" })).nextFullScan, "2026-10-19 08:00")
   assert.equal(parse(report({ nextDaily: "2026-10-13 08:00" })).nextDaily, "2026-10-13 08:00")
-  assert.equal(parse(report({ nextUpdate: "now" })).nextUpdate, "now")
   assert.equal(parse(report({ nextFullScan: "<b>" })), null)
   assert.equal(parse(report({ nextDaily: "<b>" })), null)
 })
 test("progress lines are validated and worded", () => {
-  const p = M.parseProgress(JSON.stringify({ progress: { step: 3, of: 4, doing: "ClamAV scan of ~", done: 500, total: 1000 } }))
+  const p = M.parseProgress(JSON.stringify({ progress: { step: 3, of: 4, doing: "Virus scan of ~", done: 500, total: 1000 } }))
   assert.equal(p.fraction, (2 + 0.5) / 4)
-  assert.match(M.progressText(p), /^Step 3 of 4: ClamAV scan of ~ \(500 of 1,?000 files\)$/)
+  assert.match(M.progressText(p), /^Step 3 of 4: Virus scan of ~ \(500 of 1,?000 files\)$/)
   for (const bad of ['{"ok":true}', "nope", JSON.stringify({ progress: { step: 5, of: 4, doing: "x", done: 0, total: 0 } }),
                      JSON.stringify({ progress: { step: 1, of: 1, doing: 7, done: 0, total: 0 } })])
     assert.equal(M.parseProgress(bad), null, bad)
 })
 
-test("last run: scans first, then updates, with times", () => {
+test("last run: each run's scans under its name, with times", () => {
   const r = parse(report({ generatedAt: "2026-10-12T10:02:00+0000", sources: [
-    { id: "signatures", label: "ClamAV virus signatures", date: "2026-10-12", time: "08:00", state: "ok", tried: "" },
-    { id: "virus-scan", label: "Virus scan (home folder)", date: "2026-10-11", time: "22:10", state: "ok", tried: "" },
-    { id: "password-check", label: "Password check (Full scan button only)", date: "", time: "", state: "never", tried: "" }] }))
+    { id: "bumblebee", label: "Bumblebee scan", run: "daily", date: "2026-10-12", time: "08:00", state: "ok", tried: "",
+      note: "with the list from Oct 9", old: true },
+    { id: "virus-scan", label: "Virus scan of ~", run: "weekly", date: "2026-10-11", time: "22:10", state: "ok", tried: "",
+      note: "with signatures from Oct 11", old: false },
+    { id: "password-check", label: "Password scan", run: "all", date: "", time: "", state: "never", tried: "" }] }))
   const rows = M.lastRunRows(r, new Date(2026, 9, 12, 10, 5))
-  assert.deepEqual(rows.map(x => [x.label, x.value]), [
-    ["Scans", ""], ["Settings checks (daily check)", "ran today at 10:02"],
-    ["Virus scan (home folder)", "ran yesterday at 22:10"], ["Password check (Full scan button only)", "not run yet"],
-    ["Updates", ""], ["ClamAV virus signatures", "updated today at 08:00"]])
+  assert.deepEqual(rows.map(x => [x.label, x.value, x.note]), [
+    ["Your settings and files", "read today at 10:02", ""],
+    ["Daily check", "", ""], ["Bumblebee scan", "ran today at 08:00", "with the list from Oct 9"],
+    ["Weekly check", "", ""], ["Virus scan of ~", "ran yesterday at 22:10", "with signatures from Oct 11"],
+    ["Run all only", "", ""], ["Password scan", "not run yet", ""]])
+  // Every scan says which list it used; only a list over two days old is red,
+  // and only its note, not the time.
+  assert.deepEqual(rows.filter(x => x.noteOld).map(x => x.label), ["Bumblebee scan"])
+  assert.deepEqual(rows.filter(x => x.problem).map(x => x.label), [])
+  assert.equal(parse(report({ sources: [{ id: "bumblebee", label: "x", run: "daily", date: "", state: "never", tried: "",
+    old: "yes" }] })), null)
 })
 
 test("actions run without a terminal unless the tool asks questions", () => {
@@ -538,19 +566,6 @@ test("actions run without a terminal unless the tool asks questions", () => {
   }
   const card = M.confirmation("terminal", "firewall-on", null)
   assert.ok(card.lines[card.lines.length - 1].startsWith("Omarchy asks for your password"))
-})
-
-test("update check card: lists what updates and where the password comes in", () => {
-  const r = parse(report({ sources: [
-    { id: "signatures", label: "ClamAV virus signatures", date: "", time: "", state: "never", tried: "" },
-    { id: "arch-audit", label: "Arch vulnerability database", date: "", time: "", state: "never", tried: "" }] }))
-  const card = M.confirmation("update-sources", "all", r)
-  assert.equal(card.title, "Run update check")
-  assert.match(card.lines[1], /^1\. ClamAV signatures\. Omarchy asks for your password/)
-  assert.match(card.lines[2], /^2\. Arch security list: known holes/)
-  assert.ok(card.lines[card.lines.length - 1].startsWith("Technical: "))
-  const none = M.confirmation("update-sources", "all", parse(report()))
-  assert.match(none.lines[0], /^Nothing to update yet/)
 })
 
 test("a scan or update done outside Vigil says so", () => {
@@ -660,7 +675,7 @@ test("an action in the panel shows how far it got; the words come from Vigil, no
 
 test("a scan started elsewhere is followed, and anything odd is refused", () => {
   assert.equal(parse(report()).running, null)
-  const r = parse(report({ running: { step: 2, of: 3, doing: "ClamAV scan of ~", done: 5, total: 10 } }))
+  const r = parse(report({ running: { step: 2, of: 3, doing: "Virus scan of ~", done: 5, total: 10 } }))
   assert.equal(r.running.step, 2)
   assert.equal(M.progressText(parse(report({ running: { step: 0, of: 0, doing: "", done: 0, total: 0 } })).running), "Working…")
   for (const bad of ["yes", [1], { step: 5, of: 3, doing: "x", done: 0, total: 0 }])
@@ -767,7 +782,7 @@ test("hand-over turns off exactly the duplicate schedules, and Undo turns exactl
   rmSync(dir, { recursive: true, force: true })
 })
 
-test("with the Vigil weekly scan off, other schedules are not offered for hand-over", () => {
+test("with Vigil's background checks off, other schedules are not offered for hand-over", () => {
   const r = parse(report({ checks: [check({ id: "other-schedules", category: "detect", status: "info", weight: 0,
     fix: { kind: "terminal", action: "hand-over-schedules", label: "Let Vigil run them" } })] }))
   assert.equal(M.withSettings(r, true).checks[0].status, "info")
@@ -778,10 +793,10 @@ test("with the Vigil weekly scan off, other schedules are not offered for hand-o
 })
 
 test("virus detections each carry an id for Ignore, and the card says what ignoring means", () => {
-  const items = [{ id: "0123456789abcdef", text: "~/Games/dx11.dll: Win.Trojan.Agent-1", ignored: false },
-                 { id: "", text: "~/old.exe: Win.X-1", ignored: false }]
+  const items = [{ id: "0123456789abcdef", text: "~/Games/dx11.dll\nWin.Trojan.Agent-1", ignored: false },
+                 { id: "", text: "~/old.exe\nWin.X-1", ignored: false }]
   const r = parse(report({ checks: [check({ id: "virus-scan", category: "detect", items })] }))
-  assert.deepEqual(r.checks[0].items, items)
+  assert.deepEqual(r.checks[0].items, items.map(i => Object.assign({ kind: "detection", kept: false, name: "", marks: [] }, i)))
   assert.equal(parse(report()).checks[0].items.length, 0)
   const card = M.confirmation("ignore", "0123456789abcdef", r)
   assert.equal(card.title, "Mark this as a false positive?")
@@ -793,6 +808,141 @@ test("virus detections each carry an id for Ignore, and the card says what ignor
     assert.equal(parse(report({ checks: [check({ items: [bad] })] })), null)
 })
 
+
+function leftoverReport(items) {
+  return parse(report({ checks: [check({ id: "leftovers", category: "care", status: "info", weight: 0,
+    title: "Leftover app data", fix: { kind: "docs", action: "arch-xdg", label: "Learn more" }, items })] }))
+}
+
+test("ticked leftovers go to the trash on one card that lists each, and says it is the trash", () => {
+  const items = [
+    { id: "0123456789abcdef", kind: "leftover", text: "~/.config/Slack: 210.0 MB, no installed app uses it", kept: false, ignored: false },
+    { id: "fedcba9876543210", kind: "leftover", text: "~/.var/app/com.spotify.Client: 1.2 GB, data of a Flatpak app that is no longer installed", kept: true, ignored: false },
+    { id: "00000000000000aa", kind: "leftover", text: "~/.local/bin/old: 0 B, a link to a program that is gone", kept: false, ignored: false }]
+  const r = leftoverReport(items)
+  assert.deepEqual(r.checks[0].items, items.map(i => Object.assign({ name: "", marks: [] }, i)))
+  assert.deepEqual(M.leftoverTrashIds(r), ["0123456789abcdef", "00000000000000aa"])     // kept ones stay
+
+  const one = M.confirmation("trash", "0123456789abcdef", r, "/home/a")
+  assert.equal(one.title, "Move this to the trash?")
+  assert.equal(one.lines[0], items[0].text)
+  assert.ok(one.lines.some(l => /choose Restore/.test(l)))
+  assert.ok(one.lines.some(l => /deletes it for good/.test(l) && /Clean all/.test(l)))
+  assert.deepEqual(one.commands, [])
+  assert.equal(M.confirmation("trash", "fedcba9876543210", r), null)        // kept: no trash card
+  assert.equal(M.confirmation("trash", "ffffffffffffffff", r), null)        // not in the report
+  assert.equal(M.confirmation("ignore", "0123456789abcdef", r), null)       // a leftover is not a detection
+
+  // Several ticked (or Trash all): one card listing each one.
+  const two = M.confirmation("trash", "0123456789abcdef,00000000000000aa", r)
+  assert.equal(two.title, "Move 2 items to the trash?")
+  assert.deepEqual(two.lines.slice(0, 2), [items[0].text, items[2].text])
+  assert.ok(two.lines.some(l => /Everything else on the list stays/.test(l)))
+  assert.ok(!two.lines.some(l => /spotify/i.test(l)))
+  // Any id that is kept, unknown, repeated or malformed refuses the whole card.
+  for (const bad of ["0123456789abcdef,fedcba9876543210", "0123456789abcdef,ffffffffffffffff",
+                     "0123456789abcdef,0123456789abcdef", "0123456789abcdef,", "../x", ""])
+    assert.equal(M.confirmation("trash", bad, r), null, bad)
+  assert.deepEqual(M.leftoverIdList(r, "00000000000000aa"), ["00000000000000aa"])
+  assert.equal(M.docsUrl("arch-xdg"), "https://wiki.archlinux.org/title/XDG_Base_Directory")
+})
+
+test("leftover items that do not match the shape reject the report", () => {
+  const ok = { id: "0123456789abcdef", kind: "leftover", text: "x", kept: false, ignored: false }
+  for (const bad of [Object.assign({}, ok, { id: "" }), Object.assign({}, ok, { kept: "no" }),
+                     Object.assign({}, ok, { kept: undefined }), Object.assign({}, ok, { ignored: true }),
+                     Object.assign({}, ok, { kind: "file" }), Object.assign({}, ok, { id: "../.ssh" }),
+                     { id: "0123456789abcdef", text: "x", ignored: false, kept: true }])
+    assert.equal(leftoverReport([bad]), null, JSON.stringify(bad))
+})
+
+test("each pillar tab's caption shows its most urgent count; the Overview has none", () => {
+  const c = (category, status, extra = {}) => check(Object.assign({ id: category + "-" + status + Math.random().toString(16).slice(2, 8),
+    category, status, weight: 0, fix: { kind: "none", action: "", label: "" } }, extra))
+  const r = parse(report({ checks: [c("harden", "fail", { weight: 3 }), c("harden", "warn", { weight: 1 }), c("detect", "info"),
+    c("supply", "warn", { weight: 1 }), c("supply", "info"), c("privacy", "pass"), c("care", "warn"), c("care", "info"),
+    c("care", "pass"), c("privacy", "warn", { weight: 1, dismissible: true, dismissed: true })] }))
+  const cap = (tab) => { const x = M.tabCaption(r, tab); return [x.count, x.label, x.tone] }
+  assert.deepEqual(cap("overview"), ["", "", "dim"])                       // no caption; its tooltip has the score
+  assert.deepEqual(cap("harden"), ["1", "to fix", "urgent"])
+  assert.deepEqual(cap("detect"), ["1", "note", "dim"])
+  assert.deepEqual(cap("supply"), ["1", "to improve", "warn"])
+  assert.deepEqual(cap("privacy"), ["\u2713", "all good", "dim"])         // a reviewed warning does not count
+  assert.deepEqual(cap("care"), ["2", "to tidy", "warn"])                 // Care never says "to fix"
+  assert.equal(M.tabCaption(r, "harden").text, "1 to fix")
+  assert.equal(M.tabCaption(null, "harden").text, "")
+  assert.equal(M.tabCounts(r, "overview"), "Score 70/100")
+  assert.equal(M.tabCounts(r, "care"), "1 to improve \u00b7 1 note")
+  const tidy = parse(report({ checks: [c("care", "pass"), c("harden", "info")] }))
+  assert.deepEqual([M.tabCaption(tidy, "care").count, M.tabCaption(tidy, "care").label], ["\u2713", "tidy"])
+  assert.equal(M.tabCaption(tidy, "overview").text, "")
+})
+
+test("the Overview, the Care tab and the run cards say Care is never part of a run", () => {
+  assert.match(M.CARE_NOTE, /never counts toward the score/)
+  assert.match(M.CARE_NOTE, /only when you press a button on the Care tab/)
+  assert.match(M.CARE_TAB_NOTE, /not part of the score, the daily check or the weekly check/)
+  const r = parse(report())
+  for (const kind of ["daily-check", "full-scan"])
+    assert.ok(M.confirmation(kind, "all", r, "/home/a").lines.includes(M.CARE_RUN_LINE), kind)
+})
+
+test("on the Care tab, what Clean all leaves alone comes last, under its own heading", () => {
+  const care = (id, status) => check({ id, category: "care", status, weight: 0, title: id, fix: { kind: "none", action: "", label: "" } })
+  const r = parse(report({ checks: [care("leftovers", "info"), care("orphans", "info"), care("trash", "pass"),
+    care("thumbnails", "warn"), care("journal", "info"), care("pacman-cache", "pass")] }))
+  const rows = M.checksFor(r, "care")
+  assert.deepEqual(rows.slice(-2).map(c => c.id), ["orphans", "leftovers"])
+  assert.deepEqual(rows.map((c, i) => M.rowHeading(rows, i)), ["IN CLEAN ALL", "", "", "", M.CARE_SEPARATE_HEADING, ""])
+  assert.deepEqual(rows.map((c, i) => M.rowHeadingNote(rows, i)), ["", "", "", "", M.CARE_SEPARATE_NOTE, ""])
+  assert.equal(M.CARE_SEPARATE_HEADING, "NOT IN CLEAN ALL")
+  assert.match(M.CARE_SEPARATE_NOTE, /Clean all never touches these/)
+  // Only Care: another tab never gets the heading.
+  const h = parse(report({ checks: [check({ id: "orphans", category: "harden" })] }))
+  assert.equal(M.rowHeading(M.checksFor(h, "harden"), 0), "")
+  assert.equal(M.rowHeading(rows, 99), "")
+  // And Clean all never offers them, whatever they say.
+  assert.ok(!M.cleanAllPlan(r).items.some(l => /orphans|leftovers/.test(l)))
+})
+
+test("pillar tabs head each group of rows with the check that brings it in, when there is more than one", () => {
+  const h = (id, status = "warn") => check({ id, category: "harden", status, weight: 1 })
+  const r = parse(report({ checks: [h("firmware"), h("firewall"), h("updates"), h("ssh-keys", "pass"), h("flatpak-apps")] }))
+  const rows = M.checksFor(r, "harden")
+  assert.deepEqual(rows.map(c => c.id), ["firewall", "ssh-keys", "updates", "flatpak-apps", "firmware"])
+  assert.deepEqual(rows.map((c, i) => M.rowHeading(rows, i)), ["ALWAYS CURRENT", "", "DAILY CHECK", "", "WEEKLY CHECK"])
+  assert.match(M.rowHeadingNote(rows, 0, 30), /whenever you open Vigil, after every fix, and every 30 minutes\.$/)
+  assert.match(M.rowHeadingNote(rows, 0, 60), /every hour\.$/)
+  assert.match(M.rowHeadingNote(rows, 0, 120), /every 2 hours\.$/)
+  assert.equal(M.rowHeadingNote(rows, 2, 30), "")
+  const one = M.checksFor(parse(report({ checks: [h("firewall"), h("ssh-keys")] })), "harden")
+  assert.deepEqual(one.map((c, i) => M.rowHeading(one, i)), ["", ""])        // one group: no heading
+  assert.match(M.tabIntro("detect").text, /ClamAV/)
+  assert.doesNotMatch(M.tabIntro("detect").text, /rootkit/)
+})
+
+test("each run button says when its check next runs by itself", () => {
+  const now = new Date(2026, 9, 12, 10, 0)
+  const r = { generatedAt: "2026-10-12T09:58:00+0200", nextFullScan: "2026-10-12 21:15", nextDaily: "now" }
+  assert.deepEqual(M.runCaptions(r, true, now, 30), { daily: "next\ntoday 10:28", weekly: "next\ntoday 21:15", all: "both\nnow" })
+  assert.deepEqual(M.runCaptions(r, false, now, 30), { daily: "by hand\nonly", weekly: "by hand\nonly", all: "both\nnow" })
+  assert.equal(M.runCaptions(Object.assign({}, r, { nextDaily: "" }), true, now, 30).daily, "")
+  assert.deepEqual(M.scheduleNotes(r, true), [])
+  assert.match(M.scheduleNotes(r, false)[0], /only when you press a button/)
+})
+
+test("the title line does not repeat the Overview's score, and key hints fit the tab", () => {
+  const now = new Date(2026, 9, 12, 10, 0)
+  const r = parse(report({ generatedAt: "2026-10-12T09:58:00+0200" }))
+  assert.equal(M.heroMeta(r, "overview", false, now), "Checked today at 09:58")
+  assert.equal(M.heroMeta(r, "harden", false, now), "Needs attention \u00b7 70/100")
+  assert.equal(M.heroMeta(r, "overview", true, now), "Checking\u2026")
+  assert.equal(M.heroMeta(null, "harden", false, now), "Not checked yet")
+  assert.match(M.keyHints("overview", "0.30.0"), /R run all/)
+  assert.doesNotMatch(M.keyHints("overview", ""), /F fix/)
+  assert.match(M.keyHints("care", ""), /C clean all/)
+  assert.doesNotMatch(M.keyHints("harden", ""), /C clean all/)
+})
 
 test("after an update, the panel names the new version instead of failing", () => {
   const manifest = JSON.parse(readFileSync(path.join(here, "..", "manifest.json"), "utf8"))
@@ -809,13 +959,13 @@ test("a rejected report says which part failed", () => {
   const bad = report({ checks: [check({ id: "firmware", status: "superb" })] })
   assert.equal(parse(bad), null)
   assert.equal(M.reportProblem(JSON.stringify(bad)), "the firmware check")
-  assert.equal(M.reportProblem(JSON.stringify(report({ lastRun: { at: "now", ok: true } }))), "the last update")
+  assert.equal(M.reportProblem(JSON.stringify(report({ sources: [{ id: "bumblebee", run: "hourly" }] }))), "the Last run list")
   assert.equal(M.reportProblem("{"), "it was not JSON")
   assert.equal(M.reportProblem(JSON.stringify(report({ checks: [check({ id: "<script>" , status: "x"})] }))), "the ? check")
 })
 
 test("the progress bar gives the long virus scan most of its length", () => {
-  const p = M.parseProgress(JSON.stringify({ progress: { step: 9, of: 9, doing: "ClamAV scan of ~",
+  const p = M.parseProgress(JSON.stringify({ progress: { step: 9, of: 9, doing: "Virus scan of ~",
     done: 5082, total: 172762, at: 0.2, span: 0.8 } }))
   assert.ok(p.fraction > 0.2 && p.fraction < 0.25, String(p.fraction))          // 3% of the scan, not 89% of the bar
   const old = M.parseProgress(JSON.stringify({ progress: { step: 9, of: 9, doing: "x", done: 0, total: 0 } }))
@@ -867,27 +1017,26 @@ esac
 })
 
 
-test("every Last run row names a schedule line, and the helper lists them in schedule order", () => {
+test("every Last run row is grouped by its run, in the order the helper runs it", () => {
   const helper = readFileSync(path.join(here, "..", "bin", "vigil"), "utf8")
-  const body = helper.slice(helper.indexOf("def source_status"), helper.indexOf("def feeds_updated"))
-  const order = [...body.matchAll(/\b(DAILY|WEEKLY|UPDATE|Run all only)\b/g)].map(m => m[1])
-  // Scans, then updates, each in schedule order (the password check, which
-  // follows no schedule line, ends the scans).
-  assert.equal(order.join(" "), "DAILY DAILY WEEKLY WEEKLY Run all only DAILY UPDATE UPDATE")
-  for (const line of M.scheduleLines({ generatedAt: "2026-10-12T09:58:00+0200", lastRun: { at: "", ok: true },
-      nextUpdate: "2026-10-19 09:52", nextFullScan: "2026-10-12 21:15", nextDaily: "2026-10-13 07:40" },
-      true, new Date(2026, 9, 12, 10, 0), 30)) {
-    const name = /^Next (\w+ check):/.exec(line)[1]
-    assert.ok(helper.includes('" (' + name + ')"'), name + " is not a Last run suffix")
-  }
+  const daily = /^DAILY_FEEDS = \(([^)]*)\)/m.exec(helper)[1].match(/"([a-z-]+)"/g).map(x => x.slice(1, -1))
+  const weekly = /^WEEKLY_FEEDS = \(([^)]*)\)/m.exec(helper)[1].match(/"([a-z-]+)"/g).map(x => x.slice(1, -1))
+  // The panel knows every row the helper can send, and the run cards list
+  // the daily and weekly steps in the order the helper runs them.
+  for (const id of daily.concat(weekly, ["password-check"])) assert.ok(M.SOURCE_IDS.includes(id), id)
+  const cardOrder = ids => ids.filter(id => id !== "bumblebee-list" && id !== "signatures")
+  assert.deepEqual(cardOrder(M.DAILY_IDS), daily)
+  assert.deepEqual(cardOrder(M.WEEKLY_IDS), weekly)
 })
 
-test("tab rows: settings checks, then daily, weekly and update check rows, worst first in each", () => {
+test("tab rows: always current, then daily and weekly rows, worst first in each", () => {
   const c = (id, status, weight) => ({ id, category: "detect", status, weight: weight || 1, dismissed: false })
   const r = { checks: [c("scanner-clamav", "pass"), c("firmware", "warn"), c("virus-scan", "pass"),
                        c("aur-status", "fail"), c("screen-lock", "pass"), c("firewall", "fail")] }
+  // The signatures row reads ClamAV's own state, so it is always current;
+  // the AUR status comes from the daily check.
   assert.deepEqual(M.checksFor(r, "detect").map(x => x.id),
-    ["firewall", "screen-lock", "virus-scan", "firmware", "aur-status", "scanner-clamav"])  // update check: worst first
+    ["firewall", "scanner-clamav", "screen-lock", "aur-status", "virus-scan", "firmware"])
 })
 
 test("Add a passphrase never puts SSH key file names in a program's arguments", () => {
@@ -1131,30 +1280,151 @@ test("every confirmation shows in full the commands Run starts, root steps inclu
 })
 
 test("run cards show the helper's root steps exactly as the helper starts them", () => {
-  const sig = { id: "signatures", label: "ClamAV signatures", date: "", time: "", state: "never", tried: "" }
-  const older = check({ id: "bumblebee", category: "supply", status: "info", weight: 0,
-                        fix: { kind: "terminal", action: "update-bumblebee", label: "Update Bumblebee" } })
   const card = (kind, over) => M.confirmation(kind, "all", parse(report(over)), "/home/marc").commands
-  assert.deepEqual(card("update-sources", {}), [])                                       // nothing runs as root
-  let c = card("update-sources", { sources: [sig] })
-  assert.equal(c.length, 1)
-  assert.equal(c[0].text, "/usr/bin/pkexec /usr/bin/bash -c\n" + M.rootUpdatesScript(true, false))
-  assert.ok(c[0].text.includes(M.SIGNATURES_SCRIPT) && !c[0].text.includes(M.BUMBLEBEE_INSTALL))
-  c = card("update-sources", { sources: [sig], checks: [check(), older] })
-  assert.equal(c[0].text, "/usr/bin/pkexec /usr/bin/bash -c\n" + M.rootUpdatesScript(true, true))
-  assert.ok(c[0].text.includes(M.BUMBLEBEE_INSTALL))
-  c = card("full-scan", { checks: [check(), older] })
-  assert.equal(c.length, 2)
-  assert.equal(c[0].text, "/usr/bin/pkexec /usr/bin/bash -c\n" + M.rootUpdatesScript(false, true))
-  assert.equal(c[1].text, "/usr/bin/pkexec /usr/bin/bash -c\n" + M.NO_PASSWORD_STEP)
-  assert.deepEqual(card("full-scan", { tools: {} }), [])                                 // no pkexec: no root step
-  assert.deepEqual(card("daily-check", {}), [])
+  const sig = "/usr/bin/pkexec /usr/bin/bash -c\n" + M.SIGNATURES_SCRIPT
+  const nopw = "/usr/bin/pkexec /usr/bin/bash -c\n" + M.NO_PASSWORD_STEP
+  assert.deepEqual(card("daily-check", {}), [])                                          // nothing runs as root
   assert.deepEqual(card("weekly-check", {}), [])
-  // Clean all: the root half, in full.
+  assert.deepEqual(card("full-scan", {}).map(c => c.text), [nopw])
+  for (const k of ["daily-check", "weekly-check"])
+    assert.deepEqual(card(k, { signaturesDue: true }), [], k)                          // never: ClamAV's service does it
+  assert.deepEqual(card("full-scan", { signaturesDue: true }).map(c => c.text), [sig, nopw])
+  assert.deepEqual(card("full-scan", { tools: {}, signaturesDue: true }), [])            // no pkexec: no root step
+  // Even a Bumblebee older than the pin is never installed by a run.
+  const older = check({ id: "bumblebee", category: "supply", status: "info", weight: 0,
+                        fix: { kind: "terminal", action: "update-bumblebee", label: "Install Bumblebee" } })
+  for (const k of ["daily-check", "weekly-check", "full-scan"])
+    assert.ok(!card(k, { checks: [check(), older], signaturesDue: true }).some(c => c.text.includes(M.BUMBLEBEE_INSTALL)), k)
+  // Clean all: the root half, in full, and only the cleanup a row offers.
   const care = parse(report({ checks: [check({ id: "journal", category: "care", status: "info", weight: 0,
     fix: { kind: "terminal", action: "clean-journal", label: "Keep two weeks" } })] }))
   const clean = M.confirmation("clean-all", "care", care, "/home/marc").commands
   assert.equal(clean.length, 1)
-  assert.equal(clean[0].text, M.actionPlan("clean-system", TOOLS, "/home/marc")[0].argv.slice(0, -1).join(" ")
-    + "\n" + M.actionPlan("clean-system", TOOLS, "/home/marc")[0].argv[5])
+  assert.equal(clean[0].text, M.actionPlan("clean-journal", TOOLS, "/home/marc")[0].argv.slice(0, -1).join(" ")
+    + "\n" + M.actionPlan("clean-journal", TOOLS, "/home/marc")[0].argv[5])
+  assert.ok(!clean[0].text.includes("paccache"))                 // logs only: the package cache is left alone
+})
+
+// ---------------------------------------------------------------------------
+// Pick lists: orphaned and foreign packages, plugins, infected files
+
+function pickReport(id, kind, items, tools = { pkexec: "/usr/bin", "omarchy-plugin-remove": "/usr/share/omarchy/bin" }) {
+  return parse(report({ tools, checks: [check({ id, category: id === "orphans" ? "care" : "supply", status: "info",
+    weight: 0, items: items.map(i => Object.assign({ kind, ignored: false, kept: false }, i)) })] }))
+}
+
+test("orphans: remove on a card that lists each and shows the exact root command", () => {
+  const r = pickReport("orphans", "orphan", [
+    { id: "00000000000000a1", name: "python-old", text: "python-old · 1.0-1 · 1.50 MiB\nAn old library" },
+    { id: "00000000000000a2", name: "libgone", text: "libgone · 2-1 · 10 KiB\nno description" },
+    { id: "00000000000000a3", name: "kept-one", text: "kept-one · 1-1\nx", kept: true }])
+  assert.deepEqual(M.pickSpec(r.checks[0]), { remove: "Remove", all: true, card: "remove-orphans", keep: true })
+  assert.deepEqual(M.pickableIds(r, "orphan"), ["00000000000000a1", "00000000000000a2"])
+  const card = M.confirmation("remove-orphans", "00000000000000a1,00000000000000a2", r, "/home/a")
+  assert.equal(card.title, "Remove 2 packages?")
+  assert.deepEqual(card.lines.slice(0, 2), ["python-old · 1.0-1 · 1.50 MiB", "libgone · 2-1 · 10 KiB"])
+  assert.ok(card.lines.some(l => /removes nothing/.test(l)))
+  assert.equal(card.commands.length, 1)
+  assert.match(card.commands[0].who, /As root, through pkexec/)
+  const steps = M.removalPlan("remove-orphans", "00000000000000a1,00000000000000a2", r)
+  assert.deepEqual(steps[0].argv, ["/usr/bin/pkexec", "/usr/bin/bash", "-c", M.REMOVE_PACKAGES_SCRIPT, "vigil-remove",
+                                   "orphans", "python-old", "libgone"])
+  assert.equal(card.commands[0].text, "/usr/bin/pkexec /usr/bin/bash -c \"$SCRIPT\" vigil-remove orphans python-old libgone"
+                                     + "\nwhere $SCRIPT is:\n" + M.REMOVE_PACKAGES_SCRIPT)
+  assert.ok(M.sameCommands(card.commands, steps))
+  assert.equal(M.removalPlan("remove-orphans", "00000000000000a3", r).length, 0)       // kept: not removable
+  assert.equal(M.confirmation("remove-orphans", "00000000000000a3", r), null)
+  assert.equal(M.confirmation("remove-foreign", "00000000000000a1", r), null)          // wrong list
+  // No pkexec: no card that promises a removal it cannot run.
+  const none = pickReport("orphans", "orphan", [{ id: "00000000000000a1", name: "x", text: "x" }], {})
+  assert.equal(M.confirmation("remove-orphans", "00000000000000a1", none), null)
+})
+
+test("package and plugin names that could reach a command are checked", () => {
+  for (const name of ["-rf", ".hidden", "a b", "a;b", "", "x".repeat(101)])
+    assert.equal(pickReport("orphans", "orphan", [{ id: "00000000000000a1", name, text: "x" }]), null)
+  for (const name of ["../x", "a..b", "-x", "keasbeexd.vigil", "a/b"])
+    assert.equal(pickReport("omarchy-plugins", "plugin", [{ id: "00000000000000a1", name, text: "x" }]), null)
+  // A plugin whose id Omarchy would refuse is listed, and can be kept, but not removed.
+  const r = pickReport("omarchy-plugins", "plugin", [{ id: "00000000000000a1", name: "", text: "odd name\nx" }])
+  assert.equal(M.itemRemovable(r.checks[0].items[0]), false)
+  assert.equal(M.itemPickable(r.checks[0].items[0]), true)
+  // One kind per list.
+  assert.equal(parse(report({ checks: [check({ items: [
+    { id: "00000000000000a1", kind: "orphan", name: "a", text: "a", kept: false, ignored: false },
+    { id: "00000000000000a2", kind: "leftover", text: "b", kept: false, ignored: false }] })] })), null)
+})
+
+test("foreign packages: no Remove all, and the card says how to get one back", () => {
+  const r = pickReport("aur-packages", "foreign", [{ id: "00000000000000b1", name: "yay", text: "yay · 12-1\nAUR helper" }])
+  assert.equal(M.pickSpec(r.checks[0]).all, false)
+  const card = M.confirmation("remove-foreign", "00000000000000b1", r)
+  assert.equal(card.title, "Remove this package?")
+  assert.ok(card.lines.some(l => /install it again the way you first did/.test(l)))
+  assert.equal(M.removalPlan("remove-foreign", "00000000000000b1", r)[0].argv[5], "foreign")
+})
+
+test("plugins: Omarchy's own remover, as you, once per plugin", () => {
+  const r = pickReport("omarchy-plugins", "plugin", [
+    { id: "00000000000000c1", name: "acme.weather", text: "Weather (acme.weather)\nnetwork" },
+    { id: "00000000000000c2", name: "dev.tool", text: "dev.tool\nlinked" }])
+  const steps = M.removalPlan("remove-plugins", "00000000000000c1,00000000000000c2", r)
+  assert.equal(steps.length, 1)
+  assert.equal(steps[0].asRoot, false)
+  assert.deepEqual(steps[0].argv.slice(3), ["vigil-remove-plugins", "acme.weather", "dev.tool"])
+  assert.match(steps[0].argv[2], /\/usr\/share\/omarchy\/bin\/omarchy-plugin-remove "\$id" --yes/)
+  assert.match(steps[0].argv[2], /keasbeexd\.vigil\) echo 'Refused/)
+  const card = M.confirmation("remove-plugins", "00000000000000c1", r)
+  assert.equal(card.title, "Remove this plugin?")
+  assert.ok(card.lines.some(l => /git clone\) is deleted/.test(l)))
+  assert.match(card.commands[0].who, /As you, no password/)
+  const missing = pickReport("omarchy-plugins", "plugin", [{ id: "00000000000000c1", name: "a", text: "a" }], { pkexec: "/usr/bin" })
+  assert.equal(M.confirmation("remove-plugins", "00000000000000c1", missing), null)
+})
+
+test("false positives: several at once, on one card; none twice; never a marked one", () => {
+  const r = pickReport("virus-scan", "detection", [
+    { id: "00000000000000d1", text: "~/a.exe\nWin.X-1" }, { id: "00000000000000d2", text: "~/b.dll\nWin.Y-2" },
+    { id: "00000000000000d3", text: "~/c.dll\nWin.Z-3", ignored: true }])
+  assert.equal(M.pickSpec(r.checks[0]).keep, false)
+  const card = M.confirmation("ignore", "00000000000000d1,00000000000000d2", r)
+  assert.equal(card.title, "Mark 2 files as false positives?")
+  assert.deepEqual(card.lines.slice(0, 2), ["~/a.exe: Win.X-1", "~/b.dll: Win.Y-2"])
+  assert.equal(M.confirmation("ignore", "00000000000000d1,00000000000000d1", r), null)
+  assert.equal(M.confirmation("ignore", "00000000000000d3", r), null)
+})
+
+test("severity marks: checked, shown only when they read exactly as the line", () => {
+  const base = { id: "00000000000000c1", name: "acme.weather", text: "Weather (acme.weather)\nnetwork, root (sudo/pkexec)" }
+  const marks = [{ text: "network", level: "medium" }, { text: "root (sudo/pkexec)", level: "high" }]
+  let r = pickReport("omarchy-plugins", "plugin", [Object.assign({ marks }, base)])
+  assert.deepEqual(r.checks[0].items[0].marks, marks)
+  // Parts that do not read as the line are dropped, never shown.
+  r = pickReport("omarchy-plugins", "plugin", [Object.assign({ marks: [marks[0]] }, base)])
+  assert.deepEqual(r.checks[0].items[0].marks, [])
+  // A level that is not one of the three, or something that is not a list, rejects the report.
+  assert.equal(pickReport("omarchy-plugins", "plugin", [Object.assign({ marks: [{ text: "network", level: "red" }] }, base)]), null)
+  assert.equal(pickReport("omarchy-plugins", "plugin", [Object.assign({ marks: "network" }, base)]), null)
+  assert.deepEqual(pickReport("omarchy-plugins", "plugin", [base]).checks[0].items[0].marks, [])
+})
+
+test("theme colors in the report are #rrggbb or nothing", () => {
+  assert.deepEqual(parse(report()).themeColors, { yellow: "", green: "" })
+  assert.deepEqual(parse(report({ themeColors: { yellow: "#f9e2af", green: "" } })).themeColors,
+                   { yellow: "#f9e2af", green: "" })
+  for (const bad of [{ yellow: "red" }, { green: "#f9e2af; x" }, { yellow: 1 }, "x", ["#ffffff"]])
+    assert.equal(parse(report({ themeColors: bad })), null)
+})
+
+test("cards promise only what happens", () => {
+  const r = parse(report())
+  // The daily check sends no notification; the weekly check and Run all do.
+  assert.ok(!M.confirmation("daily-check", "all", r).lines.some(l => /notification/.test(l)))
+  assert.ok(M.confirmation("weekly-check", "all", r).lines.some(l => /notification/.test(l)))
+  // Actions as you that a system service may still ask a password for say so.
+  for (const id of ["update-flatpaks", "wifi-autojoin-off", "undo-wifi-autojoin"])
+    assert.ok(!M.confirmation("terminal", id, r).lines.some(l => /No password needed/.test(l)), id)
+  assert.ok(M.confirmation("terminal", "restart", r).lines.some(l => /restarts at once/.test(l)))
+  // A whole list fits in one keep or remove.
+  assert.equal(M.MAX_PICK, 300)
 })

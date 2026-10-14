@@ -9,7 +9,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 | Detect | Is something bad already here? | ClamUI for virus scanning and quarantine |
 | Supply | Can I trust what I installed? | Perplexity's Bumblebee for known-compromised components |
 | Privacy | What am I leaking? | Black Ops for telemetry blocking |
-| Care | Is the system tidy and recoverable? | Omarchy's orphan and update commands |
+| Care | Is the system tidy and recoverable? | pacman's own tools (paccache, pacman -Rns) and Omarchy's updater |
 
 ## Decisions
 
@@ -25,8 +25,9 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
   shows its status and opens it. It does not copy it.
 - **Maintained sources only.** Vigil keeps no threat lists of its own. It
   checks against what the Arch security team, OSV.dev and the OpenSSF,
-  ClamAV, Bumblebee and the AUR publish, refreshed once a week, or by the
-  source's own updater (ClamAV's `freshclam` service).
+  ClamAV, Bumblebee and the AUR publish, fetched right before each scan in
+  the daily check, or kept current by the source's own updater (ClamAV's
+  `freshclam` service).
 - **No false alarms.** Vigil is for people who want to set it and forget it.
   Only confirmed problems lower the score; anything merely worth knowing is
   information. A check that cannot be made precise is shown as information or
@@ -111,7 +112,139 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.29.0 (this release): the design rules, checked against the code
+## 0.30.0 (this release): lists you tick, keyed ids, and a clearer Overview
+
+- [x] **Leftover app data** on the Care tab: settings and data in
+      `~/.config`, `~/.local/share`, `~/.local/state` and the dot-folders
+      in `~` that nothing on the computer uses any more (no package, what
+      packages provide, program, desktop entry, Flatpak, Omarchy config,
+      running program or startup file answers to the name, and nothing in
+      it changed for 30 days); Flatpak data in `~/.var/app` of apps no
+      longer installed; links in `~/.local/bin` to programs that are gone;
+      launchers in `~/.local/share/applications` that start nothing.
+      Information only: it never lowers the score or notifies. **Trash**
+      moves items to the freedesktop.org trash every file manager reads,
+      so Restore puts one back; nothing is deleted, and leftovers are never
+      part of Clean all. Before it moves anything the helper checks again
+      that nothing uses the item and that you did not keep it.
+- [x] **Lists you tick.** Leftover app data, orphaned packages, AUR and
+      other foreign packages, other Omarchy plugins and infected files list
+      one entry per item, each on two lines (what it is, then more about
+      it), beside a small box to tick. The buttons under a list act on the
+      ticked items and say how many; with nothing ticked, Trash all, Remove
+      all (orphans only) and Keep all act on every item you could tick.
+      Leftovers: Trash, Keep. Orphans: Remove (`pacman -Rns`, behind your
+      password, replacing the terminal review through
+      `omarchy-update-orphan-pkgs`), Keep. Foreign packages: Remove
+      selected only, Keep. Plugins: Remove selected only, through Omarchy's
+      own `omarchy-plugin-remove`, as you, Keep. Infected files: False
+      positive selected, on one card. Every card lists the items; a card
+      that removes packages or plugins also shows the exact command.
+      Package names and plugin ids are the arguments of a constant script
+      that checks them again (as root, for packages, also that pacman still
+      lists each) and removes nothing if one fails. A whole list (up to 300
+      items, the most a row shows) fits in one button press.
+- [x] A kept item, or a false positive, shows a lock in place of its box,
+      without words, and moves to the bottom of its list; clicking the lock
+      counts it again. A plugin you kept is counted again if its code gains
+      a capability. Kept items are one list, `kept.json`, for every row (an
+      earlier build's `kept-leftovers.json` is read and folded in). The
+      four rows reviewed item by item with Keep lose Mark as reviewed.
+- [x] Severity colors, from the theme: each plugin capability in red
+      (root, downloads and runs code, compiled binaries), yellow (network,
+      shell commands, a linked install that was not scanned) or green
+      (none found); each infected file's signature in red (known malware)
+      or yellow (a heuristic guess).
+- [x] **Keyed ids.** Every item id Vigil hands the panel, puts on a command
+      line or writes to its notes (kept items, false positives), and the
+      fingerprints of reviewed and seen findings, are an HMAC-SHA256 under a
+      random key made for this install (`id-key`, mode 0600), not a plain
+      SHA-256 that could be reversed by hashing every package or plugin
+      name. `kept.json` holds only ids and dates, and false positives only
+      the id and the file's hash and times (no path, no signature name).
+      Notes from before are carried over once and their names dropped. This
+      hides what you trust from copies of the notes and from other
+      accounts; it cannot hide it from a program running as you, which can
+      read the key, and the docs say so.
+- [x] Overview redesign: the Pillars list is gone. Each pillar tab carries
+      its most important count right under it (to fix, to improve, notes,
+      all good; the tooltip has every count), and Care sits past a divider
+      with "to tidy". The Overview tab has no caption; its tooltip is the
+      score. The run buttons sit under **Run now**, each with when that
+      check next runs by itself under it. The title line says when Vigil
+      last checked instead of repeating the score. The panel is 60 units
+      wider and the tabs use the same unfilled button style as the rest of
+      the panel.
+- [x] Care is shown as separate from security everywhere: a line on the
+      Overview, one on the Care tab, and one on the daily and Run all
+      cards say it never counts toward the score and no run cleans
+      anything. The Care tab splits **In Clean all** from **Not in Clean
+      all**: Orphaned packages and Leftover app data sit at the bottom,
+      under a heading and a line that say Clean all never touches them.
+      Clean all runs only the root cleanup the listed rows offer (the
+      package cache, the logs, or both). System logs under 500 MB count as
+      tidy: no cleanup offered, and not part of Clean all.
+- [x] Every tab groups its rows under headings that say which check brings
+      them in (Always current, with when those rows are read; Daily check;
+      Daily and weekly checks; Weekly check), when it has more than one.
+- [x] One naming convention. Runs are the only things called a check:
+      the Daily check and the Weekly check. Steps say what they do: a scan
+      reads this computer (Virus scan of ~, Bumblebee scan, Arch security
+      scan, OSV malware scan, Password scan), a lookup asks a tool or a
+      service (System update lookup, Flatpak update lookup, AUR status
+      lookup, Firmware lookup), and a list is downloaded (Bumblebee list).
+      A row's own button is named for its step (Scan now, Look up now).
+      Rows name what is examined, with the tool in brackets: System
+      updates, Flatpak updates, Firmware updates, Infected files (ClamAV),
+      Virus signatures (ClamAV), Known vulnerabilities (arch-audit),
+      Known-malicious packages (OSV), Known-compromised packages
+      (Bumblebee), Duplicate scan schedules. Check ids stay the same, so
+      reviews, kept leftovers and false positives carry over.
+- [x] **Each scan gets its list right before it runs.** There is no
+      separate list update any more (its button, countdown, `U` key and
+      tab heading are gone). The daily check runs the Arch security scan
+      (arch-audit downloads the tracker as it scans), the OSV malware scan
+      (osv-scanner asks OSV.dev as it scans), the AUR status lookup, the
+      Bumblebee list followed by the Bumblebee scan, and the virus scan of
+      new downloads; the weekly check runs the firmware lookup and the
+      virus scan of `~`. These lookups move from weekly to daily: a few MB
+      a day more.
+- [x] Virus signatures are ClamAV's job: its own update service keeps them
+      current, and Vigil checks how old they are before every virus scan.
+      The daily and weekly checks never ask for a password. Over two days
+      old (the service fell behind), Vigil sends one notification a day
+      pointing to Run all, which updates them first, behind your password
+      and with the command on its card. Run all's password scan and that
+      update are the only password prompts in any run. The Virus
+      signatures row lost its own Update now button.
+- [x] Both virus scans say which signatures they used ("with signatures
+      from Oct 14") on their Last run line; the Bumblebee scan says which
+      list only when its download failed and it fell back to the last good
+      one. That line turns the theme's red only when the list was over 48
+      hours old when the scan ran (judged at scan time, so a week-old scan
+      with fresh signatures stays as it is). It sits on its own line under
+      when the scan ran, so no line wraps. The Last run list groups every
+      scan and lookup under the run that does it.
+- [x] No run installs or updates Bumblebee. Only Install, or Install
+      Bumblebee on its row once a Vigil update has raised the pinned
+      version, puts the reviewed version in place.
+- [x] Nothing is cut short: check results, trash and keep messages are
+      shown whole (up to 2000 characters, the same limit on both sides),
+      and summaries and how-to texts get the panel's own limits. Any
+      confirmation card scrolls the panel to the top, where it opens.
+- [x] Every panel, card and help text was checked against what the code
+      does: no card promises a notification, a password-free run or a
+      command it does not deliver.
+- [x] The repository is guarded: tests run on every push to `master` and
+      every pull request in a locked-down GitHub Actions job (no token
+      permissions, no third-party actions, pytest pinned by hash);
+      `SECURITY.md` asks for private vulnerability reports; `CODEOWNERS`
+      names the owner for every file.
+- [ ] Later: show launchers that point to a program by name rather than
+      by path, once there is a reliable way to know the PATH your session
+      uses.
+
+## 0.29.0: the design rules, checked against the code
 
 - [x] Every confirmation card shows the exact commands Run starts, below
       the Run and Cancel buttons: each root step in full (the pkexec argv,
@@ -150,8 +283,8 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 ## 0.28.2: readable hints on every theme
 
 - [x] Secondary text (the key hints, times, descriptions) uses the theme's
-      text colour darkened, as mouse-ctrl does, instead of the theme's
-      muted colour, which some themes set close to the background.
+      text color darkened, as mouse-ctrl does, instead of the theme's
+      muted color, which some themes set close to the background.
 
 ## 0.28.1: file names stay out of process lists
 
@@ -178,7 +311,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 - [x] Run daily check, Run weekly check, Run update check and Run all
       replace Full scan and Update sources. Run all does not scan
       ~/Downloads twice. Each button restarts its own countdown.
-- [x] The scroll bar has its own lane, in the theme's colours.
+- [x] The scroll bar has its own lane, in the theme's colors.
 
 ## 0.24: daily and weekly
 
@@ -329,7 +462,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       the whole home folder, a Bumblebee rescan, the password check, every
       setting; a notification says when it is done.
 - [x] Rows with nothing to do are dimmed in the pillar tabs.
-- [x] Every colour comes from the Omarchy theme (urgent, accent, muted,
+- [x] Every color comes from the Omarchy theme (urgent, accent, muted,
       text), the bar shield included; the scroll bar is themed and has its
       own gutter, so it no longer covers text.
 
@@ -398,7 +531,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       Omarchy's own small-caps section label.
 - [x] Each tab opens with its question in bold, then what it covers in dim
       text. Pillar names and finding titles are bold; problem counts are
-      coloured; "Reviewed on" and status messages are in italics.
+      colored; "Reviewed on" and status messages are in italics.
 - [x] An open finding labels its explanation and details ("Why it matters",
       "Details").
 
@@ -453,14 +586,19 @@ Dedicated plugins do these well; Vigil may show their status.
 
 ## Marketplace submission checklist
 
-- [x] `preview.png` at the root, under 512 KiB, a real screenshot.
+- [x] `preview.png` at the root, under 512 KiB: the real 0.30 panel,
+      framed in a Turbo Pascal-style screen with the EGA pixel lighthouse.
 - [ ] `omarchy plugin validate .` passes on an Omarchy machine.
 - [ ] Panel exercised on a real Omarchy install: each tab, each helper
-      action, Open ClamUI, Stop, Let Vigil run them and its Undo, and at
-      least the firewall, sysctl and Avahi actions.
+      action, Open ClamUI, Stop, Let Vigil run them and its Undo, at least
+      the firewall, sysctl and Avahi actions, and the lists: Remove for
+      orphans and foreign packages (pkexec `pacman -Rns`), Remove selected
+      for plugins, Trash and Keep for leftovers, the lock, False positive
+      selected, and Run all with old signatures (its extra password step).
 - [ ] Marketplace baseline scanner run locally against the final commit.
       Expect the `privilege`, `package-manager` and `service-management`
-      capabilities (sudo, `omarchy-pkg-add` and `systemctl` in the terminal
-      scripts); these mean manual review, not a block.
+      capabilities (sudo and pkexec, `pacman -S`/`-Rns` and `systemctl` in
+      the root scripts, `omarchy-plugin-remove`); these mean manual review,
+      not a block.
 - [ ] All fixes on one final commit; submit the `[Plugin]: Vigil` issue with
       that full SHA, category System, tags `bar`, `system`, `security`.

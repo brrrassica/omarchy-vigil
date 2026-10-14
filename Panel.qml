@@ -7,7 +7,8 @@ import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
-// Vigil: a lighthouse in the bar and a panel with five tabs.
+// Vigil: a lighthouse in the bar and a panel with six tabs: the Overview and
+// the five pillars.
 //
 // All the checking is done by bin/vigil, run as an argv array with a cleared
 // environment. Its stdout is read in raw chunks with a hard size limit and
@@ -22,7 +23,7 @@ Panel {
   manageIpc: false
 
   readonly property int maxReportChars: 512 * 1024
-  readonly property int maxFixChars: 4096
+  readonly property int maxFixChars: 16384
   readonly property string helperPath: localPath(Qt.resolvedUrl("bin/vigil"))
   readonly property var helperEnv: ({
     "HOME": Quickshell.env("HOME") || "/",
@@ -49,7 +50,7 @@ Panel {
     return isFinite(n) ? Math.max(5, Math.min(1440, Math.round(n))) : 30
   }
   readonly property bool notifyOnNew: setting("notifyOnNew", true) === true
-  // Weekly refresh of the maintained sources (arch-audit, OSV, the AUR).
+  // The daily and weekly checks in the background (the autoUpdate setting).
   readonly property bool autoUpdate: setting("autoUpdate", true) === true
   property var actionSteps: []
   property int actionIndex: 0
@@ -70,14 +71,25 @@ Panel {
 
   readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
-  // Every colour comes from the Omarchy theme: text, urgent (to fix), accent
+  // Every color comes from the Omarchy theme: text, urgent (to fix), accent
   // (to improve) and muted (secondary text, nothing to do).
   // Secondary text (the key hints, times, descriptions): the theme's text
-  // colour, darkened, as mouse-ctrl does. The theme's own "muted" colour is
+  // color, darkened, as mouse-ctrl does. The theme's own "muted" color is
   // close to the background in some themes, which hid this text.
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property color warnColor: Commons.Color.accent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+
+  // Severity colors for the parts of a list item (what a plugin's code can
+  // do, what ClamAV found): the theme's red (urgent), and its yellow and
+  // green, which the helper reads from the theme's colors.toml. Every Omarchy
+  // theme has them; without them, yellow falls back to the accent and green
+  // to the text color.
+  readonly property color mediumColor: report && report.themeColors.yellow !== "" ? report.themeColors.yellow : warnColor
+  readonly property color lowColor: report && report.themeColors.green !== "" ? report.themeColors.green : foreground
+  function markColor(level) {
+    return level === "high" ? urgent : level === "medium" ? mediumColor : level === "low" ? lowColor : dim
+  }
 
   property var report: null
   property string auditBuffer: ""
@@ -89,6 +101,7 @@ Panel {
   property bool updatePending: false
   property real lastAutoRun: 0
   property bool statusIsError: false
+  property string signaturesNoticeDay: ""
 
   property string tab: "overview"
   readonly property var tabs: ["overview", "harden", "detect", "supply", "privacy", "care"]
@@ -100,11 +113,14 @@ Panel {
   readonly property string homeDir: Quickshell.env("HOME") || ""
   readonly property var pending: pendingAction === "" ? null
     : Model.confirmation(pendingKind, pendingAction, report, homeDir)
+  // A confirmation card opens at the top of the panel: go there, wherever
+  // the button that asked for it was.
+  onPendingActionChanged: if (pendingAction !== "" && panelFlick) panelFlick.contentY = 0
   readonly property var cleanPlan: Model.cleanAllPlan(report)
 
   readonly property var visibleChecks: tab === "overview" ? [] : Model.checksFor(report, tab)
   readonly property bool busy: auditProc.running || fixProc.running || actionProc.running
-  // A scan or update this copy did not start (another monitor's, or one left
+  // A run this copy did not start (another monitor's, or one left
   // running when the shell restarted). The helper allows one at a time.
   property var otherRun: null
   readonly property bool runElsewhere: !feedProc.running && otherRun !== null
@@ -120,7 +136,7 @@ Panel {
   }
 
   function setStatus(text, isError) {
-    statusMessage = Model.plain(text, 240)
+    statusMessage = Model.plain(text, Model.MAX_MESSAGE)
     statusIsError = isError === true
   }
 
@@ -158,6 +174,13 @@ Panel {
     if (updatePending) setStatus("Vigil was updated to " + helperVersion + ". Restart the shell to load the new panel.", false)
     if (rowIndex >= visibleChecks.length) rowIndex = Math.max(0, visibleChecks.length - 1)
     if (root.isPrimary && root.notifyOnNew && parsed.fresh.length > 0) notifyNew(parsed.fresh.length)
+    // ClamAV's own update service has let the signatures get over two days
+    // old: say so once a day, and point to Run all, which updates them.
+    var today = new Date().toDateString()
+    if (root.isPrimary && root.notifyOnNew && parsed.signaturesDue && signaturesNoticeDay !== today) {
+      signaturesNoticeDay = today
+      notifySignatures()
+    }
     // The automatic run starts at most every six hours, whatever happens to it,
     // so a run that keeps failing can never restart in a loop.
     if (root.isPrimary && root.autoUpdate && parsed.feedsDue && parsed.running === null
@@ -169,14 +192,17 @@ Panel {
 
   // Runs `bin/vigil refresh-feeds` in the background. With no mode (the
   // background run) the helper runs only what is due and retries failures the
-  // next day. The buttons: "sources" (Run update check), "daily" (Run daily
-  // check), "weekly" (Run weekly check), "full" (Run all); "scan" is the
-  // virus scan of the home folder alone (its row's Scan now button).
-  readonly property var feedFlags: ({ sources: "--sources", daily: "--daily", weekly: "--weekly", full: "--full",
-                                      scan: "--scan" })
-  readonly property var feedTitles: ({ sources: "Run update check", daily: "Run daily check",
-                                       weekly: "Run weekly check", full: "Run all", scan: "Virus scan" })
-  function refreshFeeds(mode) {
+  // next day. The buttons: "daily" (Daily check), "weekly" (Weekly check),
+  // "full" (Run all); "scan" is the virus scan of the home folder alone (its
+  // row's Scan now button). Each scan gets its list right before it runs;
+  // ClamAV's own service keeps the virus signatures current.
+  readonly property var feedFlags: ({ daily: "--daily", weekly: "--weekly", full: "--full", scan: "--scan" })
+  readonly property var feedTitles: ({ daily: "Daily check", weekly: "Weekly check", full: "Run all",
+                                       scan: "Virus scan of ~" })
+  // withSignatures (Run all only): the card you confirmed showed the virus
+  // signatures update (they were over two days old), so the helper may run
+  // it. Without it, the helper never asks for that password.
+  function refreshFeeds(mode, withSignatures) {
     if (feedProc.running || runElsewhere) return
     feedBuffer = ""
     feedResult = ""
@@ -187,12 +213,12 @@ Panel {
     feedMode = mode
     feedProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, "refresh-feeds"]
       .concat(feedForced ? [feedFlags[mode]] : [])
+      .concat(mode === "full" && withSignatures === true ? ["--signatures"] : [])
     feedProc.running = true
-    // The update check takes minutes; anything that scans files can take hours.
-    feedDeadline.interval = mode === "sources" ? 3600000 : 4 * 3600000
+    // Anything that scans files can take hours.
+    feedDeadline.interval = 4 * 3600000
     feedDeadline.restart()
-    if (mode === "sources") setStatus("Update check started. Omarchy may ask for your password first.", false)
-    else if (mode === "full") setStatus("Run all started. Omarchy may ask for your password first; after that you can close this panel.", false)
+    if (mode === "full") setStatus("Run all started. Omarchy may ask for your password first; after that you can close this panel.", false)
     else if (mode === "daily") setStatus("Daily check started.", false)
     else if (mode === "weekly") setStatus("Weekly check started. You can close this panel; you get a notification when it is done.", false)
     else if (mode === "scan") setStatus("Virus scan started. It runs in the background.", false)
@@ -204,7 +230,6 @@ Panel {
     pendingKind = kind
     pendingAction = "all"
   }
-  function requestUpdate() { requestRun("update-sources") }
   function requestFullScan() { requestRun("full-scan") }
 
   function requestInstallHelpers() {
@@ -213,6 +238,10 @@ Panel {
     pendingAction = "install-helpers"
   }
 
+
+  function notifySignatures() {
+    Quickshell.execDetached(["/usr/bin/notify-send", "--app-name=Vigil", "--", "Vigil", Model.SIGNATURES_NOTICE])
+  }
 
   function notifyNew(count) {
     var n = Math.max(1, Math.min(99, Math.round(Number(count) || 1)))
@@ -261,20 +290,36 @@ Panel {
   function confirmPending() {
     var kind = pendingKind
     var action = pendingAction
+    // What the card you confirmed showed: its root steps, exactly.
+    var shown = pending
     cancelPending()
     if (!report) return
     if (kind === "ignore") {
-      if (Model.detectionItem(report, action)) runHelper(["ignore", action])
+      // Exactly the detections the card listed, each still listed and not marked.
+      var marked = Model.itemIdList(report, action, "detection")
+      if (marked) { runHelper(["ignore"].concat(marked)); picked = ({}) }
       return
     }
-    if (kind === "update-sources") {
-      refreshFeeds("sources")
+    if (kind === "trash") {
+      // Exactly the items the card listed, each still a listed leftover not kept.
+      var ids = Model.leftoverIdList(report, action)
+      if (ids) { runHelper(["trash"].concat(ids)); picked = ({}) }
+      return
+    }
+    if (kind === "remove-orphans" || kind === "remove-foreign" || kind === "remove-plugins") {
+      // The steps rebuilt from the same ids, each still listed: the same
+      // commands the card showed.
+      var steps = Model.removalPlan(kind, action, report)
+      if (steps.length > 0 && shown && Model.sameCommands(shown.commands, steps)) {
+        startSteps(kind, shown.title.replace(/\?$/, ""), steps)
+        picked = ({})
+      }
       return
     }
     if (kind === "full-scan") {
       // No terminal: the password steps use Omarchy's own password dialog,
       // so the panel stays open and shows the progress.
-      refreshFeeds("full")
+      refreshFeeds("full", Model.cardShowsSignatures(shown))
       return
     }
     if (kind === "daily-check" || kind === "weekly-check") {
@@ -283,7 +328,7 @@ Panel {
     }
     if (kind === "clean-all") {
       var plan = Model.cleanAllPlan(report)
-      if (plan.system) startAction("clean-system")
+      if (plan.system !== "") startAction(plan.system)
       if (plan.user) runHelper(["fix", "clean-user"])
       return
     }
@@ -310,10 +355,15 @@ Panel {
     var steps = Model.actionPlan(id, report.tools, root.homeDir)
     if (steps.length === 0) { setStatus("This action is not available on this system.", true); return }
     var a = Model.terminalAction(id)
+    startSteps(id, a ? a.title : "", steps)
+  }
+
+  function startSteps(id, title, steps) {
+    if (actionProc.running || steps.length === 0) return
     actionSteps = steps
     actionIndex = 0
     actionOutput = ""
-    actionTitle = a ? a.title : ""
+    actionTitle = title
     actionId = id
     actionStageNow = -1
     actionResult = null
@@ -344,17 +394,24 @@ Panel {
     runAudit()
   }
 
-  // Runs bin/vigil with a fixed verb and an id the panel already validated:
-  // `fix <helper action>`, `dismiss|undismiss <check id>`, `ignore|unignore <detection id>`.
+  // Runs bin/vigil with a fixed verb and ids the panel already validated:
+  // `fix <helper action>`, `dismiss|undismiss <check id>`, `ignore|unignore <detection id>...`,
+  // `keep|unkeep <item id>...`, `trash <leftover id>...`. Ids are keyed hashes
+  // the helper made; no file name ever reaches its command line.
   function runHelper(args) {
-    if (fixProc.running || args.length !== 2) return
-    if (["fix", "dismiss", "undismiss", "ignore", "unignore"].indexOf(args[0]) === -1
-        || !/^[a-z0-9-]{1,40}$/.test(args[1])) return
-    if ((args[0] === "ignore" || args[0] === "unignore") && !/^[0-9a-f]{16}$/.test(args[1])) return
+    if (fixProc.running || args.length < 2) return
+    if (["fix", "dismiss", "undismiss", "ignore", "unignore", "keep", "unkeep", "trash"].indexOf(args[0]) === -1) return
+    var hashed = ["ignore", "unignore", "keep", "unkeep", "trash"].indexOf(args[0]) !== -1
+    if (args.length !== 2 && (!hashed || args.length > Model.MAX_PICK + 1)) return
+    for (var i = 1; i < args.length; i++) {
+      if (!/^[a-z0-9-]{1,40}$/.test(args[i])) return
+      if (hashed && !/^[0-9a-f]{16}$/.test(args[i])) return
+      if (args.indexOf(args[i]) !== i) return
+    }
     fixBuffer = ""
     fixOverflow = false
     fixAction = args[1]
-    fixProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, args[0], args[1]]
+    fixProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath].concat(args)
     fixProc.running = true
     fixDeadline.restart()
     setStatus("Working…", false)
@@ -369,16 +426,61 @@ Panel {
     runHelper([on ? "dismiss" : "undismiss", check.id])
   }
 
-  // Mark one virus detection as a false positive: asks first, on the usual card.
-  function requestIgnore(item) {
-    if (!report || busy || !item || item.id === "" || item.ignored) return
-    pendingKind = "ignore"
-    pendingAction = item.id
+  // Pick lists (leftovers, orphaned and foreign packages, other plugins,
+  // infected files): tick the items you want to act on, then the row's
+  // buttons act on just those; with nothing ticked, Trash all, Remove all and
+  // Keep all act on every item you could tick. Removing, trashing and marking
+  // a false positive ask first, on the usual card; keeping only changes
+  // Vigil's own notes, so it does not. A kept item or a false positive shows
+  // a lock: clicking it counts the item again.
+  property var picked: ({})                 // item id -> true, while ticked
+
+  function togglePicked(item) {
+    if (!Model.itemPickable(item)) return
+    var next = Object.assign({}, picked)
+    if (next[item.id]) delete next[item.id]
+    else next[item.id] = true
+    picked = next
   }
 
-  function requestUnignore(item) {
-    if (!report || busy || !item || item.id === "" || !item.ignored) return
-    runHelper(["unignore", item.id])
+  // What a row's buttons act on: its ticked items (or, for "all", every one
+  // you could tick), only those the button can take.
+  function pickedIn(check, removing) {
+    if (!check) return []
+    return check.items.filter(function(it) {
+      return (removing ? Model.itemRemovable(it) : Model.itemPickable(it)) && root.picked[it.id] === true
+    }).map(function(it) { return it.id })
+  }
+  function allIn(check, removing) {
+    if (!check) return []
+    return check.items.filter(function(it) { return removing ? Model.itemRemovable(it) : Model.itemPickable(it) })
+      .map(function(it) { return it.id })
+  }
+
+  function requestRemoveIds(check, ids) {
+    var spec = Model.pickSpec(check)
+    if (!report || busy || !spec || ids.length === 0 || ids.length > Model.MAX_PICK) return
+    if (spec.card !== "trash" && spec.card !== "ignore"
+        && Model.confirmation(spec.card, ids.join(","), report, homeDir) === null) {
+      setStatus(spec.card === "remove-plugins" ? "This needs Omarchy's omarchy-plugin-remove, which was not found."
+                                               : "This needs pkexec, which was not found.", true)
+      return
+    }
+    pendingKind = spec.card
+    pendingAction = ids.join(",")
+  }
+
+  function keepIds(ids) {
+    if (!report || busy || ids.length === 0 || ids.length > Model.MAX_PICK) return
+    runHelper(["keep"].concat(ids))
+    picked = ({})
+  }
+
+  // The lock: count a kept item, or a false positive, again.
+  function unlock(item) {
+    if (!report || busy || !item || item.id === "") return
+    if (item.kind === "detection" && item.ignored) runHelper(["unignore", item.id])
+    else if (item.kind !== "detection" && item.kept) runHelper(["unkeep", item.id])
   }
 
   function requestUndo(check) {
@@ -483,7 +585,7 @@ Panel {
     }
   }
 
-  // Stop: `vigil stop` stops whichever scan or update holds the lock, this
+  // Stop: `vigil stop` stops whichever run holds the lock, this
   // copy's own or one left from before a shell restart.
   property bool stopRequested: false
   function stopRun() {
@@ -645,7 +747,7 @@ Panel {
       root.feedResult = ""
       root.scanProgress = null
       // Only the buttons report back, on the result card, which stays until
-      // you close it; the weekly background run stays quiet.
+      // you close it; the background runs stay quiet.
       if (root.feedForced) {
         root.setStatus("", false)
         root.actionResult = {
@@ -655,7 +757,7 @@ Panel {
           output: ""
         }
       }
-      // The long runs (Run all, Run weekly check) also send a notification.
+      // The long runs (Run all, the weekly check) also send a notification.
       if (root.feedFull) {
         var name = root.feedTitles[root.feedMode]
         Quickshell.execDetached(["/usr/bin/notify-send", "--app-name=Vigil", "--", "Vigil",
@@ -731,8 +833,9 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    // 440 for the content plus the 22-unit scroll bar lane.
-    contentWidth: panel.fittedContentWidth(Style.space(462))
+    // 500 for the content (room for six tabs with their captions at larger
+    // fonts) plus the 22-unit scroll bar lane.
+    contentWidth: panel.fittedContentWidth(Style.space(522))
     contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(640))
 
     PanelKeyCatcher {
@@ -756,7 +859,6 @@ Panel {
       onTextKey: function(t) {
         if (t === "r" || t === "R" || t === "s" || t === "S") root.requestFullScan()
         else if (t === "f" || t === "F") root.requestFix(root.selectedCheck())
-        else if (t === "u" || t === "U") root.requestUpdate()
         else if ((t === "c" || t === "C") && root.tab === "care") root.requestCleanAll()
         else if (t === "d" || t === "D") {
           var sel = root.selectedCheck()
@@ -779,7 +881,7 @@ Panel {
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
         // A thin bar with square ends in a faint shade of the theme's text
-        // colour; brighter on hover and while dragging, gone when all fits.
+        // color; brighter on hover and while dragging, gone when all fits.
         ScrollBar.vertical: ScrollBar {
           id: vbar
           parent: panelFlick.parent
@@ -807,29 +909,40 @@ Panel {
           PanelHero {
             width: parent.width
             title: "Vigil"
-            meta: Model.plain(root.report
-              ? Model.levelText(root.report) + " · " + root.report.score + "/100"
-              : (auditProc.running ? "Checking…" : "Not checked yet"), 80)
+            meta: Model.plain(Model.heroMeta(root.report, root.tab, auditProc.running, new Date()), 80)
             foreground: root.foreground
             fontFamily: root.fontFamily
           }
 
-          ButtonGroup {
+          // The tabs, each with what matters most in it right underneath.
+          // Care stands apart, past a divider: it is upkeep, not security,
+          // and never part of the score or of the scheduled checks.
+          Row {
+            id: tabStrip
             width: parent.width
-            options: [
-              { value: "overview", label: "Overview" },
-              { value: "harden", label: "Harden" },
-              { value: "detect", label: "Detect" },
-              { value: "supply", label: "Supply" },
-              { value: "privacy", label: "Privacy" },
-              { value: "care", label: "Care" }
-            ]
-            value: root.tab
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            fontSize: Style.font.bodySmall
-            focusable: false
-            onChanged: function(v) { root.selectTab(v) }
+            spacing: Style.spacing.md
+            readonly property real dividerWidth: Style.space(8)
+            // Each tab as wide as its label, as in Omarchy's ButtonGroup, and
+            // the room left over shared out evenly.
+            readonly property real spare: Math.max(0, Math.floor((width - spacing * 6 - dividerWidth
+              - tabOverview.naturalWidth - tabHarden.naturalWidth - tabDetect.naturalWidth
+              - tabSupply.naturalWidth - tabPrivacy.naturalWidth - tabCare.naturalWidth) / 6))
+            TabCell { id: tabOverview; tab: "overview"; width: naturalWidth + tabStrip.spare }
+            TabCell { id: tabHarden; tab: "harden"; width: naturalWidth + tabStrip.spare }
+            TabCell { id: tabDetect; tab: "detect"; width: naturalWidth + tabStrip.spare }
+            TabCell { id: tabSupply; tab: "supply"; width: naturalWidth + tabStrip.spare }
+            TabCell { id: tabPrivacy; tab: "privacy"; width: naturalWidth + tabStrip.spare }
+            Item {
+              width: tabStrip.dividerWidth
+              height: tabOverview.buttonHeight
+              Rectangle {
+                anchors.centerIn: parent
+                width: 1
+                height: parent.height * 0.7
+                color: root.dim
+              }
+            }
+            TabCell { id: tabCare; tab: "care"; width: naturalWidth + tabStrip.spare }
           }
 
           // Confirmation card: every action is described before it runs.
@@ -1051,7 +1164,9 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
-          // Overview: the score, the two buttons, then each pillar with its counts.
+          // Overview: the score, the run buttons with when each next runs, a
+          // word on Care, then when everything last ran. Each pillar's counts
+          // sit under its tab at the top.
           Column {
             visible: root.tab === "overview"
             width: parent.width
@@ -1088,44 +1203,44 @@ Panel {
               wrapMode: Text.WordWrap
             }
 
-            Flow {
+            // When tools Vigil works with are missing, installing them comes first.
+            Button {
+              visible: Model.missingLabel(root.report) !== ""
+              text: actionProc.running && root.actionId === "install-helpers" ? "Installing\u2026"
+                                                                                : Model.missingLabel(root.report)
+              tooltipText: "Install everything Vigil works with that is missing, in one go"
+              foreground: root.urgent
+              fontFamily: root.fontFamily
+              bordered: true
+              enabled: !root.busy && !feedProc.running && !root.runElsewhere && root.pending === null
+              onClicked: root.requestInstallHelpers()
+            }
+
+            // One button per schedule, each with when it next runs by itself
+            // right under it, then both at once.
+            SectionHeading { visible: root.report !== null; text: "RUN NOW" }
+            Row {
+              id: runStrip
+              visible: root.report !== null
               width: parent.width
-              topPadding: Style.space(6)
-              spacing: Style.space(8)
-              // When tools Vigil works with are missing, installing them comes first.
-              Button {
-                visible: Model.missingLabel(root.report) !== ""
-                text: actionProc.running && root.actionId === "install-helpers" ? "Installing\u2026"
-                                                                                  : Model.missingLabel(root.report)
-                tooltipText: "Install everything Vigil works with that is missing, in one go"
-                foreground: root.urgent
-                fontFamily: root.fontFamily
-                bordered: true
-                enabled: !root.busy && !feedProc.running && !root.runElsewhere && root.pending === null
-                onClicked: root.requestInstallHelpers()
+              spacing: Style.spacing.md
+              readonly property var captions: Model.runCaptions(root.report, root.autoUpdate, new Date(), root.refreshMinutes)
+              readonly property real spare: Math.max(0, Math.floor((width - spacing * 2 - runDaily.naturalWidth
+                - runWeekly.naturalWidth - runAll.naturalWidth) / 3))
+              RunCell {
+                id: runDaily; kind: "daily-check"; mode: "daily"; label: "Daily check"
+                caption: runStrip.captions.daily; width: naturalWidth + runStrip.spare
+                tip: "Now: the system and Flatpak update lookups (installing updates for your own Flatpak apps), the Arch security, OSV and Bumblebee scans, the AUR status lookup and a virus scan of ~/Downloads"
               }
-              // One button per schedule line, in the same order, then all of them.
-              Repeater {
-                model: [
-                  { kind: "daily-check", mode: "daily", label: "Run daily check",
-                    tip: "Now: ClamAV scan of ~/Downloads, System update check, Flatpak update check, Bumblebee scan, settings checks" },
-                  { kind: "weekly-check", mode: "weekly", label: "Run weekly check",
-                    tip: "Now: Firmware check and ClamAV scan of ~ (your whole home folder)" },
-                  { kind: "update-sources", mode: "sources", label: "Run update check",
-                    tip: "Now: ClamAV signatures and every list Vigil checks against. No scan" },
-                  { kind: "full-scan", mode: "full", label: "Run all",
-                    tip: "Now: the update, daily and weekly checks, plus the password check" }
-                ]
-                delegate: Button {
-                  required property var modelData
-                  text: feedProc.running && root.feedMode === modelData.mode ? "Running\u2026" : modelData.label
-                  tooltipText: modelData.tip
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  bordered: modelData.mode === "full"
-                  enabled: !feedProc.running && !root.runElsewhere && !root.busy && root.pending === null
-                  onClicked: root.requestRun(modelData.kind)
-                }
+              RunCell {
+                id: runWeekly; kind: "weekly-check"; mode: "weekly"; label: "Weekly check"
+                caption: runStrip.captions.weekly; width: naturalWidth + runStrip.spare
+                tip: "Now: firmware lookup, then a virus scan of ~ (your whole home folder) with the signatures ClamAV has"
+              }
+              RunCell {
+                id: runAll; kind: "full-scan"; mode: "full"; label: "Run all"; primary: true
+                caption: runStrip.captions.all; width: naturalWidth + runStrip.spare
+                tip: "Now: the daily check and the weekly check, plus the password scan"
               }
             }
             // While an update or scan runs: what it is doing, and how far along.
@@ -1157,7 +1272,7 @@ Panel {
               }
               Button {
                 text: stopProc.running || root.stopRequested ? "Stopping\u2026" : "Stop"
-                tooltipText: "Stop this scan or update. What already finished is kept; the rest runs next time"
+                tooltipText: "Stop this run. What already finished is kept; the rest runs next time"
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 bordered: true
@@ -1166,7 +1281,7 @@ Panel {
               }
             }
             Repeater {
-              model: Model.scheduleLines(root.report, root.autoUpdate, new Date(), root.refreshMinutes)
+              model: Model.scheduleNotes(root.report, root.autoUpdate)
               delegate: Text {
                 required property var modelData
                 textFormat: Text.PlainText
@@ -1179,17 +1294,20 @@ Panel {
               }
             }
 
-            SectionHeading { visible: root.report !== null; text: "PILLARS" }
-            Repeater {
-              model: root.report ? ["harden", "detect", "supply", "privacy", "care"] : []
-              delegate: CategoryRow {
-                required property var modelData
-                width: column.width
-                category: String(modelData)
-              }
+            // The run buttons above never clean: Care is the user's call.
+            Text {
+              textFormat: Text.PlainText
+              visible: root.report !== null
+              width: parent.width
+              topPadding: Style.space(4)
+              text: Model.CARE_NOTE
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
 
-            // When every check and scan last ran, and when each source last updated.
+            // When your settings and files were last read, and when each scan and lookup last ran.
             SectionHeading { visible: root.report !== null; text: "LAST RUN" }
             Repeater {
               model: root.report ? Model.lastRunRows(root.report, new Date()) : []
@@ -1197,6 +1315,7 @@ Panel {
                 required property var modelData
                 width: column.width
                 implicitHeight: Math.max(runLabel.implicitHeight, runValue.implicitHeight)
+                // The time, then the list the scan used on a line of its own.
                 Text {
                   id: runLabel
                   textFormat: Text.PlainText
@@ -1209,18 +1328,33 @@ Panel {
                   font.bold: modelData.heading === true
                   wrapMode: Text.WordWrap
                 }
-                Text {
+                Column {
                   id: runValue
-                  textFormat: Text.PlainText
                   anchors.right: parent.right
                   width: parent.width * 0.5
-                  horizontalAlignment: Text.AlignRight
-                  text: modelData.value
-                  color: modelData.problem ? root.urgent : root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.bold: modelData.problem === true
-                  wrapMode: Text.WordWrap
+                  Text {
+                    textFormat: Text.PlainText
+                    width: parent.width
+                    horizontalAlignment: Text.AlignRight
+                    text: modelData.value
+                    color: modelData.problem ? root.urgent : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: modelData.problem === true
+                    wrapMode: Text.WordWrap
+                  }
+                  Text {
+                    textFormat: Text.PlainText
+                    visible: modelData.note !== ""
+                    width: parent.width
+                    horizontalAlignment: Text.AlignRight
+                    text: modelData.note
+                    color: modelData.noteOld ? root.urgent : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: modelData.noteOld === true
+                    wrapMode: Text.WordWrap
+                  }
                 }
               }
             }
@@ -1250,6 +1384,17 @@ Panel {
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
             }
+            Text {
+              textFormat: Text.PlainText
+              visible: root.tab === "care"
+              width: parent.width
+              topPadding: Style.space(2)
+              text: Model.CARE_TAB_NOTE
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
             Item {
               visible: root.tab === "care" && root.cleanPlan.items.length > 0
               width: parent.width
@@ -1270,21 +1415,43 @@ Panel {
           Repeater {
             id: rowsRepeater
             model: root.visibleChecks
-            delegate: CheckRow {
+            // A row, and at the start of each group a heading: which check
+            // brings the rows in (always current, daily, weekly), and on the
+            // Care tab what Clean all covers and what it leaves alone.
+            delegate: Column {
+              id: rowSlot
               required property var modelData
               required property int index
+              readonly property string heading: Model.rowHeading(root.visibleChecks, index)
+              readonly property string headingNote: Model.rowHeadingNote(root.visibleChecks, index, root.refreshMinutes)
               width: column.width
-              check: modelData
-              selected: root.cursorActive && root.rowIndex === index
-              expanded: root.expandedId === modelData.id
-              onClicked: { root.rowIndex = index; root.toggleExpanded(modelData) }
+              spacing: Style.space(2)
+              SectionHeading { visible: rowSlot.heading !== ""; text: rowSlot.heading }
+              Text {
+                textFormat: Text.PlainText
+                visible: rowSlot.headingNote !== ""
+                width: parent.width
+                bottomPadding: Style.space(4)
+                text: rowSlot.headingNote
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+              CheckRow {
+                width: parent.width
+                check: rowSlot.modelData
+                selected: root.cursorActive && root.rowIndex === rowSlot.index
+                expanded: root.expandedId === rowSlot.modelData.id
+                onClicked: { root.rowIndex = rowSlot.index; root.toggleExpanded(rowSlot.modelData) }
+              }
             }
           }
 
           Text {
             textFormat: Text.PlainText
             width: parent.width
-            text: "R run all · ← → tabs · Enter details · F fix · D reviewed · U update check · Vigil " + (root.report ? root.report.version : "")
+            text: Model.keyHints(root.tab, root.report ? root.report.version : "")
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -1311,43 +1478,84 @@ Panel {
     }
   }
 
-  component CategoryRow: CursorSurface {
-    id: catRow
-    property string category: ""
-    readonly property int fails: Model.countBy(root.report, category, "fail")
-    readonly property int warns: Model.countBy(root.report, category, "warn")
-    readonly property int notes: Model.countBy(root.report, category, "info")
-    foreground: root.foreground
-    implicitHeight: catText.implicitHeight + Style.spacing.rowPaddingX
-
-    MouseArea {
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
-      onClicked: root.selectTab(catRow.category)
-    }
-    Text {
-      id: catText
-      textFormat: Text.PlainText
-      anchors.left: parent.left
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(10)
-      text: Model.categoryLabel(catRow.category)
-      color: root.foreground
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.body
-      font.bold: true
+  // One tab: Omarchy's own bordered button, as in its ButtonGroup, with the
+  // pillar's most important count under it. The tooltip has every count.
+  component TabCell: Column {
+    id: cell
+    property string tab: ""
+    readonly property var caption: Model.tabCaption(root.report, tab)
+    readonly property alias buttonHeight: tabButton.height
+    readonly property real naturalWidth: tabButton.implicitWidth
+    readonly property color tone: caption.tone === "urgent" ? root.urgent
+      : (caption.tone === "warn" ? root.warnColor : root.dim)
+    spacing: Style.space(2)
+    Button {
+      id: tabButton
+      width: cell.width
+      text: Model.categoryLabel(cell.tab)
+      tooltipText: Model.plain(Model.tabCounts(root.report, cell.tab), 120)
+      selected: root.tab === cell.tab
+      bordered: true
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      fontSize: Style.font.bodySmall
+      horizontalPadding: Style.space(8)
+      onClicked: root.selectTab(cell.tab)
     }
     Text {
       textFormat: Text.PlainText
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.rightMargin: Style.space(10)
-      text: Model.pillarCounts(catRow.fails, catRow.warns, catRow.notes)
-      color: catRow.fails ? root.urgent : (catRow.warns ? root.warnColor : root.dim)
+      width: cell.width
+      horizontalAlignment: Text.AlignHCenter
+      // A space before the first check, so the strip does not grow when it lands.
+      text: cell.caption.count !== "" ? cell.caption.count : " "
+      color: cell.tone
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall
-      font.bold: catRow.fails > 0
+      font.bold: cell.caption.tone !== "dim"
+    }
+    Text {
+      textFormat: Text.PlainText
+      width: cell.width
+      horizontalAlignment: Text.AlignHCenter
+      text: cell.caption.label !== "" ? cell.caption.label : " "
+      color: cell.tone
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      wrapMode: Text.WordWrap
+    }
+  }
+
+  // One run button with when it next runs by itself under it.
+  component RunCell: Column {
+    id: runCell
+    property string kind: ""
+    property string mode: ""
+    property string label: ""
+    property string caption: ""
+    property string tip: ""
+    property bool primary: false
+    readonly property real naturalWidth: runButton.implicitWidth
+    spacing: Style.space(2)
+    Button {
+      id: runButton
+      width: runCell.width
+      text: feedProc.running && root.feedMode === runCell.mode ? "Running\u2026" : runCell.label
+      tooltipText: runCell.tip
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      bordered: runCell.primary
+      enabled: !feedProc.running && !root.runElsewhere && !root.busy && root.pending === null
+      onClicked: root.requestRun(runCell.kind)
+    }
+    Text {
+      textFormat: Text.PlainText
+      width: runCell.width
+      horizontalAlignment: Text.AlignHCenter
+      text: runCell.caption !== "" ? runCell.caption : " "
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      wrapMode: Text.WordWrap
     }
   }
 
@@ -1362,6 +1570,11 @@ Panel {
     readonly property bool undoable: check !== null && root.report !== null && check.undo.action !== ""
       && Model.canRun({ kind: "terminal", action: check.undo.action }, root.report.tools, root.report.apps)
     readonly property bool reviewable: check !== null && (check.dismissible || check.dismissed)
+    // A pick list: its buttons, and how many of its items are ticked.
+    readonly property var pick: Model.pickSpec(check)
+    readonly property bool pickable: pick !== null && check.items.some(function(it) { return Model.itemPickable(it) })
+    readonly property var removeIds: root.pickedIn(check, true)
+    readonly property var keepIdsNow: root.pickedIn(check, false)
     signal clicked()
 
     hasCursor: selected
@@ -1502,43 +1715,152 @@ Panel {
         font.pixelSize: Style.font.caption
         wrapMode: Text.WrapAnywhere
       }
-      // One line per detection, each with False positive (or Not a false positive).
+      // A pick list, one item per line: a box to tick, then the item on two
+      // lines (what it is, then more about it). A kept item or a false
+      // positive shows a lock instead of the box, and sits at the bottom;
+      // clicking the lock counts it again. Clicking an item's text ticks it.
       Repeater {
         model: row.expanded && row.check !== null ? row.check.items : []
         delegate: Row {
           id: itemRow
           required property var modelData
+          readonly property bool pickable: Model.itemPickable(modelData)
+          readonly property bool locked: modelData.kept || modelData.ignored
+          readonly property bool isPicked: pickable && root.picked[modelData.id] === true
           width: parent ? parent.width : 0
           spacing: Style.space(8)
-          Text {
-            textFormat: Text.PlainText
-            width: itemRow.width - itemButton.width - itemRow.spacing
-            anchors.verticalCenter: parent.verticalCenter
-            text: itemRow.modelData.text + (itemRow.modelData.ignored ? "  (false positive)" : "")
-            color: root.dim
-            opacity: itemRow.modelData.ignored ? 0.6 : 1
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WrapAnywhere
-          }
           Button {
-            id: itemButton
-            visible: itemRow.modelData.id !== ""
-            text: itemRow.modelData.ignored ? "Not a false positive" : "False positive"
-            tooltipText: itemRow.modelData.ignored ? "Count this detection again"
-                                                   : "The file is safe and ClamAV is wrong. Only if you are sure; it comes back if the file changes"
+            id: pickBox
+            // A small box, level with the item's first line. An item that has
+            // no id (nothing can be done with it) keeps the box's space, empty,
+            // so every item lines up.
+            visible: !itemRow.locked
+            opacity: itemRow.pickable ? 1 : 0
+            anchors.top: parent.top
+            width: Style.space(14)
+            height: Style.space(14)
+            text: itemRow.isPicked ? "\u2713" : ""
+            tooltipText: itemRow.isPicked ? "Unselect" : "Select, then use the buttons below"
+            selected: itemRow.isPicked
+            bordered: true
+            horizontalPadding: 0
+            verticalPadding: 0
+            fontSize: Style.font.caption
             foreground: root.foreground
             fontFamily: root.fontFamily
+            enabled: itemRow.pickable && !root.busy && root.pending === null
+            onClicked: root.togglePicked(itemRow.modelData)
+          }
+          Button {
+            id: lockBox
+            // The lock (Nerd Font, which Omarchy ships), in the box's place.
+            visible: itemRow.locked
+            anchors.top: parent.top
+            width: Style.space(14)
+            height: Style.space(14)
+            text: "\uf023"
+            tooltipText: itemRow.modelData.ignored ? "Marked as a false positive. Click to count it again"
+                                                   : "Kept. Click to count it again"
+            horizontalPadding: 0
+            verticalPadding: 0
+            fontSize: Style.font.caption
+            foreground: root.dim
+            fontFamily: root.fontFamily
             enabled: !root.busy && root.pending === null
-            onClicked: itemRow.modelData.ignored ? root.requestUnignore(itemRow.modelData)
-                                                 : root.requestIgnore(itemRow.modelData)
+            onClicked: root.unlock(itemRow.modelData)
+          }
+          Item {
+            id: itemTexts
+            readonly property var lines: String(itemRow.modelData.text).split("\n")
+            width: itemRow.width - pickBox.width - itemRow.spacing
+            height: textLines.implicitHeight
+            opacity: itemRow.locked ? 0.6 : 1
+            Column {
+              id: textLines
+              width: parent.width
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                text: itemTexts.lines[0]
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+              }
+              // The lock already says it is kept (or a false positive); its
+              // tooltip says which.
+              Text {
+                textFormat: Text.PlainText
+                visible: itemTexts.lines.length > 1 && itemRow.modelData.marks.length === 0
+                width: parent.width
+                text: itemTexts.lines.slice(1).join(" ")
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+              }
+              // Or the same line in parts, each in its severity's color.
+              Flow {
+                visible: itemRow.modelData.marks.length > 0
+                width: parent.width
+                Repeater {
+                  model: itemRow.modelData.marks
+                  delegate: Text {
+                    required property var modelData
+                    required property int index
+                    textFormat: Text.PlainText
+                    width: Math.min(implicitWidth, textLines.width)
+                    text: modelData.text + (index < itemRow.modelData.marks.length - 1 ? ", " : "")
+                    color: root.markColor(modelData.level)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+                  }
+                }
+              }
+            }
+            MouseArea {
+              anchors.fill: parent
+              enabled: itemRow.pickable && !root.busy && root.pending === null
+              cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+              onClicked: root.togglePicked(itemRow.modelData)
+            }
           }
         }
       }
       Flow {
-        visible: row.expanded && (row.runnable || row.undoable || row.reviewable)
+        visible: row.expanded && (row.runnable || row.undoable || row.reviewable || row.pickable)
         width: parent.width
         spacing: Style.space(8)
+        // A pick list's buttons act on the ticked items. With nothing ticked,
+        // Trash all, Remove all (orphans only) and Keep all act on every item
+        // you could tick; the rest wait for a tick.
+        Button {
+          readonly property int count: row.removeIds.length
+          visible: row.pickable
+          text: row.pick === null ? ""
+            : count > 0 ? row.pick.remove + " selected (" + count + ")"
+            : row.pick.all ? row.pick.remove + " all" : row.pick.remove + " selected"
+          tooltipText: row.pick === null ? ""
+            : count === 0 && !row.pick.all ? "Tick the items first"
+            : row.pick.card === "trash" || row.pick.card === "ignore" ? "Asks first, listing each item"
+            : "Asks first, listing each item and the exact command"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          bordered: true
+          enabled: !root.busy && root.pending === null && row.pick !== null && (count > 0 || row.pick.all)
+          onClicked: root.requestRemoveIds(row.check, count > 0 ? row.removeIds : root.allIn(row.check, true))
+        }
+        Button {
+          readonly property int count: row.keepIdsNow.length
+          visible: row.pickable && row.pick !== null && row.pick.keep
+          text: count > 0 ? "Keep selected (" + count + ")" : "Keep all"
+          tooltipText: "Leave them as they are; Vigil stops counting them and locks them at the bottom of the list"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          enabled: !root.busy && root.pending === null
+          onClicked: root.keepIds(count > 0 ? row.keepIdsNow : root.allIn(row.check, false))
+        }
         Button {
           visible: row.runnable && !(row.check !== null && row.check.dismissed)
           text: row.check ? row.check.fix.label : ""
