@@ -1776,11 +1776,11 @@ Panel {
               }
               Text {
                 textFormat: Text.PlainText
-                visible: itemTexts.lines.length > 1 || itemRow.locked
+                visible: itemTexts.lines.length > 1
                 width: parent.width
+                // The lock already says it is kept (or a false positive); its
+                // tooltip says which.
                 text: itemTexts.lines.slice(1).join(" ")
-                  + (itemRow.modelData.kept ? (itemTexts.lines.length > 1 ? " \u00b7 " : "") + "kept"
-                     : itemRow.modelData.ignored ? (itemTexts.lines.length > 1 ? " \u00b7 " : "") + "false positive" : "")
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
