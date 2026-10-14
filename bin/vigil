@@ -1447,19 +1447,30 @@ def foreign_records():
     return _package_records("foreign", "m", said)
 
 
+ITEMS_MAX = 300                  # per row: the panel takes 500, and the whole report must stay under 512 KiB
+
+
+def item_text(text):
+    """Two lines of at most 199 characters each, within the panel's 400."""
+    return "\n".join(clean(line, 199) for line in text.split("\n")[:2])
+
+
 def pick_items(records, kept, note_kept):
-    """Items for the panel and the lines still counted (not kept)."""
+    """Items for the panel and the records still counted (not kept)."""
     items, live = [], []
     for r in records:
         is_kept = r["id"] in kept
-        item = {"id": r["id"], "kind": r["kind"], "text": r["text"], "kept": is_kept, "ignored": False}
+        item = {"id": r["id"], "kind": r["kind"], "text": item_text(r["text"]), "kept": is_kept, "ignored": False}
         if "name" in r:
             item["name"] = r["name"]
         items.append(item)
         if not is_kept:
             live.append(r)
     n = len(records) - len(live)
-    return quiet_last(items), live, (note_kept % n if n else "")
+    note = note_kept % n if n else ""
+    if len(items) > ITEMS_MAX:
+        note += " The first %d are listed." % ITEMS_MAX
+    return quiet_last(items)[:ITEMS_MAX], live, note
 
 
 @check
@@ -4463,7 +4474,7 @@ LEFTOVER_DAYS = 30
 LEFTOVER_MAX = 150
 LEFTOVER_SECONDS = 4.0
 KEPT_FILE = "kept.json"                 # every pick list's kept items
-KEPT_LEGACY = "kept-leftovers.json"     # 0.30's file, leftovers only: read, then folded into kept.json
+KEPT_LEGACY = "kept-leftovers.json"     # earlier builds' file, leftovers only: read, then folded into kept.json
 KEPT_MAX = 1000
 
 # (key, folder under home, what is listed there)

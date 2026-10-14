@@ -3310,3 +3310,11 @@ def test_the_plugin_remove_script_refuses_odd_ids_before_removing_any(tmp_path):
     p = subprocess.run(["/bin/bash", "-c", script, "vigil-remove-plugins", "acme.weather", "dev_tool-2"],
                        capture_output=True, text=True)
     assert p.returncode == 0 and log.read_text() == "acme.weather --yes\ndev_tool-2 --yes\n"
+
+
+def test_a_long_list_stays_within_what_the_panel_takes(v):
+    pacman_info(v, "m", *[("pkg%d" % n, "1-1", "d" * 300) for n in range(520)])
+    c = v.check_foreign_packages()
+    assert len(c["items"]) == 300 and c["summary"].endswith("The first 300 are listed.")
+    assert all(len(i["text"]) <= 400 for i in c["items"])
+    assert c["summary"].startswith("520 packages")

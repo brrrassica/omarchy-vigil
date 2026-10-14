@@ -210,14 +210,48 @@ or two), **How to fix**, and **Details**. Below that are its buttons:
   that fix: a port you opened on purpose, an unencrypted desktop that never
   leaves home. It stays in its tab, dimmed, no longer lowers the score or
   notifies, and stays reviewed through every later check and scan. **Show
-  again** undoes it. Leftover app data is the one exception: you review it
-  item by item with **Keep**, so the row has no Mark as reviewed.
+  again** undoes it. The lists you tick (below) are the exception: leftover
+  app data, orphaned packages, foreign packages and other plugins are
+  reviewed item by item with **Keep**, so those rows have no Mark as
+  reviewed.
 
 For findings that report evidence rather than a setting (open ports, startup
 files, file changes, exposed secrets, infected files, known-malicious or
 known-compromised packages, vulnerable packages, system-wide preload,
-abandoned AUR packages, plugin capabilities), a review covers what was found
-at the time. If something new turns up, the finding comes back.
+abandoned AUR packages), a review covers what was found at the time. If
+something new turns up, the finding comes back.
+
+### Lists you tick
+
+Five rows list what they found one item per line, each on two lines (what
+it is, then more about it), with a small box to tick: leftover app data and
+orphaned packages (Care), infected files (Detect), and foreign packages and
+other Omarchy plugins (Supply). Tick the items you want to act on (the box,
+or the item's text), then use the buttons under the list, which say how many
+they act on.
+
+| List | Remove | Keep |
+|---|---|---|
+| Leftover app data | **Trash selected**, or **Trash all** with nothing ticked: to the trash, never deleted | **Keep selected** / **Keep all** |
+| Orphaned packages | **Remove selected**, or **Remove all** with nothing ticked: `pacman -Rns`, behind your password | **Keep selected** / **Keep all** |
+| AUR and other foreign packages | **Remove selected** only: `pacman -Rns`, behind your password | **Keep selected** / **Keep all** |
+| Other Omarchy plugins | **Remove selected** only: Omarchy's own `omarchy-plugin-remove`, as you | **Keep selected** / **Keep all** |
+| Infected files | **False positive selected** only: Vigil stops counting that exact file | (none) |
+
+Removing, trashing and marking a false positive always ask first, on a card
+at the top of the panel that lists each item and shows the exact command;
+see [How actions run](#how-actions-run). There is no "all" for what you
+cannot easily get back (foreign packages, plugins) or must be sure of
+(false positives).
+
+**Keep** leaves an item as it is and stops counting it: settings you want
+back if you install an app again, an orphan you still use, an AUR package or
+plugin you have looked at and trust. Keeping only changes Vigil's own notes,
+so it does not ask. A kept item, and a file marked as a false positive,
+shows a lock in place of its box and moves to the bottom of the list;
+**click the lock** to count it again. A plugin you kept is counted again by
+itself if its code gains a new capability, and a false positive if the file
+changes.
 
 ### Undo
 
@@ -280,7 +314,7 @@ lower it. A warning you mark as reviewed stops counting.
 | Startup files | Reads shell startup files, autostart entries, user services and timers, uwsm and environment.d files, Hyprland config and your crontab, and flags lines that download and run code, decode hidden code, or open reverse shells. These are leads to read, not proof. |
 | System-wide preload | Fails if `/etc/ld.so.preload` loads anything; rootkits use it to hide. |
 | Changes to important files | Records a fingerprint of accounts, PAM, SSH settings, `~/.ssh/authorized_keys`, system and user services, autostart entries and your startup files, and lists anything changed, added or removed since. Changes that match exactly what a package update shipped (from pacman's own records) are not reported, nor are system users that packages add. Changes to who can log in or what runs at start are warnings; changes to your own shell files are information. **Accept these changes** records the current state as the new normal. |
-| Infected files (ClamAV) | ClamAV scans your home folder in each weekly check, and every day what is new in Downloads, as you, each time right after Vigil makes sure the virus signatures are current. Infected files are listed with **Open ClamUI** to quarantine them. If ClamAV is wrong about a file you know is safe (a game's DLL, say), press **False positive** next to it: Vigil records that exact file's SHA-256 and stops counting it, and reports it again if the file ever changes. **Not a false positive** counts it again. Only ClamAV's published signatures count; its guess-based "potentially unwanted" rules stay off. |
+| Infected files (ClamAV) | ClamAV scans your home folder in each weekly check, and every day what is new in Downloads, as you, each time right after Vigil makes sure the virus signatures are current. Infected files are listed one per line (the file, then what ClamAV found), with **Open ClamUI to quarantine them**. If ClamAV is wrong about a file you know is safe (a game's DLL, say), tick it and press **False positive selected**: Vigil records that exact file's SHA-256 and stops counting it, and reports it again if the file ever changes. Clicking its lock counts it again. Only ClamAV's published signatures count; its guess-based "potentially unwanted" rules stay off. |
 | Duplicate scan schedules | Finds other apps that repeat what Vigil already runs: a scheduled scan in ClamUI whose folders are all inside your home folder, and the older Bumblebee plugin (once Vigil runs Bumblebee itself). **Let Vigil run them** turns those off the way you would in each app: ClamUI's timer and its own Scheduled scans setting, and `omarchy plugin disable` for the plugin. Undo turns back on exactly what it turned off. A ClamUI schedule that also covers folders outside your home folder (Arch or Flatpak ClamUI: they share one timer, so ClamUI is then left alone entirely), and the Security Scan plugin (it runs AUR-Malware, which Vigil does not), are listed but left on. Nothing is offered when Vigil's background checks are off. |
 | ClamUI | Vigil hands virus scanning to [ClamUI](https://github.com/linx-systems/clamui): file and folder scans, scheduled scans, USB drive scans and quarantine. When it is installed, **Open ClamUI** starts it; otherwise Vigil installs it from the Arch repositories (`clamui`), so the Omarchy update keeps it current, and it uses the system's ClamAV. A ClamUI you installed from Flathub keeps working. |
 | Virus signatures (ClamAV) | Whether ClamAV is installed and its signatures keep themselves up to date (they count as current for a day). Vigil turns on ClamAV's own update service (`clamav-freshclam`) when it installs ClamAV or ClamUI, and offers to if it is off. |
@@ -293,8 +327,8 @@ lower it. A warning you mark as reviewed stops counting.
 | Known-malicious packages (OSV) | Runs [osv-scanner](https://github.com/google/osv-scanner) over your AUR build folders (`~/.cache/yay`, `~/.cache/paru`) and global npm, Bun, mise and pnpm installs, against [OSV.dev](https://osv.dev), which includes the [OpenSSF Malicious Packages](https://github.com/ossf/malicious-packages) reports. This is how the 2026 Atomic Arch AUR attack (which pulled malware in with `bun install`) and the npm worms that run on Bun are caught. Only confirmed malware (`MAL-` entries) counts; ordinary vulnerabilities in development dependencies are left out. |
 | Known vulnerabilities (arch-audit) | Installs arch-audit, which uses the Arch security team's tracker, and lists only the problems an update fixes. |
 | AUR package status | Asks the AUR about your AUR packages: which have left the AUR, which are now in the official repositories, and which have no maintainer (most 2026 AUR attacks took over such orphans). Information only, since packages leave the AUR for ordinary reasons too. |
-| AUR and other foreign packages | Lists packages that did not come from the official repositories, so you can remove what you no longer recognise. |
-| Other Omarchy plugins | Lists your third-party plugins and what each one's code can do: network access, root through sudo or pkexec, shell commands, downloading and running code, compiled binaries. Vigil reads the files as text and never loads or runs them. |
+| AUR and other foreign packages | Lists packages that did not come from the official repositories, each with its version, size, description and what the last AUR lookup said about it. Tick what you no longer use and press **Remove selected**; **Keep** what you trust (see [Lists you tick](#lists-you-tick)). |
+| Other Omarchy plugins | Lists your third-party plugins and what each one's code can do: network access, root through sudo or pkexec, shell commands, downloading and running code, compiled binaries. Vigil reads the files as text and never loads or runs them. Tick a plugin you no longer use and press **Remove selected**; **Keep** one you have looked at and trust. |
 
 ### Privacy
 
@@ -327,11 +361,11 @@ groups:
 
 **Not in Clean all**, at the bottom of the tab under its own heading:
 removing packages, or settings you may want back, deserves a look, so you
-review these one by one.
+tick what to remove or keep (see [Lists you tick](#lists-you-tick)).
 
 | Row | What it measures | Cleanup |
 |---|---|---|
-| Orphaned packages | Packages nothing needs any more | `omarchy-update-orphan-pkgs`, which asks before removing anything |
+| Orphaned packages | Packages installed as dependencies of something you have since removed, each with its version, size and description | Tick items, then **Remove** them (`pacman -Rns`, asks for your password) or **Keep** them |
 | Leftover app data | Settings and data that apps you removed left in your home folder | Tick items, then **Trash** or **Keep** them (no root), see below |
 
 **Application caches.** A file in `~/.cache` counts as unused when no app
@@ -365,11 +399,10 @@ which usually come from a dotfile manager.
 | `~/.local/bin` | it is a link to a program that is gone |
 | `~/.local/share/applications` | the launcher starts a program that is gone, or a Flatpak that is no longer installed |
 
-The list is information: it never lowers the score or notifies. Open the
-row and tick the items you want to act on (the box, or the item's text),
-then use the buttons below the list. With nothing ticked they act on every
-item not kept (**Trash all**, **Keep all**); once you tick some, on just
-those (**Trash selected**, **Keep selected**, with how many).
+The list is information: it never lowers the score or notifies. Each item
+reads as where it is and how big, then why it is listed and since when. Open
+the row and tick the items you want to act on (see
+[Lists you tick](#lists-you-tick)).
 
 - **Trash** asks first, on a card at the top of the panel that lists each
   item, then moves them to the trash, the same trash your file manager
@@ -378,10 +411,9 @@ those (**Trash selected**, **Keep selected**, with how many).
   so do **Empty** on the Trash row and **Clean all**, which empty the trash
   too.
 - **Keep** leaves them where they are: settings you want back if you
-  install the app again, or something Vigil cannot know you use. They stay
-  in the list, dimmed and marked "(kept)", and are no longer counted.
-  **Stop keeping** on a kept item counts it again. Keeping only changes
-  Vigil's own notes, so it does not ask.
+  install the app again, or something Vigil cannot know you use. They move
+  to the bottom of the list with a lock and are no longer counted; click
+  the lock to count one again.
 
 Just before it moves anything, Vigil looks again: an item that something
 now uses, or that you kept, stays where it is. Leftovers are never part of
@@ -423,9 +455,10 @@ The panel always says which kind an action is:
 2. **Helper actions** run `bin/vigil fix <action>` as you, never as root:
    making `~/.ssh` and `~/.gnupg` private, the opt-out file, the thumbnail
    cache, the trash and unused application caches. Each is a fixed action name; nothing from a file or
-   from the report reaches it. Leftover app data is kept or moved to the
-   trash the same way, named only by an id (`vigil keep <id>...`, `vigil
-   trash <id>...`).
+   from the report reaches it. Keeping an item of any list, moving leftover
+   app data to the trash and marking false positives work the same way,
+   named only by ids the helper made (`vigil keep <id>...`, `vigil trash
+   <id>...`, `vigil ignore <id>...`).
 3. **Script actions** run one of the constant scripts in
    [`Model.js`](Model.js) without a terminal. The panel first shows what it
    will do in plain words, with the exact commands under the **Run** button
@@ -434,23 +467,36 @@ The panel always says which kind an action is:
    password dialog asks; cancelling it changes nothing. The panel then shows
    what the script printed. Only tools that ask you questions as they go
    still open a terminal: Omarchy's updater, its FIDO2 key
-   and fingerprint setup, passwordless sudo, the docker group, the orphan review, and
+   and fingerprint setup, passwordless sudo, the docker group, and
    choosing an SSH passphrase. Packages Vigil installs come straight from
    the Arch repositories with `pacman --needed --noconfirm`; Bumblebee, the
    one exception, comes from Perplexity's release, checked against the
    SHA-256 in Vigil's code.
-4. **Open an app or a guide**: **Open ClamUI** starts ClamUI directly, and
+4. **Remove from a list.** **Remove** on orphaned or foreign packages runs
+   one constant script through `pkexec`, with the list's name and the
+   package names after it; the card shows that command line and the script
+   in full. Package names are the one thing from a list that reaches a
+   command, and only names Arch allows (letters, digits and `@._+-`, not
+   starting with `-` or `.`) get that far. As root the script checks each
+   name again, and that pacman still lists it as orphaned or foreign, and
+   removes nothing unless every one passes; then it runs
+   `pacman -Rns --noconfirm -- <names>`. **Remove** on plugins runs
+   Omarchy's own `omarchy-plugin-remove <id> --yes` once per plugin, as
+   you, after checking each id the way that tool does (never Vigil itself).
+5. **Open an app or a guide**: **Open ClamUI** starts ClamUI directly, and
    **Learn more** opens a page with `xdg-open`, each with a fixed command and
    no shell. Pages come only from a fixed list in `Model.js` (Arch Wiki,
    MITRE ATT&CK, Perplexity's Bumblebee, Black Ops); nothing in the report becomes a URL.
    They change nothing, so they do not ask first.
-5. **Mark as reviewed**, **Show again**, **Not a false positive**, **Keep**
-   and **Stop keeping** only change Vigil's own notes, so they do not ask
-   first either. **Move to trash** asks first, and moves an item with one
-   rename into the trash; it never deletes anything.
+6. **Mark as reviewed**, **Show again**, **Keep** and the lock (which
+   counts a kept item or a false positive again) only change Vigil's own
+   notes, so they do not ask first either. **Trash** asks first, and moves
+   each item with one rename into the trash; it never deletes anything.
+   **False positive selected** asks first too.
 
 Vigil never runs a file from its own folder as root (root only ever runs
-`/usr/bin/bash` with one of the fixed scripts, after your password), never
+`/usr/bin/bash` with one of the fixed scripts, after your password; the
+package removal script also gets the package names you ticked), never
 adds a sudoers rule, polkit policy, service or timer, and never changes a
 setting on its own.
 
@@ -554,7 +600,7 @@ servers), Flatpak and firmware updates, and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/wifi-autojoin-off` | the Stop auto-joining action | the networks it changed, so Undo puts back exactly those |
 | `~/.local/state/omarchy-vigil/checkup-db/` | `checkupdates`, as you | each daily check: its private copy of the package databases (a few MB) |
 | `~/.local/state/omarchy-vigil/ignored-detections.json` | the helper, mode 0600 | when you mark a virus detection as a false positive: the file's path, the signature name and the file's SHA-256 |
-| `~/.local/state/omarchy-vigil/kept-leftovers.json` | the helper, mode 0600 | when you press Keep on a leftover: its id and where it is |
+| `~/.local/state/omarchy-vigil/kept.json` | the helper, mode 0600 | when you press Keep on any list: each item's id, which list, and what it is (a folder, a package or a plugin name). An earlier build's `kept-leftovers.json` is read too, and folded into this file the next time you keep something |
 | `~/.local/share/Trash/files/`, `~/.local/share/Trash/info/` | the helper | only when you move a leftover to the trash: the item itself, and a `.trashinfo` file with where it came from, as every file manager writes |
 | `~/.local/state/omarchy-vigil/busy/` | the helper, mode 0700, empty | once: the folder Vigil locks so only one scan or update runs at a time |
 | `/usr/local/bin/bumblebee` | the Install or Install Bumblebee button, as root | only when you press one: Perplexity's program, version 0.1.2, checked against the SHA-256 in Vigil's code |

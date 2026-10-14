@@ -20,12 +20,21 @@ These hold for every pillar, now and in later phases:
 2. **Everything Vigil reads is untrusted**, including its own helper's output,
    other tools' result files and file names (a file name is chosen by whoever
    created the file). It is size-capped, validated and shown as plain text,
-   and never put into a notification or a program's arguments. Two kinds of
-   value reach a program only after a strict check, and only as data: a
-   Wi-Fi network's ID, which must be a UUID before `nmcli` is given it, and
-   the files a virus scan is handed (new downloads, and detections it
+   and never put into a notification or a program's arguments. Three kinds
+   of value reach a program only after a strict check, and only as data: a
+   Wi-Fi network's ID, which must be a UUID before `nmcli` is given it; the
+   files a virus scan is handed (new downloads, and detections it
    double-checks), which go to ClamAV in a private list file
-   (`--file-list`), one per line, never with a line break in a name.
+   (`--file-list`), one per line, never with a line break in a name; and the
+   packages and plugins you tick and confirm for removal, by name. A package
+   name must follow Arch's rules (letters, digits and `@._+-`, not starting
+   with `-` or `.`) and a plugin id Omarchy's (letters, digits and `._-`,
+   no `..`, never Vigil itself). Each is checked in the helper, again in
+   `Model.js`, and again by the script that receives it, which as root also
+   checks that pacman still lists each package as orphaned or foreign and
+   removes nothing unless every one passes. They are separate arguments
+   after a constant script, never part of it, and pacman gets them after
+   `--`.
 3. **Virus scans run as you.** ClamAV scans (Vigil's scans and ClamUI)
    never run as root: malware scanners have had parser bugs, and running
    them unprivileged limits what a malicious file can do. What needs root
@@ -67,11 +76,17 @@ These hold for every pillar, now and in later phases:
    Install Bumblebee on its row after a Vigil update raised the pinned
    version), never by a run, at the version pinned in Vigil's code, after
    its checksum matches.
-6. **Nothing automatic.** Every change to your system is confirmed. Marking
-   a finding as reviewed, a virus detection as a false positive, or a
-   leftover as kept, changes only Vigil's own notes and is undone with one
-   click, so it does not ask. Nothing in your home folder is deleted to
-   tidy it: a leftover goes to the trash, where you can restore it.
+6. **Nothing automatic.** Every change to your system is confirmed: removing
+   packages or plugins, moving leftovers to the trash and marking virus
+   detections as false positives each ask first, on a card that lists every
+   item. Marking a finding as reviewed, or an item of a list as kept,
+   changes only Vigil's own notes and is undone with one click (Show again,
+   or the item's lock), so it does not ask. Nothing in your home folder is
+   deleted to tidy it: a leftover goes to the trash, where you can restore
+   it. Removing a plugin is Omarchy's own `omarchy-plugin-remove`, which
+   deletes a plugin it cloned from git (add it again to get it back),
+   unlinks a development install and backs up any other folder; the card
+   says so.
    Notifications carry counts, or one fixed sentence (the virus signatures
    are over two days old: press Run all), never data from the report or a
    file; IPC methods take no parameters.
@@ -89,6 +104,7 @@ These hold for every pillar, now and in later phases:
 | `Panel.qml` + `Model.js` | you, inside `omarchy-shell` | Draws the lighthouse and panel, starts the helper, validates its output, launches confirmed actions. |
 | `bin/vigil` | you, as a child process | Reads local settings and files and returns one JSON report; performs the helper actions (a closed list), and moves leftovers you choose to the trash. |
 | Script actions | root through `pkexec` (Omarchy's password dialog), or you | Constant scripts from `Model.js`, shown in full on a confirmation first; what they print is shown in the panel. |
+| Removing from a list | root through `pkexec` (packages), or you (plugins) | A constant script from `Model.js` with the names you ticked as its arguments, shown in full on the card first: `pacman -Rns`, or Omarchy's `omarchy-plugin-remove`. |
 | Terminal actions | you, in a visible terminal | Omarchy's own interactive commands, and choosing an SSH passphrase. |
 | App actions | you | Open ClamUI with a fixed argv: `/usr/bin/clamui`, or `/usr/bin/flatpak run io.github.linx_systems.ClamUI`. |
 
@@ -233,6 +249,22 @@ program it is running, process group and all, and starts no further step.
   `/proc/self/fd/3` (a test runs the script and checks the arguments). The
   key's name it shows goes through `printf %q`, so control characters in a
   file name are printed as `$'\E...'` escapes, never sent to the terminal.
+- **Remove** on a list of packages runs `pkexec /usr/bin/bash -c <script>
+  vigil-remove orphans|foreign <name>...`, where the script is the constant
+  `REMOVE_PACKAGES_SCRIPT` in `Model.js` and the names are the packages the
+  card listed. The card shows that command line, with the script's place
+  marked, and the script in full; Run rebuilds the command from the same
+  ids and starts it only if it is exactly what the card showed. As root the
+  script checks each name against Arch's rules, then that `pacman -Qdtq`
+  (orphans) or `pacman -Qmq` (foreign) still lists it, and exits without
+  removing anything if one fails; only then does it run `pacman -Rns
+  --noconfirm -- <names>`. If another package still needs one, pacman
+  refuses the whole removal. There is no Remove all for foreign packages.
+  **Remove** on plugins runs `/usr/bin/bash -c <script> vigil-remove-plugins
+  <id>...` as you, which checks every id the way `omarchy-plugin-remove`
+  does (and refuses Vigil's own) before it runs that tool, at its trusted
+  path, once per id with `--yes`. A test runs both scripts with fake tools
+  and checks that a bad or unlisted name removes nothing.
 - **Learn more** opens a page with `xdg-open` (root-owned, in `/usr/bin`) as
   a two-element argv, no shell. The URL is a constant from the `DOCS` table
   in `Model.js`, chosen by id; any other id is dropped when the report is
@@ -284,7 +316,7 @@ program it is running, process group and all, and starts no further step.
   refusing would let a hidden line escape the scan), `shell.json` (for the
   lock timeout), and sysfs entries (sysfs is made of symlinks). Nothing read
   is ever written back or executed.
-- Writes (the state file, Vigil's other notes such as the kept-leftovers list,
+- Writes (the state file, Vigil's other notes such as the kept list,
   and the opt-out file) walk from your home directory
   one component at a time with `O_NOFOLLOW`, refusing any component that is
   a symlink or not owned by you, then create an exclusive random temporary
@@ -415,8 +447,19 @@ say where they connect before they run.
   read with `O_NOFOLLOW` (regular files up to 2 GiB). On later checks an
   unchanged device, inode, size, mtime and ctime skip re-reading; anything
   else re-hashes, and a different hash, a missing file or a link in its
-  place counts the detection again. The panel asks first. The helper verbs
-  are `vigil ignore|unignore <16 hex digits>`.
+  place counts the detection again. The panel asks first, on one card that
+  lists every ticked file; there is no "all". The helper verbs are
+  `vigil ignore|unignore <id>...`, at most 150 distinct ids of 16 hex
+  digits, and marking takes only detections still in the last scan whose
+  file it could read.
+- **Orphaned and foreign packages** are listed as you, read-only, with
+  `pacman -Qdti` and `pacman -Qmi` (name, version, description and size;
+  4 MiB cap), keeping only names that follow Arch's rules. **Other plugins**
+  are listed from `~/.config/omarchy/plugins` without following links. Each
+  item is named to the panel by an id (16 hex digits of a SHA-256 of its
+  kind and name; for a plugin also what its code can do, so a plugin you
+  kept that gains a capability is counted again), and carries its name only
+  for the remove command.
 - **Leftover app data** reads, never runs: pacman's `desc` files in
   `/var/lib/pacman/local` (names, provides and replaces only, 64 KiB cap
   each), the names in `/usr/bin`, `/usr/share`, `/usr/lib`, `/etc`, `/opt`
@@ -429,8 +472,9 @@ say where they connect before they run.
   to walk within the limit is treated as in use.
 - Each leftover is named to the panel by an id: 16 hex digits of the
   SHA-256 of its place and name. File names never reach a command line.
-  The verbs are `vigil keep|unkeep <id>...` (Vigil's notes in
-  `kept-leftovers.json`, nothing else) and `vigil trash <id>...`, each
+  The verbs are `vigil keep|unkeep <id>...` (Vigil's notes in `kept.json`,
+  nothing else, for every list; keeping takes only ids a list shows right
+  now) and `vigil trash <id>...`, each
   taking at most 150 distinct ids, each checked against the pattern on both
   sides. For trash the panel asks first, on a card that lists every ticked
   item, and sends exactly the ids that card showed (the card's action is

@@ -9,7 +9,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 | Detect | Is something bad already here? | ClamUI for virus scanning and quarantine |
 | Supply | Can I trust what I installed? | Perplexity's Bumblebee for known-compromised components |
 | Privacy | What am I leaking? | Black Ops for telemetry blocking |
-| Care | Is the system tidy and recoverable? | Omarchy's orphan and update commands |
+| Care | Is the system tidy and recoverable? | pacman's own tools (paccache, pacman -Rns) and Omarchy's updater |
 
 ## Decisions
 
@@ -122,9 +122,8 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       longer installed; links in `~/.local/bin` to programs that are gone;
       launchers in `~/.local/share/applications` that start nothing.
       Information only: it never lowers the score or notifies.
-- [x] One line per item, each with **Move to trash** (asks first) and
-      **Keep** (Vigil's notes only; **Stop keeping** undoes it), and
-      **Move all to trash** for everything not kept. The trash is the
+- [x] One line per item, to tick and then **Trash** (asks first) or
+      **Keep** (Vigil's notes only; the item's lock undoes it). The trash is the
       freedesktop.org trash every file manager reads, so Restore puts an
       item back; nothing is deleted, and leftovers are never part of Clean
       all. Before it moves anything the helper checks again that nothing
@@ -209,6 +208,30 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       button was.
 - [x] System logs under 500 MB count as tidy: no cleanup offered, and not
       part of Clean all.
+- [x] **Every list works the same way.** Orphaned packages, AUR and other
+      foreign packages, other Omarchy plugins and infected files are listed
+      like leftovers: one item per line on two lines, a small box to tick,
+      and buttons under the list that say how many they act on. Orphans:
+      Remove all or Remove selected (`pacman -Rns`, behind your password,
+      replacing the terminal review through `omarchy-update-orphan-pkgs`),
+      Keep. Foreign packages: Remove selected only, Keep. Plugins: Remove
+      selected only, through Omarchy's own `omarchy-plugin-remove`, as you,
+      Keep. Infected files: False positive selected, on one card. Every
+      card lists each item and shows the exact command; package names and
+      plugin ids are the arguments of a constant script that checks them
+      again (as root, for packages, also that pacman still lists each) and
+      removes nothing if one fails.
+- [x] A kept item, or a false positive, shows a lock in place of its box and
+      moves to the bottom of its list; clicking the lock counts it again. A
+      plugin you kept is counted again if its code gains a capability. Kept
+      items are now one list, `kept.json`, for every row (an earlier
+      build's `kept-leftovers.json` is read and folded in). Those rows lose
+      Mark as reviewed, since Keep reviews them item by item.
+- [x] Nothing is cut short: check results, trash and keep messages are
+      shown whole (up to 2000 characters, the same limit on both sides),
+      and summaries and how-to texts get the panel's own limits. On the
+      Overview's Last run list, the list a scan used ("with signatures from
+      Oct 14") sits on its own line under when it ran, so no line wraps.
 - [ ] Later: show launchers that point to a program by name rather than
       by path, once there is a reliable way to know the PATH your session
       uses.
