@@ -1,11 +1,16 @@
 # Vigil - Security Suite
 
+A security suite for [Omarchy](https://omarchy.org): one lighthouse in the bar,
+one panel, five pillars. The widget and panel take every color from your
+active Omarchy theme.
+
 <img src="docs/lighthouse.svg" width="96" alt="Vigil's lighthouse, in 16 EGA colors">
 
 ![Vigil in a Turbo Pascal-style screen: the panel's Overview beside its program listing](preview.png)
 
-A security suite for [Omarchy](https://omarchy.org): one lighthouse in the bar,
-one panel, five pillars.
+The panel above is running under a DOS-blue Omarchy theme. It is theme
+dependent: every color it draws comes from whichever Omarchy theme is active,
+so under yours it takes on your theme's colors.
 
 | Pillar | The question it answers |
 |---|---|
@@ -17,8 +22,9 @@ one panel, five pillars.
 
 Vigil keeps no threat lists of its own. Everything it checks against comes
 from the people who maintain it (the Arch security team, OSV.dev and the
-OpenSSF, ClamAV, Perplexity's Bumblebee, the AUR itself), and every scan
-gets the newest list right before it runs. It is tuned for no false alarms:
+OpenSSF, ClamAV, Perplexity's Bumblebee, the AUR itself): each scan gets
+the newest list right before it runs, and ClamAV's own update service keeps
+the virus signatures current. It is tuned for no false alarms:
 only confirmed problems lower the score, and anything that is merely worth
 knowing is shown as information.
 
