@@ -41,6 +41,7 @@ import errno
 import fcntl
 import zlib
 import hashlib
+import hmac
 import json
 import os
 import pwd
@@ -1374,9 +1375,105 @@ REMOVABLE_PLUGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")         # omar
 PICK_MAX = 150
 
 
+# --- Ids ----------------------------------------------------------------------
+# Every id Vigil gives the panel, puts on a command line or writes to its notes
+# is a keyed hash (HMAC-SHA256) under a random key made for this install
+# (id-key in the state folder: 32 bytes, mode 0600). Without that key an id
+# cannot be matched to a name by guessing, which plain hashes of public names
+# (packages, plugins) could be in seconds: a copied notes file, a backup, or
+# another account reading a command line learns nothing from them. It does not
+# hide anything from a program running as you, which can read the key the
+# way Vigil does.
+
+ID_KEY_FILE = "id-key"
+ID_KEY_BYTES = 32
+_ID_KEY = {}
+
+
+def _read_id_key(dirfd):
+    """The key, or None when it is missing or not a 32-byte regular file of yours."""
+    try:
+        fd = os.open(ID_KEY_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dirfd)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_size != ID_KEY_BYTES:
+            return None
+        data = os.read(fd, ID_KEY_BYTES + 1)
+        return data if len(data) == ID_KEY_BYTES else None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _make_id_key(dirfd):
+    """A new key, written whole to a private temporary and linked into place,
+    so another run never reads half a key; if one appeared meanwhile, that one."""
+    key = secrets.token_bytes(ID_KEY_BYTES)
+    tmp = ".id-key.%s" % secrets.token_hex(8)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=dirfd)
+    try:
+        os.write(fd, key)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        try:
+            os.link(tmp, ID_KEY_FILE, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        except FileExistsError:
+            existing = _read_id_key(dirfd)
+            if existing is not None:
+                return existing
+            os.unlink(ID_KEY_FILE, dir_fd=dirfd)           # not a key (a link, the wrong size): replace it
+            os.link(tmp, ID_KEY_FILE, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        os.fsync(dirfd)
+    finally:
+        os.unlink(tmp, dir_fd=dirfd)
+    return key
+
+
+def id_key():
+    """This install's key, made the first time it is needed. A look-only check
+    (--peek) never creates the state folder, so before Vigil's first full
+    check it, like a run without a state folder, gets a key for this run only:
+    its ids hold until the helper exits."""
+    if "key" not in _ID_KEY:
+        peek = INTEGRITY_PEEK["value"]
+        key = None
+        try:
+            dirfd = _open_home_dir(list(STATE_DIR)) if peek else _state_dir()
+        except (OSError, Refused):
+            dirfd = None
+        if dirfd is not None:
+            try:
+                key = _read_id_key(dirfd) or (None if peek else _make_id_key(dirfd))
+            except OSError:
+                key = None
+            finally:
+                os.close(dirfd)
+        _ID_KEY["key"] = key or secrets.token_bytes(ID_KEY_BYTES)
+    return _ID_KEY["key"]
+
+
+def keyed_hex(text, n=16):
+    return hmac.new(id_key(), text.encode("utf-8", "surrogateescape"), hashlib.sha256).hexdigest()[:n]
+
+
 def item_id(kind, *parts):
-    """A short stable id for one item of a pick list."""
-    return hashlib.sha256("\0".join((kind,) + parts).encode("utf-8", "surrogateescape")).hexdigest()[:16]
+    """A short stable id for one item of a list: keyed, so it says nothing about the item."""
+    return keyed_hex("\0".join((kind,) + parts))
+
+
+# Before 0.30, ids were plain SHA-256 hashes. Vigil still recognises them in
+# its notes, once, to carry what you kept, marked or reviewed over to keyed
+# ids (see migrate_notes); LEGACY maps them to this run's keyed ids.
+LEGACY = {"kept": {}, "ignored": {}, "complete": set()}
+
+
+def legacy_id(*parts):
+    return hashlib.sha256("\0".join(parts).encode("utf-8", "surrogateescape")).hexdigest()[:16]
 
 
 def quiet_last(items):
@@ -1425,8 +1522,9 @@ def _package_records(kind, flags, extra=None):
     for p in pkgs:
         head = " \u00b7 ".join(x for x in (p["name"], p["version"], p["size"]) if x)
         tail = "; ".join(x for x in (p["description"], (extra or {}).get(p["name"], "")) if x)
-        recs.append({"id": item_id(kind, p["name"]), "kind": kind, "name": p["name"], "shown": p["name"],
-                     "text": head + "\n" + (tail or "no description")})
+        recs.append({"id": item_id(kind, p["name"]), "legacy": legacy_id(kind, p["name"]), "kind": kind,
+                     "name": p["name"], "shown": p["name"], "text": head + "\n" + (tail or "no description")})
+    LEGACY["complete"].add(kind)
     return recs
 
 
@@ -1459,7 +1557,7 @@ def pick_items(records, kept, note_kept):
     """Items for the panel and the records still counted (not kept)."""
     items, live = [], []
     for r in records:
-        is_kept = r["id"] in kept
+        is_kept = is_kept_record(r, kept)
         item = {"id": r["id"], "kind": r["kind"], "text": item_text(r["text"]), "kept": is_kept, "ignored": False}
         if "name" in r:
             item["name"] = r["name"]
@@ -2624,6 +2722,7 @@ def check_virus_scan():
         items.append({"id": did or "", "kind": "detection", "text": text, "ignored": is_ignored})
         if not is_ignored:
             live.append(text.replace("\n", ": "))
+    LEGACY["complete"].add("detection")
     n_ignored = len(found) - len(live)
     note = " %d marked as a false positive." % n_ignored if n_ignored else ""
     odd = [clean(x, 200) for x in cache.get("oddNames", []) if isinstance(x, str)][:20] \
@@ -2710,12 +2809,13 @@ def detection_file(f):
     return None
 
 
-def detection_id(f):
-    """A short stable id for one detection (file and signature), or None."""
+def detection_id(f, legacy=False):
+    """A short stable id for one detection (file and signature), keyed; or None.
+    legacy: the plain SHA-256 id from before keyed ids."""
     path, sig = detection_file(f), f.get("signature")
     if not isinstance(path, str) or not isinstance(sig, str):
         return None
-    return hashlib.sha256(("%s\0%s" % (path, sig)).encode("utf-8", "surrogateescape")).hexdigest()[:16]
+    return legacy_id(path, sig) if legacy else item_id("detection", path, sig)
 
 
 def _file_identity(path):
@@ -2754,14 +2854,29 @@ def _stat_key(path):
 
 
 def ignored_detections():
+    """id -> {"id", "sha256", "stat", "at", "old"}: the file's hash and how it
+    looked, nothing that names it. "old" marks an id from before keyed ids."""
     data = _state_json(IGNORED_FILE)
+    keyed = isinstance(data, dict) and data.get("ids") == "keyed"
     entries = data.get("ignored") if isinstance(data, dict) else None
     out = {}
     for e in (entries if isinstance(entries, list) else [])[:IGNORED_MAX]:
         if isinstance(e, dict) and isinstance(e.get("id"), str) and re.fullmatch(r"[0-9a-f]{16}", e["id"]) \
                 and isinstance(e.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", e["sha256"]):
-            out[e["id"]] = e
+            st = e.get("stat")
+            out[e["id"]] = {"id": e["id"], "sha256": e["sha256"],
+                            "stat": st if isinstance(st, list) and len(st) == 5 and all(
+                                isinstance(x, int) and not isinstance(x, bool) for x in st) else None,
+                            "at": e.get("at") if isinstance(e.get("at"), str) and _DATE.match(e["at"]) else "",
+                            "old": not keyed or e.get("old") is True}
     return out
+
+
+def write_ignored(dirfd, entries):
+    body = {"schema": SCHEMA, "ids": "keyed",
+            "ignored": [dict({"id": e["id"], "sha256": e["sha256"], "stat": e["stat"], "at": e["at"]},
+                             **({"old": True} if e["old"] else {})) for e in entries[-IGNORED_MAX:]]}
+    write_atomic(dirfd, IGNORED_FILE, json.dumps(body, separators=(",", ":")).encode())
 
 
 def detection_ignored(f, ignored):
@@ -2769,6 +2884,11 @@ def detection_ignored(f, ignored):
     An unchanged stat key (ctime included, which a program cannot set back)
     skips re-reading the file; anything else re-hashes it."""
     e = ignored.get(detection_id(f) or "")
+    old = detection_id(f, legacy=True)
+    if old:
+        LEGACY["ignored"][old] = detection_id(f)
+    if not e and old and ignored.get(old, {}).get("old"):
+        e = ignored[old]
     if not e:
         return False
     path = detection_file(f)
@@ -2808,8 +2928,8 @@ def set_ignored(dids, on):
             if digest is None:
                 unread += 1
                 continue
-            marked.append({"id": did, "file": detection_file(f), "signature": f["signature"], "sha256": digest,
-                           "stat": key, "at": time.strftime("%Y-%m-%d")})
+            marked.append({"id": did, "sha256": digest, "stat": key, "at": time.strftime("%Y-%m-%d"),
+                           "old": False})
         if not marked:
             return {"ok": False, "action": "", "message": "Could not read the file, so it was not marked."
                     if len(dids) == 1 else "Could not read the files, so none was marked."}
@@ -2819,9 +2939,10 @@ def set_ignored(dids, on):
         return {"ok": False, "action": "", "message": "Could not open the Vigil state folder."}
     try:
         _lock(dirfd)
-        current = [e for e in ignored_detections().values() if e["id"] not in dids] + marked
-        write_atomic(dirfd, IGNORED_FILE, json.dumps({"schema": SCHEMA, "ignored": current[-IGNORED_MAX:]},
-                                                     separators=(",", ":")).encode())
+        # Each detection's id from before keyed ids goes too.
+        olds = {detection_id(f, legacy=True) for f in current_detections() if detection_id(f) in dids}
+        current = [e for e in ignored_detections().values() if e["id"] not in dids and e["id"] not in olds] + marked
+        write_ignored(dirfd, current)
     finally:
         os.close(dirfd)
     # You just looked at this row: what it shows now is not "new", so no notification follows.
@@ -3780,9 +3901,11 @@ def plugin_records():
             caps = plugin_capabilities(base + "/" + name, budget)
             said = ", ".join(caps) if caps else "no network, root or shell use found"
         removable = bool(REMOVABLE_PLUGIN.fullmatch(name)) and ".." not in name
-        recs.append({"id": item_id("plugin", name, ",".join(caps)), "kind": "plugin", "shown": label,
+        recs.append({"id": item_id("plugin", name, ",".join(caps)), "legacy": legacy_id("plugin", name, ",".join(caps)),
+                     "kind": "plugin", "shown": label,
                      "name": name if removable else "", "text": label + "\n" + said,
                      "risky": "downloads and runs code" in caps or "compiled binaries" in caps})
+    LEGACY["complete"].add("plugin")
     return recs
 
 
@@ -4739,7 +4862,7 @@ def _tree_stats(path, deadline, limit=100000):
 
 
 def leftover_id(key, name):
-    return hashlib.sha256(("%s\0%s" % (key, name)).encode("utf-8", "surrogateescape")).hexdigest()[:16]
+    return item_id("leftover", key, name)
 
 
 def _launcher_gone(path, apps):
@@ -4806,23 +4929,48 @@ def leftovers():
             size, newest, whole = _tree_stats(path, deadline + WALK_MAX_SECONDS)
             if kind in ("names", "dotdirs") and (not whole or newest >= cutoff):
                 continue                    # changed this month, or too big to be sure: still in use
-            found.append({"id": leftover_id(key, name), "kind": "leftover", "parts": parts, "name": name,
+            found.append({"id": leftover_id(key, name), "legacy": legacy_id(key, name), "kind": "leftover",
+                          "parts": parts, "name": name,
                           "shown": "~/" + "/".join(parts + (name,)), "size": size,
                           "newest": newest, "reason": reason})
     found.sort(key=lambda f: (-f["size"], f["shown"]))
+    LEGACY["complete"].add("leftover")
     return found[:LEFTOVER_MAX]
 
 
 def kept_items():
-    """id -> entry of everything you kept, on any pick list."""
+    """id -> {"id", "at", "old"} of everything you kept, on any list. "old" marks
+    an id from before keyed ids, still to be carried over."""
     out = {}
     for name in (KEPT_LEGACY, KEPT_FILE):
         data = _state_json(name)
+        keyed = name == KEPT_FILE and isinstance(data, dict) and data.get("ids") == "keyed"
         entries = data.get("kept") if isinstance(data, dict) else None
         for e in (entries if isinstance(entries, list) else [])[:KEPT_MAX]:
             if isinstance(e, dict) and isinstance(e.get("id"), str) and re.fullmatch(r"[0-9a-f]{16}", e["id"]):
-                out[e["id"]] = e
+                at = e.get("at") if isinstance(e.get("at"), str) and _DATE.match(e["at"]) else ""
+                out[e["id"]] = {"id": e["id"], "at": at, "old": not keyed or e.get("old") is True}
     return out
+
+
+def is_kept_record(r, kept):
+    """Kept by its keyed id, or by its id from before keyed ids."""
+    old = r.get("legacy")
+    if old:
+        LEGACY["kept"][old] = r["id"]
+    return r["id"] in kept or bool(old and kept.get(old, {}).get("old"))
+
+
+def write_kept(dirfd, entries):
+    """kept.json: ids and dates only, nothing that names an item."""
+    body = {"schema": SCHEMA, "ids": "keyed",
+            "kept": [dict({"id": e["id"], "at": e["at"]}, **({"old": True} if e["old"] else {}))
+                     for e in entries[-KEPT_MAX:]]}
+    write_atomic(dirfd, KEPT_FILE, json.dumps(body, separators=(",", ":")).encode())
+    try:
+        os.unlink(KEPT_LEGACY, dir_fd=dirfd)         # now folded into kept.json
+    except FileNotFoundError:
+        pass
 
 
 def _leftover_text(f):
@@ -4852,7 +5000,7 @@ def check_leftovers():
     items, live, live_size = [], [], 0
     for f in found:
         text = _leftover_text(f)
-        is_kept = f["id"] in kept
+        is_kept = is_kept_record(f, kept)
         items.append({"id": f["id"], "kind": "leftover", "text": text, "kept": is_kept, "ignored": False})
         if not is_kept:
             live.append(text.replace("\n", ", "))
@@ -4886,7 +5034,8 @@ def set_kept(lids, on):
     lids = [lids] if isinstance(lids, str) else list(lids)
     if not lids or not all(re.fullmatch(r"[0-9a-f]{16}", x) for x in lids):
         return {"ok": False, "action": "", "message": "Unknown item."}
-    listed = listed_items(lids) if on else {}
+    # Unkeeping looks too, to find the item's id from before keyed ids.
+    listed = listed_items(lids)
     if on:
         lids = [x for x in lids if x in listed]
         if not lids:
@@ -4897,16 +5046,13 @@ def set_kept(lids, on):
         return {"ok": False, "action": "", "message": "Could not open the Vigil state folder."}
     try:
         _lock(dirfd)
-        current = [e for e in kept_items().values() if e["id"] not in lids]
+        # The item's id from before keyed ids goes too: keeping replaces it,
+        # and stopping removes both.
+        old = {listed[x]["legacy"] for x in lids if x in listed and listed[x].get("legacy")}
+        current = [e for e in kept_items().values() if e["id"] not in lids and e["id"] not in old]
         if on:
-            current += [{"id": x, "kind": listed[x].get("kind", "leftover"), "shown": clean(listed[x]["shown"], 200),
-                         "at": time.strftime("%Y-%m-%d")} for x in lids]
-        write_atomic(dirfd, KEPT_FILE, json.dumps({"schema": SCHEMA, "kept": current[-KEPT_MAX:]},
-                                                  separators=(",", ":")).encode())
-        try:
-            os.unlink(KEPT_LEGACY, dir_fd=dirfd)         # now folded into kept.json
-        except FileNotFoundError:
-            pass
+            current += [{"id": x, "at": time.strftime("%Y-%m-%d"), "old": False} for x in lids]
+        write_kept(dirfd, current)
     finally:
         os.close(dirfd)
     n = len(lids)
@@ -5002,7 +5148,7 @@ def trash_leftovers(ids):
         if f is None:
             problems.append("one item is no longer on the list")
             continue
-        if lid in kept:
+        if is_kept_record(f, kept):
             problems.append("%s is kept (click its lock first)" % clean(f["shown"], 80))
             continue
         try:
@@ -5284,7 +5430,7 @@ def load_state():
 
 
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_FP = re.compile(r"^[a-z0-9-]{1,40}:[0-9a-f]{12}$")
+_FP = re.compile(r"^[a-z0-9-]{1,40}:(?:[0-9a-f]{16}|[0-9a-f]{12})$")   # keyed: 16; before keyed ids: 12
 
 
 def state_dismissed(state):
@@ -5312,12 +5458,76 @@ def state_history(state):
     return [{"date": d, "score": days[d]} for d in sorted(days)][-HISTORY_MAX:]
 
 
-def fingerprint(c):
-    """What a review covers: the check and its status, plus what was found for evidence checks."""
+def fingerprint(c, legacy=False):
+    """What a review covers: the check and its status, plus what was found for
+    evidence checks, as a keyed hash, so the notes do not say what was found.
+    legacy: the plain SHA-256 form from before keyed ids."""
     basis = c["status"]
     if c["id"] in EVIDENCE_CHECKS:
         basis += "\n" + (c["detail"] or c["summary"])
-    return c["id"] + ":" + hashlib.sha256(basis.encode()).hexdigest()[:12]
+    if legacy:
+        return c["id"] + ":" + hashlib.sha256(basis.encode()).hexdigest()[:12]
+    return c["id"] + ":" + keyed_hex("fingerprint\0" + basis)
+
+
+def migrate_notes(checks):
+    """Once, after a full check: carry what you kept, marked as a false
+    positive or reviewed over from plain SHA-256 ids to keyed ids, and drop
+    the names older notes kept beside them. An old id whose item is no longer
+    listed is dropped only when every list it could belong to was read in
+    full; otherwise it waits for the next check."""
+    try:
+        dirfd = _state_dir()
+    except (OSError, Refused):
+        return
+    try:
+        _lock(dirfd)
+        kept = list(kept_items().values())
+        if any(e["old"] for e in kept) or _exists_in(dirfd, KEPT_LEGACY) or _plain_notes(dirfd, KEPT_FILE, "kept"):
+            whole = {"orphan", "foreign", "plugin", "leftover"} <= LEGACY["complete"]
+            out, have = [], {e["id"] for e in kept if not e["old"]}
+            for e in kept:
+                if not e["old"]:
+                    out.append(e)
+                elif e["id"] in LEGACY["kept"]:
+                    new = LEGACY["kept"][e["id"]]
+                    if new not in have:
+                        out.append({"id": new, "at": e["at"], "old": False})
+                        have.add(new)
+                elif not whole:
+                    out.append(e)
+            write_kept(dirfd, out)
+        ignored = list(ignored_detections().values())
+        if any(e["old"] for e in ignored) or _plain_notes(dirfd, IGNORED_FILE, "ignored"):
+            out = []
+            for e in ignored:
+                if not e["old"]:
+                    out.append(e)
+                elif e["id"] in LEGACY["ignored"]:
+                    out.append(dict(e, id=LEGACY["ignored"][e["id"]], old=False))
+                elif "detection" not in LEGACY["complete"]:
+                    out.append(e)
+            write_ignored(dirfd, out)
+    except (OSError, Refused):
+        pass
+    finally:
+        os.close(dirfd)
+
+
+def _exists_in(dirfd, name):
+    try:
+        os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+        return True
+    except OSError:
+        return False
+
+
+def _plain_notes(dirfd, name, key):
+    """True when a notes file exists but is not yet in the keyed form."""
+    if not _exists_in(dirfd, name):
+        return False
+    data = _state_json(name)
+    return isinstance(data, dict) and isinstance(data.get(key), list) and data.get("ids") != "keyed"
 
 
 def update_state(report):
@@ -5332,8 +5542,12 @@ def update_state(report):
             state = _read_state(dirfd)
         except Refused:
             return [], False
-        seen = set(s for s in state.get("seen", []) if isinstance(s, str))
-        dismissed = state_dismissed(state)
+        # Fingerprints from before keyed ids count as the keyed ones they match,
+        # and are replaced by them here (a review of a finding not showing now
+        # keeps its old form until it shows again).
+        old = {fingerprint(c, legacy=True): fingerprint(c) for c in report["checks"]}
+        seen = set(old.get(s, s) for s in state.get("seen", []) if isinstance(s, str))
+        dismissed = {old.get(f, f): a for f, a in state_dismissed(state).items()}
         current = [fingerprint(c) for c in report["checks"] if c["status"] in ("fail", "warn") and c["weight"] > 0]
         first_run = "seen" not in state
         new = [] if first_run else [f.split(":", 1)[0] for f in current if f not in seen and f not in dismissed]
@@ -5505,6 +5719,8 @@ def audit(peek=False):
     started = time.monotonic()
     _SYSTEMCTL_MEMO.clear()
     INTEGRITY_PEEK["value"] = peek
+    for k in ("kept", "ignored", "complete"):
+        LEGACY[k].clear()
     checks = []
     for fn in CHECKS:
         try:
@@ -5520,6 +5736,8 @@ def audit(peek=False):
     for c in checks:
         c["dismissible"] = dismissible(c)
         fp = fingerprint(c)
+        if fp not in dismissed and fingerprint(c, legacy=True) in dismissed:
+            fp = fingerprint(c, legacy=True)                # reviewed before keyed ids
         c["dismissed"] = c["dismissible"] and fp in dismissed
         c["dismissedAt"] = dismissed.get(fp, "") if c["dismissed"] else ""
         own = c.pop("_undo", None)
@@ -5563,6 +5781,7 @@ def audit(peek=False):
     }
     if not peek:
         report["new"], report["stateSaved"] = update_state(report)
+        migrate_notes(checks)
     return report
 
 

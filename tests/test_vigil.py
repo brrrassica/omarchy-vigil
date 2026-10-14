@@ -3318,3 +3318,131 @@ def test_a_long_list_stays_within_what_the_panel_takes(v):
     assert len(c["items"]) == 300 and c["summary"].endswith("The first 300 are listed.")
     assert all(len(i["text"]) <= 400 for i in c["items"])
     assert c["summary"].startswith("520 packages")
+
+
+# --------------------------------------------------------------------------
+# Keyed ids: nothing in Vigil's notes names an item
+
+def _state_file(v, name):
+    return os.path.join(v.HOME, *v.STATE_DIR, name)
+
+
+def test_ids_are_keyed_with_a_key_of_this_install(v):
+    a = v.item_id("orphan", "python-old")
+    assert a != v.legacy_id("orphan", "python-old") and re.fullmatch(r"[0-9a-f]{16}", a)
+    key = _state_file(v, v.ID_KEY_FILE)
+    st = os.lstat(key)
+    assert stat.S_ISREG(st.st_mode) and stat.S_IMODE(st.st_mode) == 0o600 and st.st_size == 32
+    assert v.item_id("orphan", "python-old") == a                    # stable
+    os.unlink(key)
+    v._ID_KEY.clear()
+    assert v.item_id("orphan", "python-old") != a                    # another install, other ids
+
+
+def test_a_planted_link_is_never_used_as_the_key(v, tmp_path):
+    target = tmp_path / "victim"
+    target.write_bytes(b"k" * 32)
+    os.makedirs(os.path.join(v.HOME, *v.STATE_DIR), mode=0o700)
+    os.symlink(str(target), _state_file(v, v.ID_KEY_FILE))
+    v.item_id("x", "y")
+    assert not os.path.islink(_state_file(v, v.ID_KEY_FILE)) and v.id_key() != b"k" * 32
+    assert target.read_bytes() == b"k" * 32
+
+
+def test_peek_before_any_full_check_makes_no_key(v):
+    v.INTEGRITY_PEEK["value"] = True
+    v.item_id("x", "y")
+    assert not os.path.exists(os.path.join(v.HOME, ".local/state/omarchy-vigil"))
+
+
+def test_the_notes_name_nothing(v):
+    leftover_home(v)
+    pacman_info(v, "dt", ("python-old", "1.0-1", "An old library"))
+    v.set_kept([v.check_leftovers()["items"][0]["id"], v.check_orphans()["items"][0]["id"]], True)
+    scanned_with(v, ("Games/witcher/dx11.dll", b"MZ game"))
+    v.set_ignored(v.check_virus_scan()["items"][0]["id"], True)
+    kept = open(_state_file(v, v.KEPT_FILE)).read()
+    ignored = open(_state_file(v, v.IGNORED_FILE)).read()
+    for raw in (kept, ignored):
+        assert '"ids":"keyed"' in raw
+        for name in ("python-old", "oldtool", "nuget", ".config", "witcher", "dx11", "Win."):
+            assert name not in raw
+    assert sorted(json.loads(kept)["kept"][0]) == ["at", "id"]
+    assert sorted(json.loads(ignored)["ignored"][0]) == ["at", "id", "sha256", "stat"]
+
+
+def test_notes_from_before_keyed_ids_carry_over_once(v):
+    leftover_home(v)
+    pacman_info(v, "dt", ("python-old", "1.0-1", "x"), ("libgone", "1-1", "y"))
+    pacman_info(v, "m")                                  # no foreign packages: that list too is read whole
+    left = next(f for f in v.leftovers() if f["shown"] == "~/.oldtool")
+    dirfd = v._state_dir()
+    try:
+        v.write_atomic(dirfd, v.KEPT_LEGACY, json.dumps({"kept": [
+            {"id": v.legacy_id("home", ".oldtool"), "shown": "~/.oldtool"}]}).encode())
+        v.write_atomic(dirfd, v.KEPT_FILE, json.dumps({"kept": [
+            {"id": v.legacy_id("orphan", "python-old"), "kind": "orphan", "shown": "python-old", "at": "2026-10-01"},
+            {"id": v.legacy_id("orphan", "long-gone"), "shown": "long-gone"}]}).encode())
+    finally:
+        os.close(dirfd)
+    # Still counted as kept before anything is rewritten.
+    assert [i["kept"] for i in v.check_orphans()["items"]] == [False, True]
+    report = v.audit()
+    assert next(c for c in report["checks"] if c["id"] == "orphans")["summary"] == "1 orphaned package. 1 kept."
+    raw = open(_state_file(v, v.KEPT_FILE)).read()
+    data = json.loads(raw)
+    assert data["ids"] == "keyed" and "python-old" not in raw and "oldtool" not in raw and "long-gone" not in raw
+    ids = {e["id"] for e in data["kept"]}
+    assert v.item_id("orphan", "python-old") in ids and left["id"] in ids and len(ids) == 2
+    assert not any(e.get("old") for e in data["kept"])        # every list was read whole: the gone one is dropped
+    assert not os.path.exists(_state_file(v, v.KEPT_LEGACY))
+    assert [i["kept"] for i in v.check_orphans()["items"]] == [False, True]
+
+
+def test_an_old_kept_id_waits_while_a_list_could_not_be_read(v):
+    pacman_info(v, "dt", ("python-old", "1.0-1", "x"))   # foreign packages: pacman gives no answer here
+    dirfd = v._state_dir()
+    try:
+        v.write_atomic(dirfd, v.KEPT_FILE, json.dumps({"kept": [
+            {"id": v.legacy_id("foreign", "maybe-there"), "shown": "maybe-there"}]}).encode())
+    finally:
+        os.close(dirfd)
+    v.audit()
+    raw = open(_state_file(v, v.KEPT_FILE)).read()
+    assert "maybe-there" not in raw
+    assert json.loads(raw)["kept"] == [{"id": v.legacy_id("foreign", "maybe-there"), "at": "", "old": True}]
+
+
+def test_false_positives_and_reviews_carry_over(v):
+    (game,) = scanned_with(v, ("Games/witcher/dx11.dll", b"MZ game"))
+    f = v.current_detections()[0]
+    key, digest = v._file_identity(v.detection_file(f))
+    dirfd = v._state_dir()
+    try:
+        v.write_atomic(dirfd, v.IGNORED_FILE, json.dumps({"ignored": [
+            {"id": v.detection_id(f, legacy=True), "file": v.detection_file(f), "signature": f["signature"],
+             "sha256": digest, "stat": key, "at": "2026-10-01"}]}).encode())
+    finally:
+        os.close(dirfd)
+    report = v.audit()
+    c = next(c for c in report["checks"] if c["id"] == "virus-scan")
+    assert c["status"] == "pass" and c["items"][0]["ignored"] is True
+    raw = open(_state_file(v, v.IGNORED_FILE)).read()
+    assert "witcher" not in raw and f["signature"] not in raw
+    assert json.loads(raw)["ignored"][0]["id"] == v.detection_id(f)
+    # A review from before keyed ids still holds, and is stored keyed from now on.
+    target = next(c for c in report["checks"] if c["dismissible"])
+    old = v.fingerprint(target, legacy=True)
+    state = json.loads(open(_state_file(v, v.STATE_NAME)).read())
+    state["dismissed"] = [{"fp": old, "at": "2026-10-01"}]
+    state["seen"] = [old]
+    dirfd = v._state_dir()
+    try:
+        v.write_atomic(dirfd, v.STATE_NAME, json.dumps(state).encode())
+    finally:
+        os.close(dirfd)
+    again = v.audit()
+    assert next(c for c in again["checks"] if c["id"] == target["id"])["dismissed"] is True
+    assert again["new"] == []
+    saved = json.loads(open(_state_file(v, v.STATE_NAME)).read())
+    assert saved["dismissed"][0]["fp"] == v.fingerprint(target) and len(saved["dismissed"][0]["fp"].split(":")[1]) == 16

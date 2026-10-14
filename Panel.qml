@@ -383,8 +383,8 @@ Panel {
 
   // Runs bin/vigil with a fixed verb and ids the panel already validated:
   // `fix <helper action>`, `dismiss|undismiss <check id>`, `ignore|unignore <detection id>...`,
-  // `keep|unkeep <item id>...`, `trash <leftover id>...`. Ids are hashes the
-  // helper made; no file name ever reaches its command line.
+  // `keep|unkeep <item id>...`, `trash <leftover id>...`. Ids are keyed hashes
+  // the helper made; no file name ever reaches its command line.
   function runHelper(args) {
     if (fixProc.running || args.length < 2) return
     if (["fix", "dismiss", "undismiss", "ignore", "unignore", "keep", "unkeep", "trash"].indexOf(args[0]) === -1) return

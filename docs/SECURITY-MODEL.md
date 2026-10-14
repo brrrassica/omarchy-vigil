@@ -290,8 +290,8 @@ program it is running, process group and all, and starts no further step.
   helper offers undo only for files whose first line it has itself read as
   the marker through an `O_NOFOLLOW` descriptor. `tests/model.test.mjs`
   runs every undo script against temporary files.
-- Marking a finding as reviewed stores a fingerprint (check id plus a hash
-  of its status) in the state file, so the review lasts while the finding
+- Marking a finding as reviewed stores a fingerprint (check id plus a keyed
+  hash of its status, see [Ids](#ids)) in the state file, so the review lasts while the finding
   stays the same kind; a worse status is a new fingerprint. For evidence
   checks (open ports, startup files, file changes, secrets, infected files,
   malicious, compromised or vulnerable packages, preload, AUR status, plugin
@@ -304,6 +304,56 @@ program it is running, process group and all, and starts no further step.
   (`native`, `flatpak` or nothing) to one of two fixed argv arrays. The
   helper reports `flatpak` only when `/usr/bin/flatpak` is root-owned and the
   ClamUI app directory exists.
+
+## Ids
+
+Every id Vigil gives the panel, puts on a command line (`vigil keep <id>`,
+`vigil trash <id>`, `vigil ignore <id>`) or writes to its notes is a keyed
+hash: the first 16 hex digits of an HMAC-SHA256, under a random 32-byte key
+made for this install, `~/.local/state/omarchy-vigil/id-key` (mode 0600).
+The same goes for the fingerprints of reviewed and already-seen findings.
+
+- **What it protects.** A plain hash of a public name (a package, a
+  plugin, a common folder name) can be reversed in seconds by hashing the
+  whole list of names. A keyed one cannot be without the key. So the notes
+  files (`kept.json`, `ignored-detections.json`, `state.json`), a backup or
+  sync of them, a copy pasted into a bug report, and another account that
+  reads a running command line (`/proc/<pid>/cmdline` is readable by every
+  account), learn nothing about what you kept, marked or reviewed.
+- **What the notes hold.** `kept.json` holds ids and dates only.
+  `ignored-detections.json` holds the id, the file's SHA-256 and its
+  device, inode, size and times, which Vigil needs to notice a changed file,
+  and no path or signature name. `state.json` holds check ids (Vigil's own,
+  such as `open-ports`), keyed fingerprints and daily scores.
+- **What it does not protect.** A program running as you can read the key,
+  as Vigil does, and could also edit Vigil's notes, or Vigil itself. No
+  scheme that keeps the key where Vigil (running as you) can read it can
+  stop that, and Vigil keeps no root-owned store (design rule 1). Two things
+  limit what such a program gains: a kept item stays on its list with a
+  lock, and the four lists that can be kept never count toward the score or
+  notify.
+- **The key itself.** It is read with `O_NOFOLLOW` and used only when it is
+  a 32-byte regular file of yours. A new one is written whole to a private
+  temporary file and linked into place (`linkat`, which never replaces), so
+  a run never reads half a key and two runs agree on one; a link or a
+  wrong-size file at its name is replaced, never followed. A look-only
+  check (`--peek`, the copies on other monitors) never creates the key; until
+  the first full check has, its ids last one run. Deleting the state folder
+  makes a new key, so earlier keeps, false positives and reviews no longer
+  match, just as their notes are gone.
+- **Results are not ids.** What a scan found (`virus-scan.json`,
+  `downloads-scan.json`, the other result files), the file baseline and the
+  list of Wi-Fi networks Stop auto-joining changed keep their names and
+  paths: the panel shows them, and Undo needs them. They hold what anyone
+  running as you can read from the system anyway, all mode 0600.
+- **Carrying over.** Before keyed ids, ids were plain SHA-256 hashes, and
+  the kept list also stored each item's name. After each full check Vigil
+  carries old ids over to keyed ones for the items it just listed and drops
+  the names. An old kept id whose item is no longer listed is dropped once
+  every list it could belong to was read in full (otherwise it waits,
+  nameless); an old false positive whose detection is gone is dropped. An
+  old review fingerprint is replaced when its finding shows; until then it
+  stays, so a review is never lost.
 
 ## Files
 
@@ -449,17 +499,18 @@ say where they connect before they run.
   else re-hashes, and a different hash, a missing file or a link in its
   place counts the detection again. The panel asks first, on one card that
   lists every ticked file; there is no "all". The helper verbs are
-  `vigil ignore|unignore <id>...`, at most 150 distinct ids of 16 hex
+  `vigil ignore|unignore <id>...`, at most 150 distinct keyed ids of 16 hex
   digits, and marking takes only detections still in the last scan whose
-  file it could read.
+  file it could read. The note keeps the id and the file's hash, not its
+  path or the signature name.
 - **Orphaned and foreign packages** are listed as you, read-only, with
   `pacman -Qdti` and `pacman -Qmi` (name, version, description and size;
   4 MiB cap), keeping only names that follow Arch's rules. **Other plugins**
   are listed from `~/.config/omarchy/plugins` without following links. Each
-  item is named to the panel by an id (16 hex digits of a SHA-256 of its
-  kind and name; for a plugin also what its code can do, so a plugin you
-  kept that gains a capability is counted again), and carries its name only
-  for the remove command.
+  item is named to the panel by a keyed id (see [Ids](#ids)) of its kind and
+  name; for a plugin also what its code can do, so a plugin you kept that
+  gains a capability is counted again. It carries its name only for the
+  remove command.
 - **Leftover app data** reads, never runs: pacman's `desc` files in
   `/var/lib/pacman/local` (names, provides and replaces only, 64 KiB cap
   each), the names in `/usr/bin`, `/usr/share`, `/usr/lib`, `/etc`, `/opt`
@@ -470,8 +521,8 @@ say where they connect before they run.
   says so and lists nothing, since an incomplete survey would list things
   that are in use. Folder walks never follow links, and a folder too big
   to walk within the limit is treated as in use.
-- Each leftover is named to the panel by an id: 16 hex digits of the
-  SHA-256 of its place and name. File names never reach a command line.
+- Each leftover is named to the panel by a keyed id of its place and name
+  (see [Ids](#ids)). File names never reach a command line.
   The verbs are `vigil keep|unkeep <id>...` (Vigil's notes in `kept.json`,
   nothing else, for every list; keeping takes only ids a list shows right
   now) and `vigil trash <id>...`, each

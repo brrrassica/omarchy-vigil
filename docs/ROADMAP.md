@@ -227,6 +227,17 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       items are now one list, `kept.json`, for every row (an earlier
       build's `kept-leftovers.json` is read and folded in). Those rows lose
       Mark as reviewed, since Keep reviews them item by item.
+- [x] **Keyed ids.** Every id Vigil hands the panel, puts on a command line
+      or writes to its notes (kept items, false positives, reviewed and seen
+      findings) is an HMAC-SHA256 under a random key made for this install
+      (`id-key`, mode 0600), not a plain SHA-256 that could be reversed by
+      hashing every package or plugin name. `kept.json` holds only ids and
+      dates, and false positives only the id and the file's hash and times
+      (no path, no signature name). Notes from before are carried over once,
+      after a full check, and their names dropped. This hides what you trust
+      from copies of the notes and from other accounts; it cannot hide it
+      from a program running as you, which can read the key, and the docs say
+      so.
 - [x] Nothing is cut short: check results, trash and keep messages are
       shown whole (up to 2000 characters, the same limit on both sides),
       and summaries and how-to texts get the panel's own limits. On the

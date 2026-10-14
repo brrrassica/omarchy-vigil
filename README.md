@@ -577,7 +577,7 @@ servers), Flatpak and firmware updates, and `omarchy-update`.
 
 | Path | Written by | When |
 |---|---|---|
-| `~/.local/state/omarchy-vigil/state.json` | the helper, mode 0600 | every check: which findings you have already seen, which you marked as reviewed, and one score per day for 30 days |
+| `~/.local/state/omarchy-vigil/state.json` | the helper, mode 0600 | every check: which findings you have already seen and which you marked as reviewed (as keyed fingerprints), and one score per day for 30 days |
 | `~/.local/state/omarchy-vigil/baseline.json` | the helper, mode 0600 | first check, and when you accept file changes: fingerprints (not contents) of the watched files |
 | `~/.local/state/omarchy-vigil/arch-audit.json` | the helper, mode 0600 | each daily check: package names and severities an update fixes |
 | `~/.local/state/omarchy-vigil/osv.json` | the helper, mode 0600 | each daily check: known-malicious packages found, if any, and which folders were checked |
@@ -600,8 +600,9 @@ servers), Flatpak and firmware updates, and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/flatpak.json` | the helper, mode 0600 | each daily check: Flatpak apps with updates waiting |
 | `~/.local/state/omarchy-vigil/wifi-autojoin-off` | the Stop auto-joining action | the networks it changed, so Undo puts back exactly those |
 | `~/.local/state/omarchy-vigil/checkup-db/` | `checkupdates`, as you | each daily check: its private copy of the package databases (a few MB) |
-| `~/.local/state/omarchy-vigil/ignored-detections.json` | the helper, mode 0600 | when you mark a virus detection as a false positive: the file's path, the signature name and the file's SHA-256 |
-| `~/.local/state/omarchy-vigil/kept.json` | the helper, mode 0600 | when you press Keep on any list: each item's id, which list, and what it is (a folder, a package or a plugin name). An earlier build's `kept-leftovers.json` is read too, and folded into this file the next time you keep something |
+| `~/.local/state/omarchy-vigil/id-key` | the helper, mode 0600 | once: 32 random bytes, the key every id Vigil writes is hashed with, so the notes below cannot be matched to names without it (see below) |
+| `~/.local/state/omarchy-vigil/ignored-detections.json` | the helper, mode 0600 | when you mark a virus detection as a false positive: its keyed id and the file's SHA-256 and size and times (to notice if it changes), no path or signature name |
+| `~/.local/state/omarchy-vigil/kept.json` | the helper, mode 0600 | when you press Keep on any list: each item's keyed id and the date, nothing that names it. Notes from before keyed ids (including an earlier build's `kept-leftovers.json`) are carried over after the next full check, and the names they held are dropped |
 | `~/.local/share/Trash/files/`, `~/.local/share/Trash/info/` | the helper | only when you move a leftover to the trash: the item itself, and a `.trashinfo` file with where it came from, as every file manager writes |
 | `~/.local/state/omarchy-vigil/busy/` | the helper, mode 0700, empty | once: the folder Vigil locks so only one scan or update runs at a time |
 | `/usr/local/bin/bumblebee` | the Install or Install Bumblebee button, as root | only when you press one: Perplexity's program, version 0.1.2, checked against the SHA-256 in Vigil's code |
@@ -619,6 +620,18 @@ servers), Flatpak and firmware updates, and `omarchy-update`.
 Every file in `/etc` that Vigil creates starts with the line
 `# Written by Vigil (keasbeexd.vigil)`. ClamUI, the scanners and the Omarchy commands Vigil launches keep their own
 files; see their documentation.
+
+**Ids are keyed.** What you kept, marked as a false positive or reviewed is
+stored as an id: a hash made with this install's own random key (`id-key`),
+not a plain hash of a name. Package and plugin names are public, so a plain
+hash could be turned back into the name by trying every name; a keyed one
+cannot without the key. So these notes, a backup of them, or another account
+reading Vigil's command line while it runs, do not reveal what you trust. It
+does not stop a program already running as you, which can read the key as
+Vigil does (and could change Vigil itself); a kept item therefore always
+stays on its list, with a lock. What a scan found (paths, package names) is
+kept as is, since the panel shows it. The
+[security model](docs/SECURITY-MODEL.md#ids) has the details.
 
 ## Removing
 
