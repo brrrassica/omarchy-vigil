@@ -79,7 +79,7 @@ These hold for every pillar, now and in later phases:
 | Part | Runs as | Does |
 |---|---|---|
 | `Panel.qml` + `Model.js` | you, inside `omarchy-shell` | Draws the lighthouse and panel, starts the helper, validates its output, launches confirmed actions. |
-| `bin/vigil` | you, as a child process | Reads local settings and returns one JSON report; performs the helper actions (a closed list), and moves leftovers you choose to the trash. |
+| `bin/vigil` | you, as a child process | Runs the quick check (reads local settings and files) and returns one JSON report; performs the helper actions (a closed list), and moves leftovers you choose to the trash. |
 | Script actions | root through `pkexec` (Omarchy's password dialog), or you | Constant scripts from `Model.js`, shown in full on a confirmation first; what they print is shown in the panel. |
 | Terminal actions | you, in a visible terminal | Omarchy's own interactive commands, and choosing an SSH passphrase. |
 | App actions | you | Open ClamUI with a fixed argv: `/usr/bin/clamui`, or `/usr/bin/flatpak run io.github.linx_systems.ClamUI`. |

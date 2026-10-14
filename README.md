@@ -428,10 +428,11 @@ setting on its own.
 
 Vigil runs no service, timer or daemon of its own. While you are logged in:
 
-- **A check every 30 minutes** (the `refreshMinutes` setting), from one
-  monitor's copy only, at lowered priority. It reads files only, and every
-  folder walk has a time and size limit (a few seconds), so even a huge home
-  folder cannot make it slow. Other monitors check only when you open their
+- **The quick check every 30 minutes** (the `refreshMinutes` setting), from
+  one monitor's copy only, at lowered priority. It reads files only, and every
+  folder walk has a time and size limit (a few seconds; the survey for
+  leftover app data has four), so even a huge home folder cannot make it
+  slow. Other monitors check only when you open their
   panel.
 - **The background checks** (the daily check, and the weekly and update
   checks once a week each) at low priority; the virus scans themselves run
