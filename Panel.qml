@@ -1165,7 +1165,7 @@ Panel {
               RunCell {
                 id: runDaily; kind: "daily-check"; mode: "daily"; label: "Daily check"
                 caption: runStrip.captions.daily; width: naturalWidth + runStrip.spare
-                tip: "Now: ClamAV scan of ~/Downloads, System update check, Flatpak update check, Bumblebee scan, settings checks"
+                tip: "Now: ClamAV scan of ~/Downloads, System update check, Flatpak update check, Bumblebee scan, quick check"
               }
               RunCell {
                 id: runWeekly; kind: "weekly-check"; mode: "weekly"; label: "Weekly check"
@@ -1346,7 +1346,7 @@ Panel {
               id: rowSlot
               required property var modelData
               required property int index
-              readonly property string heading: Model.rowHeading(root.visibleChecks, index)
+              readonly property string heading: Model.rowHeading(root.visibleChecks, index, root.refreshMinutes)
               readonly property string headingNote: Model.rowHeadingNote(root.visibleChecks, index)
               width: column.width
               spacing: Style.space(2)

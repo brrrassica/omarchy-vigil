@@ -141,7 +141,8 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       cards say it never counts toward the score and no run cleans
       anything.
 - [x] Every tab groups its rows under headings that say which check brings
-      them in (Settings checks, Daily check, Weekly check, Update check),
+      them in (Quick check, with how often it runs; Daily check, Weekly
+      check, Update check),
       when it has more than one. The Care tab splits **In Clean all** from
       **Not in Clean all**: Orphaned packages and Leftover app data sit at
       the bottom, under a heading and a line that say Clean all never

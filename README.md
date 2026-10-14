@@ -53,7 +53,7 @@ what it will install, asks once more, and then asks for your password.
 | | |
 |---|---|
 | Left-click the lighthouse | Open or close the panel |
-| Middle-click the lighthouse | Re-read your settings now (quick, no scans) |
+| Middle-click the lighthouse | Run the quick check now (no scans, no network) |
 | `←` `→` or `1`–`6` | Switch tabs |
 | `↑` `↓`, `Enter` | Move through findings, open one |
 | `F` | Fix the selected finding (asks first) |
@@ -88,20 +88,26 @@ Last run list. The line beside the title says when Vigil last checked; on the
 other tabs it shows the score.
 
 In the pillar tabs, rows are grouped under headings that say which check
-brings them in: **Settings checks** (every 30 minutes and whenever you open
-the panel), then **Daily check**, **Weekly check** and **Update check**. A tab
+brings them in: the **Quick check** (see below), then **Daily check**,
+**Weekly check** and **Update check**. A tab
 with only one group has no headings. Rows with nothing to do (passing, not
 applicable, or marked as reviewed) are dimmed. The key hints at the bottom
 show the keys of the tab you are on.
 
 ### When Vigil runs what
 
-Vigil has three schedules. The Overview counts down to the next run of each,
-and the Last run list names the schedule of every row.
+Behind every row is the **quick check**: it reads your settings and files
+on this computer, with no network and no scanning, in about a second. It
+runs every 30 minutes (the `refreshMinutes` setting), whenever you open the
+panel, when you middle-click the lighthouse, and first in every daily check.
+Its heading in each tab says how often.
+
+On top of it, Vigil has three schedules. The Overview counts down to the
+next run of each, and the Last run list names the schedule of every row.
 
 | What | When |
 |---|---|
-| **Daily check**: the settings checks, a virus scan of what is new in Downloads, the check for waiting system, Omarchy and Flatpak updates, a Bumblebee scan of your packages | once a day, in the background, at low priority (the settings checks also every 30 minutes and whenever you open the panel) |
+| **Daily check**: the quick check, a virus scan of what is new in Downloads, the check for waiting system, Omarchy and Flatpak updates, a Bumblebee scan of your packages | once a day, in the background, at low priority (the quick check also runs on its own, see above) |
 | **Weekly check**: the firmware check, then a virus scan of your whole home folder | once a week, in the background, at low priority |
 | **Update check**: ClamAV's virus signatures, known vulnerabilities, malicious packages, AUR status, Bumblebee's list | once a week, in the background (without the signatures, which need your password; ClamAV's own update service keeps them current anyway) |
 | Password check (accounts without a password) | only when you press **Run all**, since it needs your password |
@@ -156,7 +162,7 @@ cleaning happens only when you press a button on the Care tab.
 Below that, **Last run** lists when each scan last ran and when each
 list last updated, with the time: scans first, then updates. Each row names
 the schedule that runs it (daily check, weekly check, update check), in that
-order. The rows in each tab are ordered the same way: settings checks first,
+order. The rows in each tab are ordered the same way: the quick check first,
 then the rows of the daily, weekly and update checks. Anything that failed
 or is out of date is red.
 
@@ -280,7 +286,7 @@ lower it. A warning you mark as reviewed stops counting.
 
 Care is upkeep, not security, so it is kept apart from everything else:
 its rows never count toward the score or notify you, and no daily, weekly or
-update check cleans anything. Vigil only measures (with the settings checks);
+update check cleans anything. Vigil only measures (with the quick check);
 it cleans when you press a button here. The tab shows its rows in two
 groups:
 

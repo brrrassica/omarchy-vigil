@@ -1212,12 +1212,12 @@ function lastRunLine(run, now) {
 
 var SCAN_SOURCES = ["virus-scan", "downloads-scan", "bumblebee", "firmware", "password-check"]
 
-// The Overview's LAST RUN list: every scan (with the settings checks first),
+// The Overview's LAST RUN list: every scan (with the quick check first),
 // then every source update, each with when it last ran or updated.
 function lastRunRows(report, now) {
   if (!report) return []
   var rows = [{ label: "Scans", value: "", heading: true, problem: false },
-              { label: "Settings checks (daily check)", heading: false, problem: false,
+              { label: "Quick check (every row)", heading: false, problem: false,
                 value: "ran " + relativeDay(report.generatedAt, now) + " at " + report.generatedAt.substring(11, 16) }]
   var add = function(scan) {
     for (var i = 0; i < report.sources.length; i++) {
@@ -1427,7 +1427,7 @@ function runLines(report, ids) {
     return false
   }
   var what = {
-    "settings": "Settings checks: every row in every tab.",
+    "settings": "Quick check: every row in every tab, from your settings and files (a second or so).",
     "downloads-scan": "ClamAV scan of ~/Downloads: what is new there since the last scan.",
     "pending-updates": "System update check: waiting system and Omarchy updates (nothing is installed).",
     "flatpak": "Flatpak update check, and the updates for your own Flatpak apps (no password).",
@@ -1658,7 +1658,7 @@ function withSettings(report, autoUpdate) {
 }
 
 // The schedule each tab row belongs to: 1 daily check, 2 weekly check,
-// 3 update check. Every other row is a settings check (0), which runs
+// 3 update check. Every other row comes from the quick check (0), which runs
 // with every check, the daily one included.
 var CHECK_SCHEDULE = { "virus-scan": 1, "updates": 1, "flatpak-apps": 1, "bumblebee": 1, "firmware": 2,
                        "scanner-arch-audit": 3, "malicious-packages": 3, "aur-status": 3,
@@ -1684,11 +1684,21 @@ function rowGroup(c) {
   return CHECK_SCHEDULE.hasOwnProperty(c.id) ? CHECK_SCHEDULE[c.id] : 0
 }
 
-var GROUP_HEADINGS = { 0: "SETTINGS CHECKS", 1: "DAILY CHECK", 2: "WEEKLY CHECK", 3: "UPDATE CHECK", 100: CARE_SEPARATE_HEADING }
+// The quick check reads settings and files on this computer (no network, no
+// scan, about a second): every refreshMinutes, whenever the panel opens, on a
+// middle-click of the lighthouse, and first in every daily check. Its
+// heading says how often, from the setting.
+function quickCheckHeading(refreshMinutes) {
+  var n = Math.max(5, Math.min(1440, Math.round(Number(refreshMinutes) || 30)))
+  var every = n % 60 === 0 ? (n === 60 ? "EVERY HOUR" : "EVERY " + (n / 60) + " HOURS") : "EVERY " + n + " MINUTES"
+  return "QUICK CHECK \u00b7 " + every
+}
+
+var GROUP_HEADINGS = { 0: "QUICK CHECK", 1: "DAILY CHECK", 2: "WEEKLY CHECK", 3: "UPDATE CHECK", 100: CARE_SEPARATE_HEADING }
 
 // The heading above a row, or "": at the start of each group, on tabs that
 // have more than one. The Care tab names its groups for Clean all.
-function rowHeading(checks, index) {
+function rowHeading(checks, index, refreshMinutes) {
   if (!checks || index < 0 || index >= checks.length) return ""
   var g = rowGroup(checks[index])
   if (index > 0 && rowGroup(checks[index - 1]) === g) return ""
@@ -1696,6 +1706,7 @@ function rowHeading(checks, index) {
   for (var i = 0; i < checks.length; i++) groups[rowGroup(checks[i])] = true
   if (Object.keys(groups).length < 2) return ""
   if (checks[index].category === "care") return g === 100 ? CARE_SEPARATE_HEADING : "IN CLEAN ALL"
+  if (g === 0) return quickCheckHeading(refreshMinutes)
   return GROUP_HEADINGS.hasOwnProperty(g) ? GROUP_HEADINGS[g] : ""
 }
 
@@ -1709,7 +1720,7 @@ function checksFor(report, category) {
   var out = []
   for (var i = 0; i < report.checks.length; i++)
     if (report.checks[i].category === category) out.push(report.checks[i])
-  // Grouped like the Last run list: settings checks (every check) first, then
+  // Grouped like the Last run list: the quick check first, then
   // the daily check, weekly check, update check and ClamAV's own updates.
   // Within a group, worst first; reviewed warnings sort after the
   // information rows, just above "pass".
@@ -1889,7 +1900,7 @@ if (typeof module !== "undefined") {
     topFindings: topFindings, countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
     tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
     categoryLabel: categoryLabel, pillarCounts: pillarCounts, tabCaption: tabCaption, tabCounts: tabCounts,
-    CARE_NOTE: CARE_NOTE, rowHeading: rowHeading, rowHeadingNote: rowHeadingNote, runCaptions: runCaptions,
+    CARE_NOTE: CARE_NOTE, rowHeading: rowHeading, rowHeadingNote: rowHeadingNote, quickCheckHeading: quickCheckHeading, runCaptions: runCaptions,
     scheduleNotes: scheduleNotes, heroMeta: heroMeta, keyHints: keyHints, separateFromCleanAll: separateFromCleanAll,
     CARE_SEPARATE_HEADING: CARE_SEPARATE_HEADING, CARE_SEPARATE_NOTE: CARE_SEPARATE_NOTE, CARE_TAB_NOTE: CARE_TAB_NOTE, CARE_RUN_LINE: CARE_RUN_LINE, tabIntro: tabIntro, cleanAllPlan: cleanAllPlan,
     howTo: howTo, docsUrl: docsUrl, docsCommand: docsCommand, DOCS: DOCS, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
