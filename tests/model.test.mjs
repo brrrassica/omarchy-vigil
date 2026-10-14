@@ -371,7 +371,7 @@ test("clean all covers the offered cleanups and never orphans", () => {
   assert.deepEqual(plan.items, ["Thumbnail cache: 12.0 MB", "Package cache: 3.1 GB", "System logs: Logs take up 400M"])
   const card = M.confirmation("clean-all", "care", careReport())
   assert.equal(card.title, "Clean all")
-  assert.ok(card.lines.some(l => l.startsWith("Orphaned packages are left out")))
+  assert.ok(card.lines.some(l => l.startsWith("Orphaned packages and leftover app data are left out")))
   assert.ok(card.lines.some(l => l.includes("Omarchy asks for your password once")))
 })
 
@@ -834,6 +834,94 @@ test("leftover items that do not match the shape reject the report", () => {
                      Object.assign({}, ok, { kind: "file" }), Object.assign({}, ok, { id: "../.ssh" }),
                      { id: "0123456789abcdef", text: "x", ignored: false, kept: true }])
     assert.equal(leftoverReport([bad]), null, JSON.stringify(bad))
+})
+
+test("each tab's caption shows its most urgent count; Overview sums the security pillars, never Care", () => {
+  const c = (category, status, extra = {}) => check(Object.assign({ id: category + "-" + status + Math.random().toString(16).slice(2, 8),
+    category, status, weight: 0, fix: { kind: "none", action: "", label: "" } }, extra))
+  const r = parse(report({ checks: [c("harden", "fail", { weight: 3 }), c("harden", "warn", { weight: 1 }), c("detect", "info"),
+    c("supply", "warn", { weight: 1 }), c("supply", "info"), c("privacy", "pass"), c("care", "warn"), c("care", "info"),
+    c("care", "pass"), c("privacy", "warn", { weight: 1, dismissible: true, dismissed: true })] }))
+  const cap = (tab) => { const x = M.tabCaption(r, tab); return [x.count, x.label, x.tone] }
+  assert.deepEqual(cap("overview"), ["1", "to fix", "urgent"])
+  assert.deepEqual(cap("harden"), ["1", "to fix", "urgent"])
+  assert.deepEqual(cap("detect"), ["1", "note", "dim"])
+  assert.deepEqual(cap("supply"), ["1", "to improve", "warn"])
+  assert.deepEqual(cap("privacy"), ["\u2713", "all good", "dim"])         // a reviewed warning does not count
+  assert.deepEqual(cap("care"), ["2", "to tidy", "warn"])                 // Care never says "to fix"
+  assert.equal(M.tabCaption(r, "harden").text, "1 to fix")
+  assert.equal(M.tabCaption(null, "harden").text, "")
+  assert.equal(M.tabCounts(r, "overview"), "Security: 1 to fix \u00b7 2 to improve \u00b7 2 notes")
+  assert.equal(M.tabCounts(r, "care"), "1 to improve \u00b7 1 note")
+  const tidy = parse(report({ checks: [c("care", "pass"), c("harden", "info")] }))
+  assert.deepEqual([M.tabCaption(tidy, "care").count, M.tabCaption(tidy, "care").label], ["\u2713", "tidy"])
+  assert.deepEqual([M.tabCaption(tidy, "overview").count, M.tabCaption(tidy, "overview").label], ["1", "note"])
+})
+
+test("the Overview, the Care tab and the run cards say Care is never part of a run", () => {
+  assert.match(M.CARE_NOTE, /never counts toward the score/)
+  assert.match(M.CARE_NOTE, /only when you press a button on the Care tab/)
+  assert.match(M.CARE_TAB_NOTE, /not part of the score or of the daily, weekly and update checks/)
+  const r = parse(report())
+  for (const kind of ["daily-check", "full-scan"])
+    assert.ok(M.confirmation(kind, "all", r, "/home/a").lines.includes(M.CARE_RUN_LINE), kind)
+})
+
+test("on the Care tab, what Clean all leaves alone comes last, under its own heading", () => {
+  const care = (id, status) => check({ id, category: "care", status, weight: 0, title: id, fix: { kind: "none", action: "", label: "" } })
+  const r = parse(report({ checks: [care("leftovers", "info"), care("orphans", "info"), care("trash", "pass"),
+    care("thumbnails", "warn"), care("journal", "info"), care("pacman-cache", "pass")] }))
+  const rows = M.checksFor(r, "care")
+  assert.deepEqual(rows.slice(-2).map(c => c.id), ["orphans", "leftovers"])
+  assert.deepEqual(rows.map((c, i) => M.rowHeading(rows, i)), ["IN CLEAN ALL", "", "", "", M.CARE_SEPARATE_HEADING, ""])
+  assert.deepEqual(rows.map((c, i) => M.rowHeadingNote(rows, i)), ["", "", "", "", M.CARE_SEPARATE_NOTE, ""])
+  assert.equal(M.CARE_SEPARATE_HEADING, "NOT IN CLEAN ALL")
+  assert.match(M.CARE_SEPARATE_NOTE, /Clean all never touches these/)
+  // Only Care: another tab never gets the heading.
+  const h = parse(report({ checks: [check({ id: "orphans", category: "harden" })] }))
+  assert.equal(M.rowHeading(M.checksFor(h, "harden"), 0), "")
+  assert.equal(M.rowHeading(rows, 99), "")
+  // And Clean all never offers them, whatever they say.
+  assert.ok(!M.cleanAllPlan(r).items.some(l => /orphans|leftovers/.test(l)))
+})
+
+test("pillar tabs head each group of rows with the check that brings it in, when there is more than one", () => {
+  const h = (id, status = "warn") => check({ id, category: "harden", status, weight: 1 })
+  const r = parse(report({ checks: [h("firmware"), h("firewall"), h("updates"), h("ssh-keys", "pass"), h("flatpak-apps")] }))
+  const rows = M.checksFor(r, "harden")
+  assert.deepEqual(rows.map(c => c.id), ["firewall", "ssh-keys", "updates", "flatpak-apps", "firmware"])
+  assert.deepEqual(rows.map((c, i) => M.rowHeading(rows, i)), ["SETTINGS CHECKS", "", "DAILY CHECK", "", "WEEKLY CHECK"])
+  const one = M.checksFor(parse(report({ checks: [h("firewall"), h("ssh-keys")] })), "harden")
+  assert.deepEqual(one.map((c, i) => M.rowHeading(one, i)), ["", ""])        // one group: no heading
+  assert.match(M.tabIntro("detect").text, /ClamAV/)
+  assert.doesNotMatch(M.tabIntro("detect").text, /rootkit/)
+})
+
+test("each run button says when its check next runs by itself", () => {
+  const now = new Date(2026, 9, 12, 10, 0)
+  const r = { generatedAt: "2026-10-12T09:58:00+0200", lastRun: { at: "2026-10-12 09:52", ok: true },
+              nextUpdate: "2026-10-19 09:52", nextFullScan: "2026-10-12 21:15", nextDaily: "now" }
+  assert.deepEqual(M.runCaptions(r, true, now, 30),
+    { daily: "next\ntoday 10:28", weekly: "next\ntoday 21:15", update: "next\nin 7 days", all: "all three\nnow" })
+  assert.deepEqual(M.runCaptions(r, false, now, 30),
+    { daily: "by hand\nonly", weekly: "by hand\nonly", update: "by hand\nonly", all: "all three\nnow" })
+  assert.equal(M.runCaptions(Object.assign({}, r, { nextUpdate: "" }), true, now, 30).update, "")
+  assert.deepEqual(M.scheduleNotes(r, true), [])
+  assert.match(M.scheduleNotes(r, false)[0], /only when you press a button/)
+  assert.match(M.scheduleNotes(Object.assign({}, r, { lastRun: { at: "x", ok: false } }), true)[0], /every source/)
+})
+
+test("the title line does not repeat the Overview's score, and key hints fit the tab", () => {
+  const now = new Date(2026, 9, 12, 10, 0)
+  const r = parse(report({ generatedAt: "2026-10-12T09:58:00+0200" }))
+  assert.equal(M.heroMeta(r, "overview", false, now), "Checked today at 09:58")
+  assert.equal(M.heroMeta(r, "harden", false, now), "Needs attention \u00b7 70/100")
+  assert.equal(M.heroMeta(r, "overview", true, now), "Checking\u2026")
+  assert.equal(M.heroMeta(null, "harden", false, now), "Not checked yet")
+  assert.match(M.keyHints("overview", "0.30.0"), /R run all/)
+  assert.doesNotMatch(M.keyHints("overview", ""), /F fix/)
+  assert.match(M.keyHints("care", ""), /C clean all/)
+  assert.doesNotMatch(M.keyHints("harden", ""), /C clean all/)
 })
 
 test("after an update, the panel names the new version instead of failing", () => {

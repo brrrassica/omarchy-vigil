@@ -111,7 +111,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.30.0 (this release): what removed apps left behind
+## 0.30.0 (this release): leftovers, and a clearer Overview and Care tab
 
 - [x] **Leftover app data** on the Care tab: settings and data in
       `~/.config`, `~/.local/share`, `~/.local/state` and the dot-folders
@@ -129,6 +129,26 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       item back; nothing is deleted, and leftovers are never part of Clean
       all. Before it moves anything the helper checks again that nothing
       uses the item and that you did not keep it.
+- [x] Overview redesign: the Pillars list is gone. Each tab carries its
+      most important count right under it (to fix, to improve, notes, all
+      good; the tooltip has every count), Overview the total of the four
+      security pillars, and Care sits past a divider with "to tidy". The run
+      buttons sit under **Run now**, each with when that check next runs by
+      itself under it, in place of three countdown lines. The title line
+      says when Vigil last checked instead of repeating the score.
+- [x] Care is shown as separate from security everywhere: a line on the
+      Overview, one on the Care tab, and one on the daily and Run all
+      cards say it never counts toward the score and no run cleans
+      anything.
+- [x] Every tab groups its rows under headings that say which check brings
+      them in (Settings checks, Daily check, Weekly check, Update check),
+      when it has more than one. The Care tab splits **In Clean all** from
+      **Not in Clean all**: Orphaned packages and Leftover app data sit at
+      the bottom, under a heading and a line that say Clean all never
+      touches them.
+- [x] Key hints show the keys of the tab you are on (C for Clean all on
+      Care). The Detect tab's intro no longer promises rootkit checks Vigil
+      stopped running; it names what it does check.
 - [ ] Later: show launchers that point to a program by name rather than
       by path, once there is a reliable way to know the PATH your session
       uses.

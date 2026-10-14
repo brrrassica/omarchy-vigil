@@ -59,7 +59,7 @@ what it will install, asks once more, and then asks for your password.
 | `F` | Fix the selected finding (asks first) |
 | `D` | Mark the selected finding as reviewed, or show it again |
 | `R` or `S` | Run all (asks first) |
-| `U` | Run update check (asks first) |
+| `U` | Update check (asks first) |
 | `C` | On the Care tab: Clean all |
 | `Esc` | Cancel a confirmation, or close |
 
@@ -74,11 +74,25 @@ The lighthouse is dim until the first check finishes, about eight seconds
 after login, and shows its beams while a scan or update runs. It takes your
 theme's urgent colour when something needs fixing and its accent colour when
 only improvements are left; every colour in Vigil comes from your Omarchy
-theme. The **Overview** tab shows your score out of 100, the countdowns to
-the next checks, the four run buttons, each pillar with how many findings it
-has to fix, to improve, and for information, and the Last run list. In the
-pillar tabs, rows with nothing to do (passing, not applicable, or marked as
-reviewed) are dimmed.
+theme.
+
+Each tab at the top of the panel says, right under it, what matters most
+there: how many findings to fix (in your theme's urgent colour), else to
+improve (accent), else notes, else "all good". Hover a tab for every count.
+Under **Overview** is the total of the four security pillars. **Care** sits
+apart, past a divider: it is upkeep, not security (see [Care](#care)).
+
+The **Overview** tab shows your score out of 100, the run buttons under
+**Run now** with when each check next runs by itself, a line on Care, and the
+Last run list. The line beside the title says when Vigil last checked; on the
+other tabs it shows the score.
+
+In the pillar tabs, rows are grouped under headings that say which check
+brings them in: **Settings checks** (every 30 minutes and whenever you open
+the panel), then **Daily check**, **Weekly check** and **Update check**. A tab
+with only one group has no headings. Rows with nothing to do (passing, not
+applicable, or marked as reviewed) are dimmed. The key hints at the bottom
+show the keys of the tab you are on.
 
 ### When Vigil runs what
 
@@ -93,16 +107,17 @@ and the Last run list names the schedule of every row.
 | Password check (accounts without a password) | only when you press **Run all**, since it needs your password |
 | Cleaning (Care) | only when you ask; Vigil only measures sizes by itself |
 
-The Overview has a button for each schedule, and one for all of them. Each
+Under **Run now**, the Overview has a button for each schedule, and one for
+all of them. Under each button is when that check next runs by itself. Each
 asks first, on a card that lists exactly what it runs:
 
-- **Run daily check** runs the daily check now. No password. Pressed, it
+- **Daily check** runs the daily check now. No password. Pressed, it
   also installs updates for your own Flatpak apps.
-- **Run weekly check** runs the weekly check now: the firmware check, then a
+- **Weekly check** runs the weekly check now: the firmware check, then a
   virus scan of your whole home folder (skipping caches, game libraries,
   `node_modules` and `.git` folders, at low priority). It can take a while;
   a notification says when it is done.
-- **Run update check** (or `U`) downloads the latest of everything Vigil
+- **Update check** (or `U`) downloads the latest of everything Vigil
   checks against: ClamAV's virus signatures first (Omarchy asks for your
   password, since they live in a system folder), then the lists of known
   security holes, malicious packages, AUR status and Bumblebee's list, and
@@ -128,13 +143,17 @@ nothing new: the panel shows "Already running" with that run's progress
 instead. Fixes, Clean all and installs show their own progress bar while
 they run, so you can close the panel and come back to it.
 
-Above the buttons, three lines count down to the next daily, weekly and
-update check, with the time in your computer's timezone when it is today or
-tomorrow: each runs a day or a week after the last one, to the minute, or at
-Vigil's next background check if it is already due. Each button resets its
-own countdown. Turning off `autoUpdate` leaves all three to the buttons.
+Under each run button is when that check next runs by itself, with the time
+in your computer's timezone when it is today or tomorrow: each runs a day or
+a week after the last one, to the minute, or at Vigil's next background
+check if it is already due. Each button resets its own countdown. Turning
+off `autoUpdate` leaves all three to the buttons ("by hand only").
 
-Below the pillars, **Last run** lists when each scan last ran and when each
+None of these runs cleans anything. Care is separate from security: its rows
+never count toward the score or notify you, and Vigil only measures them;
+cleaning happens only when you press a button on the Care tab.
+
+Below that, **Last run** lists when each scan last ran and when each
 list last updated, with the time: scans first, then updates. Each row names
 the schedule that runs it (daily check, weekly check, update check), in that
 order. The rows in each tab are ordered the same way: settings checks first,
@@ -217,7 +236,7 @@ lower it. A warning you mark as reviewed stops counting.
 | Docker group | You are in the docker group, which equals root | `omarchy-remove-security-sudoless-docker` (terminal) |
 | Security key or fingerprint | sudo takes only a password (information). On a computer with a fingerprint reader (found by Omarchy's own `omarchy-hw-fingerprint`, which only reads `/sys`), it offers fingerprint instead | `omarchy-setup-security-fingerprint` or `omarchy-setup-security-fido2` (terminal); once set up, **Stop using…** runs Omarchy's `omarchy-remove-security-fingerprint` or `-fido2` |
 | System updates | A newer Omarchy is out (warning; found by `checkupdates`, the same check Omarchy's own update indicator uses, in each daily check), or no full update in 14 days (warning) or 30 days (failure). Also says how many updates are waiting | `omarchy-update` (terminal) |
-| App updates (Flatpak) | Omarchy's updater does not update Flatpak apps. Vigil checks them each day; waiting updates are a warning. **Run daily check** and **Run all** install updates for your own apps without a password | `flatpak update` (no terminal) |
+| App updates (Flatpak) | Omarchy's updater does not update Flatpak apps. Vigil checks them each day; waiting updates are a warning. **Daily check** and **Run all** install updates for your own apps without a password | `flatpak update` (no terminal) |
 | Open Wi-Fi that joins by itself | Saved networks without a password (or with old WEP) that your laptop joins by itself, so anyone can imitate them. WPA, WPA3 and Enhanced Open never count (warning) | **Stop auto-joining**: `nmcli` sets them to join only when you choose; Undo puts back exactly those |
 | Firmware updates | The weekly check asks fwupd, which gets firmware from LVFS where hardware makers publish it. A waiting update that fixes a known security hole (a CVE, or marked high or critical) is a warning; other firmware updates are information | `omarchy-update-firmware` (terminal) |
 | Open network ports | Programs listen on the network with no firewall in front | **Show listeners** runs `ss -tulpn` as root and shows the result in the panel (read-only) |
@@ -239,7 +258,7 @@ lower it. A warning you mark as reviewed stops counting.
 
 | Check | What it does |
 |---|---|
-| Known-compromised packages | Runs Perplexity's [Bumblebee](https://github.com/perplexityai/bumblebee) in each daily check. It checks your packages, lockfiles, editor and browser extensions and MCP configs against the compromised releases Perplexity tracks, and reads files only. **Install** downloads Bumblebee 0.1.2, the version this Vigil was reviewed with, installs it only if it matches the SHA-256 written in Vigil's code, and puts it in `/usr/local/bin/bumblebee` (owned by root). Vigil never fetches a newer Bumblebee by itself: a newer version arrives with a Vigil update. When the installed one is older, the row offers **Update Bumblebee**, and **Run update check** installs it behind its one password prompt. |
+| Known-compromised packages | Runs Perplexity's [Bumblebee](https://github.com/perplexityai/bumblebee) in each daily check. It checks your packages, lockfiles, editor and browser extensions and MCP configs against the compromised releases Perplexity tracks, and reads files only. **Install** downloads Bumblebee 0.1.2, the version this Vigil was reviewed with, installs it only if it matches the SHA-256 written in Vigil's code, and puts it in `/usr/local/bin/bumblebee` (owned by root). Vigil never fetches a newer Bumblebee by itself: a newer version arrives with a Vigil update. When the installed one is older, the row offers **Update Bumblebee**, and **Update check** installs it behind its one password prompt. |
 | Known-malicious npm and Bun packages | Runs [osv-scanner](https://github.com/google/osv-scanner) over your AUR build folders (`~/.cache/yay`, `~/.cache/paru`) and global npm, Bun, mise and pnpm installs, against [OSV.dev](https://osv.dev), which includes the [OpenSSF Malicious Packages](https://github.com/ossf/malicious-packages) reports. This is how the 2026 Atomic Arch AUR attack (which pulled malware in with `bun install`) and the npm worms that run on Bun are caught. Only confirmed malware (`MAL-` entries) counts; ordinary vulnerabilities in development dependencies are left out. |
 | Known vulnerabilities | Installs arch-audit, which uses the Arch security team's tracker, and lists only the problems an update fixes. |
 | AUR package status | Asks the AUR about your AUR packages: which have left the AUR, which are now in the official repositories, and which have no maintainer (most 2026 AUR attacks took over such orphans). Information only, since packages leave the AUR for ordinary reasons too. |
@@ -259,15 +278,30 @@ lower it. A warning you mark as reviewed stops counting.
 
 ### Care
 
+Care is upkeep, not security, so it is kept apart from everything else:
+its rows never count toward the score or notify you, and no daily, weekly or
+update check cleans anything. Vigil only measures (with the settings checks);
+it cleans when you press a button here. The tab shows its rows in two
+groups:
+
+**In Clean all**: cleanups that are safe to do in one go.
+
 | Row | What it measures | Cleanup |
 |---|---|---|
 | Thumbnail cache | Previews the file manager made of your pictures and videos | Cleared without root |
 | Trash | Files you deleted in the file manager | Emptied without root, directly in its standard folders |
 | Application caches | Files apps keep in `~/.cache` to start faster | **Clear unused** (no root), see below |
-| Leftover app data | Settings and data that apps you removed left in your home folder | **Move to trash** or **Keep**, one item at a time (no root), see below |
 | Package cache | Packages pacman downloaded | `paccache -rk2` and `paccache -ruk0` (asks for your password), see below |
-| Orphaned packages | Packages nothing needs any more | `omarchy-update-orphan-pkgs`, which asks before removing anything |
 | System logs | The system journal | `journalctl --vacuum-time=2weeks` (asks for your password) |
+
+**Not in Clean all**, at the bottom of the tab under its own heading:
+removing packages, or settings you may want back, deserves a look, so you
+review these one by one.
+
+| Row | What it measures | Cleanup |
+|---|---|---|
+| Orphaned packages | Packages nothing needs any more | `omarchy-update-orphan-pkgs`, which asks before removing anything |
+| Leftover app data | Settings and data that apps you removed left in your home folder | **Move to trash** or **Keep**, one item at a time (no root), see below |
 
 **Application caches.** A file in `~/.cache` counts as unused when no app
 has read or changed it for a week, whether or not that app is open now.
@@ -328,9 +362,10 @@ is nothing to free.
 **Clean all** (or `C` on the Care tab) does every cleanup on offer in one go,
 after one confirmation that lists each item and its size: thumbnails, the
 trash and unused caches right away, then the package cache and the journal,
-for which Omarchy asks for your password once. Orphaned packages are left
-out on purpose: removing packages can take away something you use, so that
-stays a separate, reviewed step.
+for which Omarchy asks for your password once. Orphaned packages and
+leftover app data are never part of it: removing packages can take away
+something you use, and leftovers can be settings you want back, so both
+stay separate steps you review item by item.
 
 ### Accounts, history and old services
 
@@ -414,13 +449,13 @@ Vigil keeps no threat lists of its own.
 | What | Maintained by | How it stays current |
 |---|---|---|
 | Virus signatures | ClamAV (Cisco Talos) | ClamAV's own `clamav-freshclam` service, several times a day |
-| Known vulnerabilities in Arch packages | Arch Linux security team | arch-audit, once a week (and **Run update check**) |
-| Known-malicious npm, Bun and other packages | OSV.dev and the OpenSSF Malicious Packages project | osv-scanner, once a week (and **Run update check**) |
-| AUR package status | the AUR | AUR lookup, once a week (and **Run update check**) |
-| Known-compromised packages, extensions and MCP configs | Perplexity (Bumblebee's `threat_intel` catalogs) | downloaded from Perplexity's repository once a week (and **Run update check**); Bumblebee scans in each daily check |
-| Waiting system and Omarchy updates | Arch Linux and Omarchy package repositories | `checkupdates`, once a day (and **Run daily check**) |
-| Waiting Flatpak updates | Flathub, or whichever Flatpak remotes you added | `flatpak remote-ls --updates`, once a day (and **Run daily check**) |
-| Firmware updates | LVFS (hardware makers publish there) | fwupd, once a week (and **Run weekly check**) |
+| Known vulnerabilities in Arch packages | Arch Linux security team | arch-audit, once a week (and **Update check**) |
+| Known-malicious npm, Bun and other packages | OSV.dev and the OpenSSF Malicious Packages project | osv-scanner, once a week (and **Update check**) |
+| AUR package status | the AUR | AUR lookup, once a week (and **Update check**) |
+| Known-compromised packages, extensions and MCP configs | Perplexity (Bumblebee's `threat_intel` catalogs) | downloaded from Perplexity's repository once a week (and **Update check**); Bumblebee scans in each daily check |
+| Waiting system and Omarchy updates | Arch Linux and Omarchy package repositories | `checkupdates`, once a day (and **Daily check**) |
+| Waiting Flatpak updates | Flathub, or whichever Flatpak remotes you added | `flatpak remote-ls --updates`, once a day (and **Daily check**) |
+| Firmware updates | LVFS (hardware makers publish there) | fwupd, once a week (and **Weekly check**) |
 
 There is no maintained feed of malicious AUR packages; Arch's own list for
 the 2026 attacks was a one-off document. Vigil covers the AUR through what
@@ -487,7 +522,7 @@ servers), Flatpak and firmware updates, and `omarchy-update`.
 | `~/.local/share/Trash/files/`, `~/.local/share/Trash/info/` | the helper | only when you move a leftover to the trash: the item itself, and a `.trashinfo` file with where it came from, as every file manager writes |
 | `~/.local/state/omarchy-vigil/busy/` | the helper, mode 0700, empty | once: the folder Vigil locks so only one scan or update runs at a time |
 | `~/.local/state/omarchy-vigil/last-run.json` | the helper, mode 0600 | after each daily or update check: its date, time and whether every source updated |
-| `/usr/local/bin/bumblebee` | the Install, Update Bumblebee, Run update check or Run all button, as root | only when you install Bumblebee, or update an older one: Perplexity's program, version 0.1.2, checked against the SHA-256 in Vigil's code |
+| `/usr/local/bin/bumblebee` | the Install, Update Bumblebee, Update check or Run all button, as root | only when you install Bumblebee, or update an older one: Perplexity's program, version 0.1.2, checked against the SHA-256 in Vigil's code |
 | `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` | the helper | only when you set the opt-out variables |
 | `/etc/sysctl.d/90-omarchy-vigil.conf` | a script action, as root | only when you apply the kernel settings |
 | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf` | a script action, as root | only when you turn LLMNR off |

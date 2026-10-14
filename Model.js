@@ -640,7 +640,7 @@ var TERMINAL_ACTIONS = {
     title: "Update Bumblebee",
     what: ["Installs Bumblebee " + BUMBLEBEE_VERSION + " from Perplexity, the version this Vigil was reviewed with.",
            "It is installed only if it matches the checksum written into Vigil.",
-           "Run update check on the Overview does this too, behind the same password prompt.",
+           "Update check under Run now on the Overview does this too, behind the same password prompt.",
            "Technical: release archive over HTTPS, size-capped, SHA-256 checked, installed as root to /usr/local/bin/bumblebee"],
     run: BUMBLEBEE_INSTALL
   },
@@ -1075,7 +1075,7 @@ function cleanAllConfirmation(report) {
   var lines = plan.items.slice(0)
   if (plan.user) lines.push("Files are cleared right away. The trash cannot be restored; caches rebuild themselves.")
   if (plan.system) lines.push("For the package cache and logs, Omarchy asks for your password once.")
-  lines.push("Orphaned packages are left out: removing packages deserves a look, so use Review and remove.")
+  lines.push("Orphaned packages and leftover app data are left out: they deserve a look, so review them one by one at the bottom of this tab.")
   return { title: "Clean all", lines: lines }
 }
 
@@ -1204,7 +1204,7 @@ function sourceLine(src, now) {
 }
 
 function lastRunLine(run, now) {
-  if (!run || run.at === "") return "No update yet. It runs within a day, or press Run update check."
+  if (!run || run.at === "") return "No update yet. It runs within a day, or press Update check under Run now."
   var time = run.at.substring(11, 16)
   return "Last update " + relativeDay(run.at, now) + " at " + time
     + (run.ok ? ". Every source refreshed." : ". Some sources did not refresh; Vigil tries again tomorrow.")
@@ -1279,6 +1279,56 @@ function scheduleLines(report, autoUpdate, now, refreshMinutes) {
   if (report.lastRun && report.lastRun.at !== "" && !report.lastRun.ok)
     out.push("The last update could not reach every source; Vigil tries again tomorrow.")
   return out
+}
+
+// The two lines under each run button: when that check next runs by itself
+// ("next" over "today 21:40"). Run all has no schedule of its own; it runs
+// the other three at once.
+function runCaptions(report, autoUpdate, now, refreshMinutes) {
+  var out = { daily: "", weekly: "", update: "", all: "all three\nnow" }
+  if (!report) return out
+  if (!autoUpdate) {
+    out.daily = out.weekly = out.update = "by hand\nonly"
+    return out
+  }
+  var checked = localDate(report.generatedAt)
+  var nextCheck = checked ? new Date(checked.getTime() + (refreshMinutes || 30) * 60000) : null
+  var keys = { daily: report.nextDaily, weekly: report.nextFullScan, update: report.nextUpdate }
+  for (var k in keys) {
+    var when = countdown(keys[k], now, nextCheck)
+    out[k] = when === "" ? "" : "next\n" + when.replace(" at ", " ")
+  }
+  return out
+}
+
+// What the Overview says under the run buttons besides the countdowns.
+function scheduleNotes(report, autoUpdate) {
+  if (!report) return []
+  if (!autoUpdate) return ["Background checks are off (Vigil settings): they run only when you press a button."]
+  if (report.lastRun && report.lastRun.at !== "" && !report.lastRun.ok)
+    return ["The last update could not reach every source; Vigil tries again tomorrow."]
+  return []
+}
+
+// The line beside the panel's title. The Overview shows the score in large
+// type, so there it says when Vigil last checked instead.
+function heroMeta(report, tab, checking, now) {
+  if (!report) return checking ? "Checking\u2026" : "Not checked yet"
+  if (tab === "overview") {
+    var at = localDate(report.generatedAt)
+    if (checking) return "Checking\u2026"
+    if (at) return "Checked " + relativeDay(report.generatedAt, now) + " at " + pad2(at.getHours()) + ":" + pad2(at.getMinutes())
+  }
+  return levelText(report) + " \u00b7 " + report.score + "/100"
+}
+
+// The key hints at the bottom, for the tab you are on.
+function keyHints(tab, version) {
+  var keys = ["\u2190 \u2192 or 1\u20136 tabs"]
+  if (tab === "overview") keys.push("R run all", "U update check")
+  else keys.push("\u2191 \u2193 rows", "Enter details", "F fix", "D reviewed")
+  if (tab === "care") keys.push("C clean all")
+  return keys.join(" \u00b7 ") + (version ? " \u00b7 Vigil " + version : "")
 }
 
 // A progress line from a running update or scan, or null.
@@ -1418,7 +1468,7 @@ function updateConfirmation(report) {
 function dailyConfirmation(report) {
   if (!report) return null
   return { title: "Run daily check", lines: ["Runs the daily check now, in this order:"]
-    .concat(runLines(report, DAILY_IDS)).concat(["No password needed. " + DONE_LINE]) }
+    .concat(runLines(report, DAILY_IDS)).concat([CARE_RUN_LINE, "No password needed. " + DONE_LINE]) }
 }
 
 // Run weekly check: the long one.
@@ -1439,7 +1489,7 @@ function fullScanConfirmation(report) {
     .concat(DAILY_IDS.filter(function(id) { return id !== "downloads-scan" })).concat(WEEKLY_IDS)
   return { title: "Run all", lines: ["Runs the update check, the daily check and the weekly check, in this order:"]
     .concat(runLines(report, ids))
-    .concat(["The ClamAV scan of ~ includes Downloads, so ~/Downloads is not scanned twice.",
+    .concat(["The ClamAV scan of ~ includes Downloads, so ~/Downloads is not scanned twice.", CARE_RUN_LINE,
              "Omarchy asks for your password at the start, up to twice. " + DONE_LINE]) }
 }
 
@@ -1614,6 +1664,46 @@ var CHECK_SCHEDULE = { "virus-scan": 1, "updates": 1, "flatpak-apps": 1, "bumble
                        "scanner-arch-audit": 3, "malicious-packages": 3, "aur-status": 3,
                        "scanner-clamav": 3 }
 
+// Care rows that are never part of Clean all: removing packages, or settings
+// you might want back, deserves a look item by item. They sort last on the
+// Care tab, under their own heading.
+var CARE_SEPARATE = ["orphans", "leftovers"]
+var CARE_SEPARATE_HEADING = "NOT IN CLEAN ALL"
+var CARE_SEPARATE_NOTE = "Removing packages, or settings you may want back, deserves a look. Clean all never touches these: review them one by one."
+
+function separateFromCleanAll(check) {
+  return !!check && check.category === "care" && inList(check.id, CARE_SEPARATE)
+}
+
+// Which group a row belongs to on its tab, in the order the tab shows them:
+// settings (checked all the time), then what the daily, weekly and update
+// checks bring in; on the Care tab, what Clean all covers, then what it
+// leaves alone.
+function rowGroup(c) {
+  if (separateFromCleanAll(c)) return 100
+  return CHECK_SCHEDULE.hasOwnProperty(c.id) ? CHECK_SCHEDULE[c.id] : 0
+}
+
+var GROUP_HEADINGS = { 0: "SETTINGS CHECKS", 1: "DAILY CHECK", 2: "WEEKLY CHECK", 3: "UPDATE CHECK", 100: CARE_SEPARATE_HEADING }
+
+// The heading above a row, or "": at the start of each group, on tabs that
+// have more than one. The Care tab names its groups for Clean all.
+function rowHeading(checks, index) {
+  if (!checks || index < 0 || index >= checks.length) return ""
+  var g = rowGroup(checks[index])
+  if (index > 0 && rowGroup(checks[index - 1]) === g) return ""
+  var groups = {}
+  for (var i = 0; i < checks.length; i++) groups[rowGroup(checks[i])] = true
+  if (Object.keys(groups).length < 2) return ""
+  if (checks[index].category === "care") return g === 100 ? CARE_SEPARATE_HEADING : "IN CLEAN ALL"
+  return GROUP_HEADINGS.hasOwnProperty(g) ? GROUP_HEADINGS[g] : ""
+}
+
+// The line under a heading, or "": only the Care rows Clean all leaves alone.
+function rowHeadingNote(checks, index) {
+  return rowHeading(checks, index) === CARE_SEPARATE_HEADING ? CARE_SEPARATE_NOTE : ""
+}
+
 function checksFor(report, category) {
   if (!report) return []
   var out = []
@@ -1623,7 +1713,8 @@ function checksFor(report, category) {
   // the daily check, weekly check, update check and ClamAV's own updates.
   // Within a group, worst first; reviewed warnings sort after the
   // information rows, just above "pass".
-  function group(c) { return CHECK_SCHEDULE.hasOwnProperty(c.id) ? CHECK_SCHEDULE[c.id] : 0 }
+  // On the Care tab, what Clean all leaves alone comes last.
+  function group(c) { return rowGroup(c) + (separateFromCleanAll(c) ? CARE_SEPARATE.indexOf(c.id) / 10 : 0) }
   function rank(c) { return c.dismissed ? STATUSES.indexOf("info") + 0.5 : STATUSES.indexOf(c.status) }
   out.sort(function(a, b) {
     var d = group(a) - group(b) || rank(a) - rank(b)
@@ -1704,6 +1795,57 @@ function pillarCounts(fails, warns, notes) {
   return parts.length ? parts.join(" \u00b7 ") : "\u2713 all good"
 }
 
+// The security pillars. Care is upkeep, not security: its rows never count
+// toward the score or notify, and no run cleans anything.
+var SECURITY_PILLARS = ["harden", "detect", "supply", "privacy"]
+
+// Which of a pillar's findings matter most, for the caption under its tab:
+// the most urgent kind only, as a number over a word ("2" over "to fix"), so
+// every tab's caption has the same two lines; its tooltip has every count.
+// tone is "urgent" (to fix), "warn" (to improve) or "dim" (nothing to do).
+function caption(count, label, tone) {
+  return { count: String(count), label: label, tone: tone, text: count + " " + label }
+}
+
+function tabCaption(report, tab) {
+  if (!report) return { count: "", label: "", tone: "dim", text: "" }
+  if (tab === "care") {
+    var warn = countBy(report, "care", "warn")
+    var tidy = warn + countBy(report, "care", "info") + countBy(report, "care", "fail")
+    return tidy ? caption(tidy, "to tidy", warn ? "warn" : "dim") : caption("\u2713", "tidy", "dim")
+  }
+  var cats = tab === "overview" ? SECURITY_PILLARS : (inList(tab, SECURITY_PILLARS) ? [tab] : [])
+  if (cats.length === 0) return { count: "", label: "", tone: "dim", text: "" }
+  var f = 0, w = 0, n = 0
+  for (var i = 0; i < cats.length; i++) {
+    f += countBy(report, cats[i], "fail")
+    w += countBy(report, cats[i], "warn")
+    n += countBy(report, cats[i], "info")
+  }
+  if (f) return caption(f, "to fix", "urgent")
+  if (w) return caption(w, "to improve", "warn")
+  if (n) return caption(n, n === 1 ? "note" : "notes", "dim")
+  return caption("\u2713", "all good", "dim")
+}
+
+// Every count of a tab, for its tooltip and the top of its page.
+function tabCounts(report, tab) {
+  if (!report) return ""
+  var cats = tab === "overview" ? SECURITY_PILLARS : (inList(tab, SECURITY_PILLARS.concat(["care"])) ? [tab] : [])
+  if (cats.length === 0) return ""
+  var f = 0, w = 0, n = 0
+  for (var i = 0; i < cats.length; i++) {
+    f += countBy(report, cats[i], "fail")
+    w += countBy(report, cats[i], "warn")
+    n += countBy(report, cats[i], "info")
+  }
+  return (tab === "overview" ? "Security: " : "") + pillarCounts(f, w, n)
+}
+
+var CARE_NOTE = "Care is separate from security: it never counts toward the score, and the checks above never clean anything. Vigil cleans only when you press a button on the Care tab."
+var CARE_TAB_NOTE = "Separate from security: not part of the score or of the daily, weekly and update checks. Nothing is cleaned until you press a button."
+var CARE_RUN_LINE = "Nothing on the Care tab is cleaned: that happens only when you press a button there."
+
 function categoryLabel(category) {
   return { overview: "Overview", harden: "Harden", detect: "Detect", supply: "Supply",
            privacy: "Privacy", care: "Care" }[category] || ""
@@ -1714,7 +1856,7 @@ var TAB_INTROS = {
   harden: { question: "Can someone get in?",
             text: "Settings that make this machine harder to break into." },
   detect: { question: "Is something bad already here?",
-            text: "Signs of malware, virus scanning with ClamUI, and rootkit checks." },
+            text: "Signs of malware: startup files, changed system files, and ClamAV virus scans." },
   supply: { question: "Can you trust what you installed?",
             text: "Packages with known vulnerabilities, known-malicious components, and plugins." },
   privacy: { question: "What does this machine give away?",
@@ -1746,7 +1888,10 @@ if (typeof module !== "undefined") {
     terminalAction: terminalAction, actionPlan: actionPlan, runMode: runMode, stripSudo: stripSudo, launcherPath: launcherPath, canRun: canRun, checksFor: checksFor, withSettings: withSettings,
     topFindings: topFindings, countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
     tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
-    categoryLabel: categoryLabel, pillarCounts: pillarCounts, tabIntro: tabIntro, cleanAllPlan: cleanAllPlan,
+    categoryLabel: categoryLabel, pillarCounts: pillarCounts, tabCaption: tabCaption, tabCounts: tabCounts,
+    CARE_NOTE: CARE_NOTE, rowHeading: rowHeading, rowHeadingNote: rowHeadingNote, runCaptions: runCaptions,
+    scheduleNotes: scheduleNotes, heroMeta: heroMeta, keyHints: keyHints, separateFromCleanAll: separateFromCleanAll,
+    CARE_SEPARATE_HEADING: CARE_SEPARATE_HEADING, CARE_SEPARATE_NOTE: CARE_SEPARATE_NOTE, CARE_TAB_NOTE: CARE_TAB_NOTE, CARE_RUN_LINE: CARE_RUN_LINE, tabIntro: tabIntro, cleanAllPlan: cleanAllPlan,
     howTo: howTo, docsUrl: docsUrl, docsCommand: docsCommand, DOCS: DOCS, appCommand: appCommand, APP_ACTIONS: APP_ACTIONS,
     shortDate: shortDate, historySummary: historySummary, VIGIL_MARK: VIGIL_MARK,
     relativeDay: relativeDay, sourceLine: sourceLine, lastRunLine: lastRunLine, countdown: countdown, scheduleLines: scheduleLines,

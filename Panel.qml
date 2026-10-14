@@ -844,29 +844,40 @@ Panel {
           PanelHero {
             width: parent.width
             title: "Vigil"
-            meta: Model.plain(root.report
-              ? Model.levelText(root.report) + " · " + root.report.score + "/100"
-              : (auditProc.running ? "Checking…" : "Not checked yet"), 80)
+            meta: Model.plain(Model.heroMeta(root.report, root.tab, auditProc.running, new Date()), 80)
             foreground: root.foreground
             fontFamily: root.fontFamily
           }
 
-          ButtonGroup {
+          // The tabs, each with what matters most in it right underneath.
+          // Care stands apart, past a divider: it is upkeep, not security,
+          // and never part of the score or of the scheduled checks.
+          Row {
+            id: tabStrip
             width: parent.width
-            options: [
-              { value: "overview", label: "Overview" },
-              { value: "harden", label: "Harden" },
-              { value: "detect", label: "Detect" },
-              { value: "supply", label: "Supply" },
-              { value: "privacy", label: "Privacy" },
-              { value: "care", label: "Care" }
-            ]
-            value: root.tab
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            fontSize: Style.font.bodySmall
-            focusable: false
-            onChanged: function(v) { root.selectTab(v) }
+            spacing: Style.spacing.md
+            readonly property real dividerWidth: Style.space(8)
+            // Each tab as wide as its label, as in Omarchy's ButtonGroup, and
+            // the room left over shared out evenly.
+            readonly property real spare: Math.max(0, Math.floor((width - spacing * 6 - dividerWidth
+              - tabOverview.naturalWidth - tabHarden.naturalWidth - tabDetect.naturalWidth
+              - tabSupply.naturalWidth - tabPrivacy.naturalWidth - tabCare.naturalWidth) / 6))
+            TabCell { id: tabOverview; tab: "overview"; width: naturalWidth + tabStrip.spare }
+            TabCell { id: tabHarden; tab: "harden"; width: naturalWidth + tabStrip.spare }
+            TabCell { id: tabDetect; tab: "detect"; width: naturalWidth + tabStrip.spare }
+            TabCell { id: tabSupply; tab: "supply"; width: naturalWidth + tabStrip.spare }
+            TabCell { id: tabPrivacy; tab: "privacy"; width: naturalWidth + tabStrip.spare }
+            Item {
+              width: tabStrip.dividerWidth
+              height: tabOverview.buttonHeight
+              Rectangle {
+                anchors.centerIn: parent
+                width: 1
+                height: parent.height * 0.7
+                color: root.dim
+              }
+            }
+            TabCell { id: tabCare; tab: "care"; width: naturalWidth + tabStrip.spare }
           }
 
           // Confirmation card: every action is described before it runs.
@@ -1088,7 +1099,9 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
-          // Overview: the score, the two buttons, then each pillar with its counts.
+          // Overview: the score, the run buttons with when each next runs, a
+          // word on Care, then when everything last ran. Each pillar's counts
+          // sit under its tab at the top.
           Column {
             visible: root.tab === "overview"
             width: parent.width
@@ -1125,44 +1138,49 @@ Panel {
               wrapMode: Text.WordWrap
             }
 
-            Flow {
+            // When tools Vigil works with are missing, installing them comes first.
+            Button {
+              visible: Model.missingLabel(root.report) !== ""
+              text: actionProc.running && root.actionId === "install-helpers" ? "Installing\u2026"
+                                                                                : Model.missingLabel(root.report)
+              tooltipText: "Install everything Vigil works with that is missing, in one go"
+              foreground: root.urgent
+              fontFamily: root.fontFamily
+              bordered: true
+              enabled: !root.busy && !feedProc.running && !root.runElsewhere && root.pending === null
+              onClicked: root.requestInstallHelpers()
+            }
+
+            // One button per schedule, each with when it next runs by itself
+            // right under it, then all three at once.
+            SectionHeading { visible: root.report !== null; text: "RUN NOW" }
+            Row {
+              id: runStrip
+              visible: root.report !== null
               width: parent.width
-              topPadding: Style.space(6)
-              spacing: Style.space(8)
-              // When tools Vigil works with are missing, installing them comes first.
-              Button {
-                visible: Model.missingLabel(root.report) !== ""
-                text: actionProc.running && root.actionId === "install-helpers" ? "Installing\u2026"
-                                                                                  : Model.missingLabel(root.report)
-                tooltipText: "Install everything Vigil works with that is missing, in one go"
-                foreground: root.urgent
-                fontFamily: root.fontFamily
-                bordered: true
-                enabled: !root.busy && !feedProc.running && !root.runElsewhere && root.pending === null
-                onClicked: root.requestInstallHelpers()
+              spacing: Style.spacing.md
+              readonly property var captions: Model.runCaptions(root.report, root.autoUpdate, new Date(), root.refreshMinutes)
+              readonly property real spare: Math.max(0, Math.floor((width - spacing * 3 - runDaily.naturalWidth
+                - runWeekly.naturalWidth - runUpdate.naturalWidth - runAll.naturalWidth) / 4))
+              RunCell {
+                id: runDaily; kind: "daily-check"; mode: "daily"; label: "Daily check"
+                caption: runStrip.captions.daily; width: naturalWidth + runStrip.spare
+                tip: "Now: ClamAV scan of ~/Downloads, System update check, Flatpak update check, Bumblebee scan, settings checks"
               }
-              // One button per schedule line, in the same order, then all of them.
-              Repeater {
-                model: [
-                  { kind: "daily-check", mode: "daily", label: "Run daily check",
-                    tip: "Now: ClamAV scan of ~/Downloads, System update check, Flatpak update check, Bumblebee scan, settings checks" },
-                  { kind: "weekly-check", mode: "weekly", label: "Run weekly check",
-                    tip: "Now: Firmware check and ClamAV scan of ~ (your whole home folder)" },
-                  { kind: "update-sources", mode: "sources", label: "Run update check",
-                    tip: "Now: ClamAV signatures and every list Vigil checks against. No scan" },
-                  { kind: "full-scan", mode: "full", label: "Run all",
-                    tip: "Now: the update, daily and weekly checks, plus the password check" }
-                ]
-                delegate: Button {
-                  required property var modelData
-                  text: feedProc.running && root.feedMode === modelData.mode ? "Running\u2026" : modelData.label
-                  tooltipText: modelData.tip
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  bordered: modelData.mode === "full"
-                  enabled: !feedProc.running && !root.runElsewhere && !root.busy && root.pending === null
-                  onClicked: root.requestRun(modelData.kind)
-                }
+              RunCell {
+                id: runWeekly; kind: "weekly-check"; mode: "weekly"; label: "Weekly check"
+                caption: runStrip.captions.weekly; width: naturalWidth + runStrip.spare
+                tip: "Now: Firmware check and ClamAV scan of ~ (your whole home folder)"
+              }
+              RunCell {
+                id: runUpdate; kind: "update-sources"; mode: "sources"; label: "Update check"
+                caption: runStrip.captions.update; width: naturalWidth + runStrip.spare
+                tip: "Now: ClamAV signatures and every list Vigil checks against. No scan"
+              }
+              RunCell {
+                id: runAll; kind: "full-scan"; mode: "full"; label: "Run all"; primary: true
+                caption: runStrip.captions.all; width: naturalWidth + runStrip.spare
+                tip: "Now: the update, daily and weekly checks, plus the password check"
               }
             }
             // While an update or scan runs: what it is doing, and how far along.
@@ -1203,7 +1221,7 @@ Panel {
               }
             }
             Repeater {
-              model: Model.scheduleLines(root.report, root.autoUpdate, new Date(), root.refreshMinutes)
+              model: Model.scheduleNotes(root.report, root.autoUpdate)
               delegate: Text {
                 required property var modelData
                 textFormat: Text.PlainText
@@ -1216,14 +1234,17 @@ Panel {
               }
             }
 
-            SectionHeading { visible: root.report !== null; text: "PILLARS" }
-            Repeater {
-              model: root.report ? ["harden", "detect", "supply", "privacy", "care"] : []
-              delegate: CategoryRow {
-                required property var modelData
-                width: column.width
-                category: String(modelData)
-              }
+            // The run buttons above never clean: Care is the user's call.
+            Text {
+              textFormat: Text.PlainText
+              visible: root.report !== null
+              width: parent.width
+              topPadding: Style.space(4)
+              text: Model.CARE_NOTE
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
 
             // When every check and scan last ran, and when each source last updated.
@@ -1287,6 +1308,17 @@ Panel {
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
             }
+            Text {
+              textFormat: Text.PlainText
+              visible: root.tab === "care"
+              width: parent.width
+              topPadding: Style.space(2)
+              text: Model.CARE_TAB_NOTE
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
             Item {
               visible: root.tab === "care" && root.cleanPlan.items.length > 0
               width: parent.width
@@ -1307,21 +1339,43 @@ Panel {
           Repeater {
             id: rowsRepeater
             model: root.visibleChecks
-            delegate: CheckRow {
+            // A row, and at the start of each group a heading: which check
+            // brings the rows in (settings, daily, weekly, update), and on the
+            // Care tab what Clean all covers and what it leaves alone.
+            delegate: Column {
+              id: rowSlot
               required property var modelData
               required property int index
+              readonly property string heading: Model.rowHeading(root.visibleChecks, index)
+              readonly property string headingNote: Model.rowHeadingNote(root.visibleChecks, index)
               width: column.width
-              check: modelData
-              selected: root.cursorActive && root.rowIndex === index
-              expanded: root.expandedId === modelData.id
-              onClicked: { root.rowIndex = index; root.toggleExpanded(modelData) }
+              spacing: Style.space(2)
+              SectionHeading { visible: rowSlot.heading !== ""; text: rowSlot.heading }
+              Text {
+                textFormat: Text.PlainText
+                visible: rowSlot.headingNote !== ""
+                width: parent.width
+                bottomPadding: Style.space(4)
+                text: rowSlot.headingNote
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+              CheckRow {
+                width: parent.width
+                check: rowSlot.modelData
+                selected: root.cursorActive && root.rowIndex === rowSlot.index
+                expanded: root.expandedId === rowSlot.modelData.id
+                onClicked: { root.rowIndex = rowSlot.index; root.toggleExpanded(rowSlot.modelData) }
+              }
             }
           }
 
           Text {
             textFormat: Text.PlainText
             width: parent.width
-            text: "R run all · ← → tabs · Enter details · F fix · D reviewed · U update check · Vigil " + (root.report ? root.report.version : "")
+            text: Model.keyHints(root.tab, root.report ? root.report.version : "")
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -1348,43 +1402,84 @@ Panel {
     }
   }
 
-  component CategoryRow: CursorSurface {
-    id: catRow
-    property string category: ""
-    readonly property int fails: Model.countBy(root.report, category, "fail")
-    readonly property int warns: Model.countBy(root.report, category, "warn")
-    readonly property int notes: Model.countBy(root.report, category, "info")
-    foreground: root.foreground
-    implicitHeight: catText.implicitHeight + Style.spacing.rowPaddingX
-
-    MouseArea {
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
-      onClicked: root.selectTab(catRow.category)
-    }
-    Text {
-      id: catText
-      textFormat: Text.PlainText
-      anchors.left: parent.left
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.leftMargin: Style.space(10)
-      text: Model.categoryLabel(catRow.category)
-      color: root.foreground
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.body
-      font.bold: true
+  // One tab: Omarchy's own bordered button, as in its ButtonGroup, with the
+  // pillar's most important count under it. The tooltip has every count.
+  component TabCell: Column {
+    id: cell
+    property string tab: ""
+    readonly property var caption: Model.tabCaption(root.report, tab)
+    readonly property alias buttonHeight: tabButton.height
+    readonly property real naturalWidth: tabButton.implicitWidth
+    readonly property color tone: caption.tone === "urgent" ? root.urgent
+      : (caption.tone === "warn" ? root.warnColor : root.dim)
+    spacing: Style.space(2)
+    Button {
+      id: tabButton
+      width: cell.width
+      text: Model.categoryLabel(cell.tab)
+      tooltipText: Model.plain(Model.tabCounts(root.report, cell.tab), 120)
+      selected: root.tab === cell.tab
+      bordered: true
+      foreground: root.foreground
+      background: Commons.Color.background
+      fontFamily: root.fontFamily
+      fontSize: Style.font.bodySmall
+      onClicked: root.selectTab(cell.tab)
     }
     Text {
       textFormat: Text.PlainText
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      anchors.rightMargin: Style.space(10)
-      text: Model.pillarCounts(catRow.fails, catRow.warns, catRow.notes)
-      color: catRow.fails ? root.urgent : (catRow.warns ? root.warnColor : root.dim)
+      width: cell.width
+      horizontalAlignment: Text.AlignHCenter
+      // A space before the first check, so the strip does not grow when it lands.
+      text: cell.caption.count !== "" ? cell.caption.count : " "
+      color: cell.tone
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall
-      font.bold: catRow.fails > 0
+      font.bold: cell.caption.tone !== "dim"
+    }
+    Text {
+      textFormat: Text.PlainText
+      width: cell.width
+      horizontalAlignment: Text.AlignHCenter
+      text: cell.caption.label !== "" ? cell.caption.label : " "
+      color: cell.tone
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      wrapMode: Text.WordWrap
+    }
+  }
+
+  // One run button with when it next runs by itself under it.
+  component RunCell: Column {
+    id: runCell
+    property string kind: ""
+    property string mode: ""
+    property string label: ""
+    property string caption: ""
+    property string tip: ""
+    property bool primary: false
+    readonly property real naturalWidth: runButton.implicitWidth
+    spacing: Style.space(2)
+    Button {
+      id: runButton
+      width: runCell.width
+      text: feedProc.running && root.feedMode === runCell.mode ? "Running\u2026" : runCell.label
+      tooltipText: runCell.tip
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+      bordered: runCell.primary
+      enabled: !feedProc.running && !root.runElsewhere && !root.busy && root.pending === null
+      onClicked: root.requestRun(runCell.kind)
+    }
+    Text {
+      textFormat: Text.PlainText
+      width: runCell.width
+      horizontalAlignment: Text.AlignHCenter
+      text: runCell.caption !== "" ? runCell.caption : " "
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      wrapMode: Text.WordWrap
     }
   }
 

@@ -2842,7 +2842,7 @@ def check_flatpak():
     cache = feed_cache("flatpak")
     if cache is None:
         return result(cid, cat, title, "info", "Checked with the next update.", why, weight=0,
-                      howto="Press Run daily check on the Overview.")
+                      howto="Press Daily check under Run now on the Overview.")
     ids = {w: [x for x in cache.get(w, []) if isinstance(x, str) and _APP_ID.match(x)][:200]
            if isinstance(cache.get(w), list) else [] for w in ("user", "system")}
     total = len(ids["user"]) + len(ids["system"])
@@ -2854,7 +2854,7 @@ def check_flatpak():
     return result(cid, cat, title, "warn", "%d Flatpak app%s %s updates waiting (%s)." % (
         total, "" if total == 1 else "s", "has" if total == 1 else "have", when), why, clean_block(lines),
         fix=fix("terminal", "update-flatpaks", "Update apps"), weight=1,
-        howto="Press Update apps, or Run daily check on the Overview (it updates your own apps; apps "
+        howto="Press Update apps, or Daily check under Run now on the Overview (it updates your own apps; apps "
               "installed for every account ask for your password, so only Update apps does those).")
 
 
@@ -2871,7 +2871,7 @@ def check_firmware():
     cache = feed_cache("firmware")
     if cache is None:
         return result(cid, cat, title, "info", "Checked in the next weekly check.", why, weight=0,
-                      howto="Press Run weekly check on the Overview.")
+                      howto="Press Weekly check under Run now on the Overview.")
     ups = [u for u in cache.get("updates", []) if isinstance(u, dict)][:50] \
         if isinstance(cache.get("updates"), list) else []
     when = feed_when(cache)
@@ -3128,7 +3128,7 @@ def refresh_bumblebee():
         raise Refused("it is not installed")
     catalog = home_path(*STATE_DIR, BUMBLEBEE_CATALOG)
     if not exists(catalog):
-        raise Refused("its list has not been downloaded yet; press Run update check")
+        raise Refused("its list has not been downloaded yet; press Update check under Run now on the Overview")
     rc, out = run([BUMBLEBEE_BIN, "scan", "--profile", "baseline", "--exposure-catalog", catalog,
                    "--findings-only", "--output", "stdout", "--max-duration", "5m"],
                   timeout=360, limit=4 * 1024 * 1024)
@@ -3376,7 +3376,7 @@ def check_bumblebee():
     cache = feed_cache("bumblebee")
     if cache is None:
         return result(cid, cat, title, "info", "Installed. Its first check runs with the next daily check.", why,
-                      weight=0, howto="Press Run daily check on the Overview, or wait for the next one.")
+                      weight=0, howto="Press Daily check under Run now on the Overview, or wait for the next one.")
     found = [f for f in cache.get("findings", []) if isinstance(f, dict)][:500] \
         if isinstance(cache.get("findings"), list) else []
     when = feed_when(cache).replace("checked", "scanned")
@@ -3393,7 +3393,7 @@ def check_bumblebee():
         return result(cid, cat, title, "info", "Bumblebee %s is ready to install (you have %s)." % (
             ready, bumblebee_installed_version()), why, "No known-compromised packages (%s)." % when,
             fix=fix("terminal", "update-bumblebee", "Update Bumblebee"), weight=0,
-            howto="Press Update Bumblebee, or Run update check on the Overview, which does it behind the same "
+            howto="Press Update Bumblebee, or Update check under Run now on the Overview, which does it behind the same "
                   "password prompt. Vigil installs the version it was reviewed with, checked against the checksum "
                   "written in its code; newer Bumblebee versions come with Vigil updates.")
     return result(cid, cat, title, "pass", "No known-compromised packages (%s)." % when, why, weight=3)
@@ -5230,7 +5230,7 @@ CHECK_HELP = {
     "aur-packages": ("Keep only the ones you recognise and still use; remove the rest with "
                      "omarchy pkg drop <name>.",
                      ("docs", "arch-aur", "Learn more")),
-    "flatpak-apps": ("The daily check looks for Flatpak updates; Run daily check also installs those for your own apps. The Arch Wiki explains Flatpak.",
+    "flatpak-apps": ("The daily check looks for Flatpak updates; Daily check under Run now also installs those for your own apps. The Arch Wiki explains Flatpak.",
                      ("docs", "arch-flatpak", "Learn more")),
     "firmware": ("The weekly check looks for firmware updates. The Arch Wiki explains fwupd and LVFS.",
                  ("docs", "arch-fwupd", "Learn more")),

@@ -58,7 +58,7 @@ These hold for every pillar, now and in later phases:
    when you press a run button. Nothing the background checks fetch is ever
    run; results are size-capped and validated like any other input. The one
    program Vigil downloads, Bumblebee, is installed only from a button you
-   press (Install, Update Bumblebee, or Run update check and Run all when
+   press (Install, Update Bumblebee, or the Update check and Run all buttons when
    the installed one is older), never by a background check, at the
    version pinned in Vigil's code, after its checksum matches.
 6. **Nothing automatic.** Every change to your system is confirmed. Marking
@@ -159,7 +159,7 @@ program it is running, process group and all, and starts no further step.
   applies) and, in Run all, the password check. `Model.js` keeps copies of
   those two helper scripts, and a test checks they are identical to what the
   helper starts; another checks every card against the plan that runs.
-- Run update check (and Run all) updates ClamAV's signatures only when you press it (the
+- The Update check button (and Run all) updates ClamAV's signatures only when you press it (the
   background run never asks), with one constant root script through pkexec: if
   ClamAV's update service runs, it is woken with `systemctl kill
   --signal=SIGUSR1` (it then checks at once; a second freshclam would fail
@@ -175,7 +175,7 @@ program it is running, process group and all, and starts no further step.
   current. Bumblebee is installed and updated by
   one constant root script (`BUMBLEBEE_SCRIPT` in `bin/vigil`, identical
   to `BUMBLEBEE_INSTALL` in `Model.js`; a test checks), used by Install,
-  Update Bumblebee, Run update check and Run all. It takes no data from the report:
+  Update Bumblebee, Update check and Run all. It takes no data from the report:
   it installs exactly `BUMBLEBEE_VERSION` (0.1.2), and the SHA-256 of
   each release archive (amd64 and arm64) is written in `bin/vigil`, so the
   reviewed commit decides which bytes run. Nothing is taken from the
