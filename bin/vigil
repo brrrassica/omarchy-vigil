@@ -4657,9 +4657,12 @@ def kept_leftovers():
 
 
 def _leftover_text(f):
+    """Two lines for the panel: where and how big, then why and since when.
+    A line break in the name is shown as \\n, so a name cannot add a line."""
     when = time.strftime("%Y-%m", time.localtime(f["newest"])) if f["newest"] else ""
-    age = ", unchanged since %s" % when if when and f["reason"] == "no installed app uses it" else ""
-    return "%s: %s, %s%s" % (clean(f["shown"], 200), human(f["size"]), f["reason"], age)
+    age = " \u00b7 unchanged since %s" % when if when and f["reason"] == "no installed app uses it" else ""
+    shown = clean(f["shown"].replace("\r", "\\r").replace("\n", "\\n"), 200)
+    return "%s \u00b7 %s\n%s%s" % (shown, human(f["size"]), f["reason"], age)
 
 
 @check
@@ -4683,7 +4686,7 @@ def check_leftovers():
         is_kept = f["id"] in kept
         items.append({"id": f["id"], "kind": "leftover", "text": text, "kept": is_kept, "ignored": False})
         if not is_kept:
-            live.append(text)
+            live.append(text.replace("\n", ", "))
             live_size += f["size"]
     note = " %d kept." % (len(found) - len(live)) if len(found) > len(live) else ""
     if live:

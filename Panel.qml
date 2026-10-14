@@ -1670,33 +1670,58 @@ Panel {
           spacing: Style.space(8)
           Button {
             id: pickBox
-            // A kept item keeps the box's space (empty), so every item lines up.
+            // A small box, level with the item's first line. A kept item keeps
+            // the box's space (empty), so every item lines up.
             visible: itemRow.leftover
             opacity: itemRow.pickable ? 1 : 0
-            anchors.verticalCenter: parent.verticalCenter
-            width: implicitHeight
-            text: itemRow.isPicked ? "\u2713" : " "
+            anchors.top: parent.top
+            width: Style.space(14)
+            height: Style.space(14)
+            text: itemRow.isPicked ? "\u2713" : ""
             tooltipText: itemRow.isPicked ? "Unselect" : "Select, then Trash selected or Keep selected below"
             selected: itemRow.isPicked
             bordered: true
             horizontalPadding: 0
+            verticalPadding: 0
+            fontSize: Style.font.caption
             foreground: root.foreground
             fontFamily: root.fontFamily
             enabled: itemRow.pickable && !root.busy && root.pending === null
             onClicked: root.togglePicked(itemRow.modelData)
           }
-          Text {
-            textFormat: Text.PlainText
+          // A leftover reads as two lines: where and how big, then why and
+          // since when. A detection is one line.
+          Item {
+            id: itemTexts
+            readonly property var lines: String(itemRow.modelData.text).split("\n")
             width: itemRow.width - itemButtons.width - itemRow.spacing
               - (pickBox.visible ? pickBox.width + itemRow.spacing : 0)
-            anchors.verticalCenter: parent.verticalCenter
-            text: itemRow.modelData.text + (itemRow.modelData.ignored ? "  (false positive)"
-                                            : itemRow.modelData.kept ? "  (kept)" : "")
-            color: itemRow.isPicked ? root.foreground : root.dim
+            height: textLines.implicitHeight
+            anchors.verticalCenter: itemRow.leftover ? undefined : parent.verticalCenter
             opacity: itemRow.quiet ? 0.6 : 1
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            wrapMode: Text.WrapAnywhere
+            Column {
+              id: textLines
+              width: parent.width
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                text: itemTexts.lines[0] + (itemRow.modelData.ignored ? "  (false positive)" : "")
+                color: itemRow.leftover || itemRow.isPicked ? root.foreground : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+              }
+              Text {
+                textFormat: Text.PlainText
+                visible: itemTexts.lines.length > 1
+                width: parent.width
+                text: itemTexts.lines.slice(1).join(" ") + (itemRow.modelData.kept ? "  (kept)" : "")
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+              }
+            }
             MouseArea {
               anchors.fill: parent
               enabled: itemRow.pickable && !root.busy && root.pending === null

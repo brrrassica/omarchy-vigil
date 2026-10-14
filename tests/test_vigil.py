@@ -2975,7 +2975,7 @@ def leftover_home(v):
 
 
 def shown(c):
-    return sorted(i["text"].split(":")[0] for i in c["items"])
+    return sorted(i["text"].split(" \u00b7 ")[0] for i in c["items"])
 
 
 def test_leftovers_lists_only_what_nothing_claims(v):
@@ -3001,7 +3001,7 @@ def test_leftovers_says_so_when_nothing_is_left(v):
 
 def test_keep_and_stop_keeping_change_only_vigils_notes(v):
     leftover_home(v)
-    item = next(i for i in v.check_leftovers()["items"] if i["text"].startswith("~/.oldtool:"))
+    item = next(i for i in v.check_leftovers()["items"] if i["text"].startswith("~/.oldtool \u00b7"))
     assert v.set_kept(item["id"], True)["ok"] is True
     c = v.check_leftovers()
     assert c["summary"].startswith("8 left behind") and c["summary"].endswith(" 1 kept.")
@@ -3020,7 +3020,7 @@ def test_trash_moves_into_the_freedesktop_trash(v):
     leftover_home(v)
     os.rename(os.path.join(v.HOME, ".config/oldapp"), os.path.join(v.HOME, ".config/old app\n%x"))
     c = v.check_leftovers()
-    ids = {i["text"].split(":")[0]: i["id"] for i in c["items"]}
+    ids = {i["text"].split(" \u00b7 ")[0]: i["id"] for i in c["items"]}
     target = next(k for k in ids if k.startswith("~/.config/old app"))
     out = v.trash_leftovers([ids[target], ids["~/.local/bin/dead"]])
     assert out["ok"] is True and out["message"].startswith("Moved 2 items to the trash. To put one back")
@@ -3043,7 +3043,7 @@ def test_trash_moves_into_the_freedesktop_trash(v):
 
 def test_trash_checks_again_that_nothing_claims_it(v):
     leftover_home(v)
-    lid = next(i["id"] for i in v.check_leftovers()["items"] if i["text"].startswith("~/.config/oldapp:"))
+    lid = next(i["id"] for i in v.check_leftovers()["items"] if i["text"].startswith("~/.config/oldapp \u00b7"))
     put(Path(v.ROOT, "var/lib/pacman/local/oldapp-1-1/desc"), "%NAME%\noldapp\n")     # installed again since
     out = v.trash_leftovers([lid])
     assert out["ok"] is False and "no longer on the list" in out["message"]
@@ -3052,7 +3052,7 @@ def test_trash_checks_again_that_nothing_claims_it(v):
 
 def test_trash_refuses_a_link_on_the_way_and_moves_nothing(v, tmp_path):
     leftover_home(v)
-    lid = next(i["id"] for i in v.check_leftovers()["items"] if i["text"].startswith("~/.local/state/goneapp:"))
+    lid = next(i["id"] for i in v.check_leftovers()["items"] if i["text"].startswith("~/.local/state/goneapp \u00b7"))
     elsewhere = tmp_path / "elsewhere"
     os.rename(os.path.join(v.HOME, ".local/state"), elsewhere)
     os.symlink(elsewhere, os.path.join(v.HOME, ".local/state"))
@@ -3123,3 +3123,14 @@ def test_keep_and_stop_keeping_take_several_at_once(v, capsys):
     assert v.main(["vigil", "keep", ids[0], ids[0]]) == 2                  # each id once
     assert v.set_kept(["0" * 16], True)["ok"] is False                      # not on the list
 
+
+
+def test_a_leftover_reads_as_two_lines_and_a_name_cannot_add_one(v):
+    leftover_home(v)
+    os.rename(os.path.join(v.HOME, ".config/oldapp"), os.path.join(v.HOME, ".config/evil\nno installed app"))
+    texts = {i["text"].split("\n")[0].split(" · ")[0]: i["text"] for i in v.check_leftovers()["items"]}
+    old = texts["~/.oldtool"]
+    assert re.fullmatch(r"~/\.oldtool · [0-9.]+ [KMG]?B\nno installed app uses it · unchanged since \d{4}-\d{2}", old)
+    assert texts["~/.var/app/com.spotify.Client"].split("\n")[1] == "data of a Flatpak app that is no longer installed"
+    evil = texts["~/.config/evil\\nno installed app"]                       # escaped, still two lines
+    assert evil.count("\n") == 1
