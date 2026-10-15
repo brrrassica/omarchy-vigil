@@ -144,7 +144,9 @@ def test_readme_keeps_every_section():
 def test_readme_documents_removal_and_files():
     readme = (REPO / "README.md").read_text()
     assert "omarchy plugin remove %s" % PLUGIN_ID in readme
-    for path in ("~/.local/state/omarchy-vigil", "90-omarchy-vigil-opt-out", "/etc/sysctl.d/90-omarchy-vigil.conf"):
+    for path in ("~/.local/state/omarchy-vigil", "90-omarchy-vigil-opt-out", "/etc/sysctl.d/90-omarchy-vigil.conf",
+                 "90-omarchy-vigil-agents", "/etc/hosts", "/etc/chromium/policies/managed/90-omarchy-vigil.json",
+                 "gitleaks.json", "model-scan.json", "rkhunter.json", "weather.json"):
         assert path in readme, path
     assert (REPO / "LICENSE").is_file()
 
@@ -170,3 +172,20 @@ def test_only_types_available_to_plugins():
     used = set(re.findall(r"(?:^|[:\s])([A-Z][A-Za-z0-9]+)\s*\{", src, re.M))
     unknown = used - QS_UI_EXPORTS - QT_TYPES - inline
     assert unknown == set(), unknown
+
+
+def test_black_ops_is_not_part_of_the_code_or_the_docs_as_a_dependency():
+    """Vigil carries the telemetry protections itself: nothing detects, links to or hands off to Black Ops."""
+    for name in ("bin/vigil", "Model.js", "Panel.qml", "manifest.json"):
+        text = (REPO / name).read_text()
+        assert "brightwalker25.black-ops" not in text and "omarchy-black-ops" not in text, name
+    readme = (REPO / "README.md").read_text()
+    assert "Black Ops" in readme and "no watchdog" in readme       # credited, and the change is explained
+
+
+def test_docs_name_the_root_steps_and_the_update():
+    model = (REPO / "docs" / "SECURITY-MODEL.md").read_text()
+    assert "three constant pkexec commands" in model and "omarchy-update -y" in model
+    assert "rkhunter --check --sk --nocolors" in model and "GITLEAKS_CONFIG_TOML" in model
+    readme = (REPO / "README.md").read_text()
+    assert "**The Omarchy update runs just before the virus scan**" in readme

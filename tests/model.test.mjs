@@ -245,6 +245,93 @@ test("avahi undo restores the backup", () => {
   rmSync(r.dir, { recursive: true })
 })
 
+const HOSTS_BEFORE = "127.0.0.1 localhost\n::1 localhost\n10.0.0.5 nas.lan\n"
+
+test("hosts-block adds one marked block, keeps every other line, and runs twice without duplicating", () => {
+  let hosts
+  let r = runUndo("hosts-block", (d) => { hosts = place(d, "/etc/hosts", HOSTS_BEFORE) })
+  assert.equal(r.status, 0, r.out)
+  let text = readFileSync(hosts, "utf8")
+  assert.ok(text.startsWith(HOSTS_BEFORE))
+  assert.equal(text.split("\n").filter((l) => l === "# BEGIN omarchy-vigil telemetry").length, 1)
+  for (const h of M.TELEMETRY_HOSTS) {
+    assert.ok(text.includes("\n0.0.0.0 " + h + "\n"), h)
+    assert.ok(text.includes("\n:: " + h + "\n"), h)
+  }
+  assert.ok(text.endsWith("# END omarchy-vigil telemetry\n"))
+  // again: the old block is cut out first, so there is still one
+  const body = M.TERMINAL_ACTIONS["hosts-block"].run.split("/etc/").join(r.dir + "/etc/").split("sudo ").join("")
+  const again = spawnSync("/usr/bin/bash", ["-c", "( set -e; " + body + " )"], { encoding: "utf8" })
+  assert.equal(again.status, 0, again.stderr)
+  assert.equal(readFileSync(hosts, "utf8"), text)
+  // and undo takes exactly the block out
+  const undo = M.TERMINAL_ACTIONS["undo-hosts"].run.split("/etc/").join(r.dir + "/etc/").split("sudo ").join("")
+  const un = spawnSync("/usr/bin/bash", ["-c", "( set -e; " + undo + " )"], { encoding: "utf8" })
+  assert.equal(un.status, 0, un.stderr)
+  assert.equal(readFileSync(hosts, "utf8"), HOSTS_BEFORE)
+  rmSync(r.dir, { recursive: true })
+})
+
+test("hosts-block refuses a damaged block, a link and a missing file, changing nothing", () => {
+  const lone = HOSTS_BEFORE + "# BEGIN omarchy-vigil telemetry\n0.0.0.0 mine.example\n10.9.9.9 keep.me\n"
+  const swapped = HOSTS_BEFORE + "# END omarchy-vigil telemetry\n# BEGIN omarchy-vigil telemetry\n"
+  const twice = "# BEGIN omarchy-vigil telemetry\n# BEGIN omarchy-vigil telemetry\n# END omarchy-vigil telemetry\n"
+  for (const bad of [lone, swapped, twice]) {
+    for (const id of ["hosts-block", "undo-hosts"]) {
+      let hosts
+      const r = runUndo(id, (d) => { hosts = place(d, "/etc/hosts", bad) })
+      assert.equal(r.status, 1, id + " " + r.out)
+      assert.match(r.out, /damaged/)
+      assert.equal(readFileSync(hosts, "utf8"), bad)
+      rmSync(r.dir, { recursive: true })
+    }
+  }
+  let victim
+  let r = runUndo("hosts-block", (d) => {
+    victim = place(d, "/etc/real-hosts", HOSTS_BEFORE); symlinkSync(victim, d + "/etc/hosts")
+  })
+  assert.equal(r.status, 1); assert.match(r.out, /not a plain file/)
+  assert.equal(readFileSync(victim, "utf8"), HOSTS_BEFORE)
+  rmSync(r.dir, { recursive: true })
+  r = runUndo("hosts-block", (d) => { mkdirSync(d + "/etc") })
+  assert.equal(r.status, 1)
+  rmSync(r.dir, { recursive: true })
+})
+
+test("undo-hosts on a file without the block says so and changes nothing", () => {
+  let hosts
+  const r = runUndo("undo-hosts", (d) => { hosts = place(d, "/etc/hosts", HOSTS_BEFORE) })
+  assert.equal(r.status, 0); assert.match(r.out, /Nothing to undo/)
+  assert.equal(readFileSync(hosts, "utf8"), HOSTS_BEFORE)
+  rmSync(r.dir, { recursive: true })
+})
+
+test("the Chromium policy is written once, never over a file that is not Vigil's, and undone only while unchanged", () => {
+  const rel = "/etc/chromium/policies/managed/90-omarchy-vigil.json"
+  let f
+  let r = runUndo("chromium-privacy", () => {})
+  assert.equal(r.status, 0, r.out)
+  f = r.dir + rel
+  assert.equal(readFileSync(f, "utf8"), M.CHROMIUM_POLICY_TEXT)
+  assert.equal(statSync(f).mode & 0o777, 0o644)
+  assert.deepEqual(JSON.parse(M.CHROMIUM_POLICY_TEXT).EnableMediaRouter, false)
+  assert.equal("BlockThirdPartyCookies" in JSON.parse(M.CHROMIUM_POLICY_TEXT), false)
+  const body = (id) => M.TERMINAL_ACTIONS[id].run.split("/etc/").join(r.dir + "/etc/").split("sudo ").join("")
+  const go = (id) => spawnSync("/usr/bin/bash", ["-c", "( set -e; " + body(id) + " )"], { encoding: "utf8" })
+  assert.equal(go("chromium-privacy").status, 0)                       // idempotent
+  writeFileSync(f, "{\"mine\": true}\n")
+  let again = go("chromium-privacy")
+  assert.equal(again.status, 1); assert.match(again.stdout, /did not write/)
+  again = go("undo-chromium")
+  assert.equal(again.status, 1); assert.match(again.stdout, /left alone/)
+  assert.equal(readFileSync(f, "utf8"), "{\"mine\": true}\n")
+  writeFileSync(f, M.CHROMIUM_POLICY_TEXT)
+  assert.equal(go("undo-chromium").status, 0)
+  assert.equal(existsSync(f), false)
+  assert.match(go("undo-chromium").stdout, /Nothing to undo/)
+  rmSync(r.dir, { recursive: true })
+})
+
 test("undo, review and history fields are validated", () => {
   const undo = (u) => parse(report({ checks: [check({ undo: u })] }))
   assert.equal(undo({ action: "undo-sysctl", label: "Undo" }).checks[0].undo.action, "undo-sysctl")
@@ -405,7 +492,7 @@ test("learn-more pages come only from the fixed table", () => {
   assert.equal(M.docsUrl("arch-dm-crypt"), "https://wiki.archlinux.org/title/Dm-crypt")
   for (const bad of ["lynis-auth-9262", "lynis-../x", "https://evil.example", "", null, "toString", "__proto__"])
     assert.equal(M.docsUrl(bad), "", String(bad))
-  for (const url of Object.values(M.DOCS)) assert.match(url, /^https:\/\/(wiki\.archlinux\.org|github\.com|attack\.mitre\.org)\//)
+  for (const url of Object.values(M.DOCS)) assert.match(url, /^https:\/\/(wiki\.archlinux\.org|github\.com|attack\.mitre\.org|huggingface\.co|rkhunter\.sourceforge\.net)\//)
   assert.deepEqual(M.docsCommand("arch-users", TOOLS), ["/usr/bin/xdg-open", "https://wiki.archlinux.org/title/Users_and_groups"])
   assert.deepEqual(M.docsCommand("arch-users", {}), [])
   const r = parse(report({ checks: [check({ status: "info", fix: { kind: "docs", action: "nope", label: "Learn more" } })] }))
@@ -442,7 +529,7 @@ test("run cards: each scan right after its list; Run all scans ~ but not ~/Downl
   const all = M.confirmation("full-scan", "all", r)
   assert.equal(all.title, "Run all")
   assert.deepEqual(names(all), ["Password scan", "System update lookup", "Arch security scan", "Bumblebee list",
-                                "Bumblebee scan", "Firmware lookup", "Virus signatures", "Virus scan of ~"])
+                                "Bumblebee scan", "Firmware lookup", "System update", "Virus signatures", "Virus scan of ~"])
   assert.ok(all.lines.some(l => l.includes("notification")))
   const daily = M.confirmation("daily-check", "all", r)
   assert.equal(daily.title, "Run daily check")
@@ -466,7 +553,7 @@ test("old signatures: only the Run all card asks for the password, and shows the
   const all = M.confirmation("full-scan", "all", r, "/home/a")
   assert.match(all.lines[1], /^1\. Virus signatures update: they are over two days old/)
   assert.deepEqual(all.commands.map(c => c.text), ["/usr/bin/pkexec /usr/bin/bash -c\n" + M.SIGNATURES_SCRIPT,
-                                                    "/usr/bin/pkexec /usr/bin/bash -c\n" + M.NO_PASSWORD_STEP])
+                                                    "/usr/bin/pkexec /usr/bin/bash -c\n" + M.NO_PASSWORD_STEP, M.fullScanUpdate(r)])
   assert.ok(all.lines.some(l => /password at the start, twice/.test(l)))
   assert.equal(M.cardShowsSignatures(all), true)
   // The daily and weekly checks never ask: ClamAV's own service keeps them current.
@@ -482,6 +569,123 @@ test("old signatures: only the Run all card asks for the password, and shows the
   // The notification: constant words, pointing to Run all.
   assert.match(M.SIGNATURES_NOTICE, /over two days\. Open Vigil and press Run all/)
   assert.doesNotMatch(M.SIGNATURES_NOTICE, /[<>&]/)
+})
+
+// ---- Run all: the checks, then the Omarchy update in a terminal, then the virus scan
+const updateReport = (over = {}) => parse(report({ sources: ["downloads-scan", "virus-scan", "password-check", "rkhunter"].map(
+  (id) => ({ id, label: "x", run: "daily", date: "", time: "", state: "never", tried: "" })), ...over }))
+const UPDATE_TOOLS = Object.assign({}, TOOLS, { "omarchy-update": "/usr/share/omarchy/bin" })
+
+test("Run all runs the Omarchy update in a terminal before the virus scan, only when it can; the card shows that exact script", () => {
+  const r = updateReport({ tools: UPDATE_TOOLS })
+  const script = M.fullScanUpdate(r)
+  assert.ok(script.includes("/usr/share/omarchy/bin/omarchy-update -y )"))
+  assert.ok(!/refresh-feeds|python3/.test(script), "the terminal runs only the update; the checks run in the panel")
+  const card = M.confirmation("full-scan", "all", r, "/home/a")
+  assert.equal(card.commands[card.commands.length - 1].text, script)
+  assert.match(card.commands[card.commands.length - 1].who, /^Then, before the virus scan: in a terminal/)
+  assert.deepEqual(card.commands.slice(0, -1).map((c) => c.text), [
+    "/usr/bin/pkexec /usr/bin/bash -c\n" + M.NO_PASSWORD_STEP, "/usr/bin/pkexec /usr/bin/bash -c\n" + M.RKHUNTER_SCRIPT])
+  assert.ok(M.cardShowsUpdate(card, script))
+  const steps = card.lines.filter((l) => /^\d+\. /.test(l)).map((l) => l.replace(/^\d+\. /, "").split(/[:.]/)[0])
+  assert.deepEqual(steps.slice(-3), ["System update", "Virus signatures", "Virus scan of ~"])
+  assert.ok(card.lines.some((l) => /The update opens a terminal before the virus scan/.test(l)))
+  const noLauncher = Object.assign({}, UPDATE_TOOLS); delete noLauncher["omarchy-launch-floating-terminal-with-presentation"]
+  const noUpdater = Object.assign({}, TOOLS); delete noUpdater["omarchy-update"]
+  for (const tools of [noLauncher, noUpdater]) {
+    const rr = updateReport({ tools })
+    assert.equal(M.fullScanUpdate(rr), "")
+    const c = M.confirmation("full-scan", "all", rr, "/home/a")
+    assert.ok(!c.lines.some((l) => /System update/.test(l)))
+    assert.equal(M.cardShowsUpdate(c, script), false)
+  }
+  assert.equal(M.fullScanUpdate(null), "")
+  assert.equal(M.cardShowsUpdate(null, script), false)
+  assert.equal(M.cardShowsUpdate(card, ""), false)
+  assert.equal(M.fullScanUpdate(updateReport({ tools: Object.assign({}, UPDATE_TOOLS, { "omarchy-update": "/home/me/bin" }) })), "")
+  for (const k of ["daily-check", "weekly-check"]) assert.deepEqual(M.confirmation(k, "all", r, "/home/a").commands, [])
+})
+
+// Runs the update terminal script for real, with a fake omarchy-update that behaves like Omarchy's: it asks
+// the reboot question and restarts the shell through commands found on the PATH.
+function runUpdateScript(opts) {
+  const dir = mkdtempSync(path.join(tmpdir(), "vigil-update-"))
+  const home = path.join(dir, "home"); mkdirSync(home); mkdirSync(path.join(dir, "run")); mkdirSync(path.join(dir, "bin"))
+  const log = path.join(dir, "log"); writeFileSync(log, "")
+  const fake = (name, body) => { const f = path.join(dir, "bin", name); writeFileSync(f, "#!/bin/bash\n" + body, { mode: 0o755 }); return f }
+  fake("gum", "echo \"real gum $*\" >> " + log + "; exit 0")                       // the real gum says yes to everything
+  fake("omarchy-restart-shell", "echo real-shell-restart >> " + log)
+  const update = fake("omarchy-update", "echo \"update $*\" >> " + log + "\n"
+    + (opts.questions || []).map((q) => "gum confirm " + JSON.stringify(q) + " && echo \"yes: " + q + "\" >> " + log + " || echo \"no: " + q + "\" >> " + log).join("\n")
+    + "\nomarchy-restart-shell\nexit " + (opts.rc || 0) + "\n")
+  const script = M.fullScanUpdate(updateReport({ tools: UPDATE_TOOLS })).split("/usr/share/omarchy/bin/omarchy-update").join(update)
+  const res = spawnSync("/usr/bin/bash", ["-c", script], { input: opts.input === undefined ? "\n" : opts.input, encoding: "utf8",
+    env: { PATH: path.join(dir, "bin") + ":/usr/bin:/bin", HOME: home, XDG_RUNTIME_DIR: path.join(dir, "run") } })
+  const state = path.join(home, ".local/state/omarchy-vigil")
+  const marks = existsSync(state) ? readdirSync(state).filter((n) => n.startsWith("update-")).sort() : []
+  return { dir, status: res.status, out: res.stdout + res.stderr, log: readFileSync(log, "utf8"), marks, run: readdirSync(path.join(dir, "run")) }
+}
+
+test("the update terminal script holds back the reboot question and the shell restart, and leaves markers the helper reads", () => {
+  const r = runUpdateScript({ questions: ["Linux kernel has been updated. Reboot?", "Continue with the migration?"] })
+  assert.equal(r.status, 0, r.out)
+  assert.match(r.log, /^update -y\n/)
+  assert.ok(r.log.includes("no: Linux kernel has been updated. Reboot?"), "the reboot question is answered no")
+  assert.ok(r.log.includes("real gum confirm Continue with the migration?"), "other questions reach the real gum")
+  assert.ok(!r.log.includes("yes: Linux kernel"), "the reboot was never accepted")
+  assert.ok(!r.log.includes("real-shell-restart"), "the shell restart is held back")
+  assert.deepEqual(r.marks, ["update-ok", "update-reboot", "update-shell"])
+  assert.deepEqual(r.run, [], "the shim folder is removed")
+  assert.match(r.out, /The update recommends a restart\. Vigil held it back/)
+  rmSync(r.dir, { recursive: true })
+})
+
+test("no reboot question: no reboot marker; a failed update says failed; a closed terminal runs nothing", () => {
+  let r = runUpdateScript({ questions: ["Continue with the migration?"] })
+  assert.deepEqual(r.marks, ["update-ok", "update-shell"]); assert.ok(!/update recommends a restart/.test(r.out))
+  rmSync(r.dir, { recursive: true })
+  r = runUpdateScript({ rc: 3, questions: ["Updates require reboot. Ready?"] })
+  assert.equal(r.status, 0)
+  assert.deepEqual(r.marks, ["update-failed"])
+  assert.match(r.out, /The update did not finish\. Vigil goes on with the virus scan/)
+  assert.deepEqual(r.run, [])
+  rmSync(r.dir, { recursive: true })
+  r = runUpdateScript({ input: "" })                         // the terminal was closed before Enter
+  assert.notEqual(r.status, 0); assert.equal(r.log, ""); assert.deepEqual(r.marks, ["update-failed"])
+  rmSync(r.dir, { recursive: true })
+})
+
+test("the update script's marker names are the ones the helper reads; the script and the rootkit step parse", () => {
+  const script = M.fullScanUpdate(updateReport({ tools: UPDATE_TOOLS }))
+  for (const text of [script, M.RKHUNTER_SCRIPT])
+    assert.equal(spawnSync("/usr/bin/bash", ["-n", "-c", text]).status, 0)
+  for (const m of M.UPDATE_MARKS) assert.ok(script.includes(m), m)
+  assert.ok(!/--update|--versioncheck|curl|wget/.test(M.RKHUNTER_SCRIPT), "no network from the rootkit scan")
+  assert.ok(!/\bsudo\b/.test(M.RKHUNTER_SCRIPT))
+})
+
+test("the update status is validated, and the final card says what the update recommended", () => {
+  const st = (o) => M.parseUpdateStatus(JSON.stringify(o))
+  assert.deepEqual(st({ update: "ok", reboot: true, shell: false }), { update: "ok", reboot: true, shell: false })
+  assert.equal(st({ update: "running", reboot: true, shell: true }).reboot, false, "a restart means nothing before the update is done")
+  for (const bad of [null, "", "x", "{", JSON.stringify({ update: "done", reboot: false, shell: false }),
+                     JSON.stringify({ update: "ok", reboot: "yes", shell: false }), JSON.stringify({ update: "ok" }), "x".repeat(2000)])
+    assert.equal(M.parseUpdateStatus(bad), null)
+  assert.match(M.updateWaitText({ update: "running" }), /is running in its terminal/)
+  assert.match(M.updateWaitText({ update: "waiting" }), /Waiting for you to start/)
+  const done = M.finalRunMessage("Checked x. The virus scan follows the Omarchy update.", "Scanned your home folder. Nothing on this machine needs attention.",
+    { update: "ok", reboot: true, shell: true })
+  assert.match(done, /^Checked x\..*Scanned your home folder\..*The Omarchy update finished\. The update recommends a restart: restart the computer when you are ready\. It also wants the shell restarted/)
+  assert.ok(!/recommends a restart/.test(M.finalRunMessage("a", "b", { update: "ok", reboot: false, shell: false })))
+  assert.match(M.finalRunMessage("a", "b", { update: "failed", reboot: false, shell: false }), /did not finish \(or its terminal was closed\)/)
+  assert.equal(M.finalRunMessage("a", "b", null), "a b")
+  assert.equal(M.finalRunMessage("", "b", { update: "none", reboot: false, shell: false }), "b")
+  assert.match(M.finishNotice("Run all", { ok: true, stopped: false }, { reboot: true }), /^Run all finished\. The update recommends a restart\. Open the lighthouse/)
+  assert.equal(M.finishNotice("Run all", { ok: true, stopped: false }, null), "Run all finished. Open the lighthouse in the bar for the results.")
+  assert.equal(M.finishNotice("Run all", { stopped: true }, { reboot: true }), "Run all was stopped.")
+  assert.equal(M.finishNotice("Run all", null, null), "Run all did not finish.")
+  assert.equal(M.parseFixResult(JSON.stringify({ ok: true, message: "x", held: true })).held, true)
+  assert.equal(M.parseFixResult(JSON.stringify({ ok: true, message: "x" })).held, false)
 })
 
 test("every terminal says what it does, plainly, then the technical part", () => {
@@ -585,7 +789,7 @@ test("missing helpers: a red Install button that names them, and one plan for al
   assert.equal(card.lines[0], "Missing now: ClamAV, ClamUI.")
   const plan = M.actionPlan("install-helpers", TOOLS, "/home/marc")
   assert.equal(plan.length, 1)
-  assert.match(plan[0].argv[5], /pacman -S --needed --noconfirm clamav \$c arch-audit osv-scanner fwupd\n/)
+  assert.match(plan[0].argv[5], /pacman -S --needed --noconfirm clamav \$c arch-audit osv-scanner fwupd gitleaks rkhunter\n/)
   assert.match(plan[0].argv[5], /c=clamui; \[ -d "\$HOME\/\.local\/share\/flatpak\/app\/io\.github\.linx_systems\.ClamUI" \] && c=/)
   assert.ok(!plan[0].argv[5].includes("flathub"))
   assert.equal(M.missingLabel(parse(report({ missing: ["bumblebee"] }))), "MISSING Bumblebee. INSTALL")
@@ -670,7 +874,7 @@ test("an action in the panel shows how far it got; the words come from Vigil, no
   // Every stage is announced, in order, and a failed pacman stops the script.
   const all = steps.map(s => s.argv[s.argv.length - 1]).join("\n")
   assert.deepEqual([...all.matchAll(/^echo VIGIL-STEP ([0-9])$/gm)].map(m => Number(m[1])), [0, 1, 2, 3])
-  assert.match(all, /^\/usr\/bin\/pacman -S --needed --noconfirm clamav \$c arch-audit osv-scanner fwupd$/m)
+  assert.match(all, /^\/usr\/bin\/pacman -S --needed --noconfirm clamav \$c arch-audit osv-scanner fwupd gitleaks rkhunter$/m)
 })
 
 test("a scan started elsewhere is followed, and anything odd is refused", () => {
@@ -702,7 +906,7 @@ test("fingerprint setup and removal are Omarchy's own commands, in a terminal", 
 
 test("a stopped run says so", () => {
   assert.deepEqual(M.parseFixResult('{"ok":true,"stopped":true,"message":"Stopped."}'),
-                   { ok: true, message: "Stopped.", stopped: true })
+                   { ok: true, message: "Stopped.", stopped: true, held: false })
   assert.equal(M.parseFixResult('{"ok":true,"message":"Done."}').stopped, false)
   assert.equal(M.parseFixResult('{"ok":true,"stopped":"yes","message":"Done."}').stopped, false)
 })
@@ -1280,7 +1484,7 @@ test("every confirmation shows in full the commands Run starts, root steps inclu
 })
 
 test("run cards show the helper's root steps exactly as the helper starts them", () => {
-  const card = (kind, over) => M.confirmation(kind, "all", parse(report(over)), "/home/marc").commands
+  const card = (kind, over) => M.confirmation(kind, "all", parse(report(over)), "/home/marc").commands.filter(c => c.text.startsWith("/usr/bin/pkexec"))   // the root steps; the update terminal script is checked on its own
   const sig = "/usr/bin/pkexec /usr/bin/bash -c\n" + M.SIGNATURES_SCRIPT
   const nopw = "/usr/bin/pkexec /usr/bin/bash -c\n" + M.NO_PASSWORD_STEP
   assert.deepEqual(card("daily-check", {}), [])                                          // nothing runs as root

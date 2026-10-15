@@ -10,12 +10,13 @@ mechanical ones.
 These hold for every pillar, now and in later phases:
 
 1. **No root from the plugin.** Root steps are constant scripts from
-   `Model.js`, or the helper's two constant pkexec commands (the virus
-   signatures update, and the password scan). Each is shown
+   `Model.js`, or the helper's three constant pkexec commands (the virus
+   signatures update, the password scan and the rootkit scan). Each is shown
    in full on a confirmation in the panel, then run through `pkexec`, so
    Omarchy's own polkit dialog asks for your password each time. Tools that
    ask questions as they go run in a visible terminal: Omarchy's own
-   commands, and `ssh-keygen` when you add a passphrase to an SSH key. No
+   commands (`omarchy-update -y` too, in Run all, before the virus scan), and
+   `ssh-keygen` when you add a passphrase to an SSH key. No
    root helper, sudoers rule, polkit policy, service or timer, ever. Some
    steps that run as you make a system service ask through its own rules
    (NetworkManager for Stop auto-joining and its Undo, Flatpak for apps
@@ -24,7 +25,9 @@ These hold for every pillar, now and in later phases:
 2. **Everything Vigil reads is untrusted**, including its own helper's output,
    other tools' result files and file names (a file name is chosen by whoever
    created the file). It is size-capped, validated and shown as plain text,
-   and never put into a notification or a program's arguments. Five kinds
+   and never put into a notification or a program's arguments (a repository
+   folder's name is given to gitleaks as the folder it starts in, not as an
+   argument). Five kinds
    of value reach a program only after a strict check, and only as data: the
    ids the panel sends back to the helper (`vigil keep|trash|ignore <keyed
    id>`, `vigil dismiss <check id>`, `vigil fix <action id>`), each checked
@@ -47,28 +50,39 @@ These hold for every pillar, now and in later phases:
    account can read a running command line in `/proc/<pid>/cmdline`.
 3. **Virus scans run as you.** ClamAV scans (Vigil's scans and ClamUI)
    never run as root: malware scanners have had parser bugs, and running
-   them unprivileged limits what a malicious file can do. What needs root
+   them unprivileged limits what a malicious file can do. The same goes for
+   gitleaks and Vigil's own pickle reader, which parse files someone else
+   wrote. What needs root
    runs only from a button you press: the password scan (accounts without
-   a password) only in Run all, keeping only account names; Show listeners
+   a password) and the rootkit scan (rkhunter, which reads system files and
+   keeps only its warnings) only in Run all, keeping only account names and
+   warning lines; Show listeners
    (`ss -tulpn`, read-only) on its own button; and the virus signature
    update (freshclam, which downloads signatures and scans nothing), only
    in Run all and only when ClamAV's own update service has let them get
    over two days old. The daily and weekly checks (pressed or in the
    background) and a row's Scan now never ask for a password.
-4. **Hand off, don't absorb.** ClamUI keeps quarantine, Black Ops keeps
-   telemetry blocking. Vigil reads their results and opens them; it does not
-   run their code or write their files, with one exception you confirm:
-   **Let Vigil run them** switches off a duplicate scheduled scan the way
-   you would in that app (ClamUI's user timer and its one
-   `scheduled_scans_enabled` setting, Omarchy's `omarchy-plugin-disable`
+4. **Hand off what is a program of its own; do the rest once, on a button.**
+   ClamUI keeps quarantine, and Perplexity's Bumblebee is a standalone
+   program Vigil installs and runs read-only. Vigil reads ClamUI's results
+   and opens it; it does not run its code or write its files, with one
+   exception you confirm: **Let Vigil run them** switches off a duplicate
+   scheduled scan the way you would in that app (ClamUI's user timer and its
+   one `scheduled_scans_enabled` setting, Omarchy's `omarchy-plugin-disable`
    for the Bumblebee plugin), leaves a marker per change, and its Undo
    reverses only what the markers name. The script checks again itself: it
    touches ClamUI only when every scheduled folder of every ClamUI install
    is inside your home folder, and the plugin only when Vigil's own
    Bumblebee is installed; it refuses a link anywhere on the way to its
-   markers, and never writes through one. Perplexity's Bumblebee is a
-   standalone program Vigil installs from Perplexity's own release and runs
-   as you, read-only.
+   markers, and never writes through one. Telemetry blocking used to be
+   handed to the Black Ops plugin; Vigil now does it itself, as plain
+   settings: a marked block in `/etc/hosts`, a Chromium policy file,
+   variables in uwsm's `env.d`, and the weather location rounded in
+   Omarchy's own settings file. None of it needs a watchdog, a listener, a
+   service or a sudoers rule, because Vigil never keeps anything running: it
+   re-reads the files with every check and offers the same button again when
+   an update has put a setting back. Vigil does not read or run Black Ops, and
+   recognises its settings only by what is in the files.
 5. **Maintained sources, fresh, never executed.** Vigil keeps no threat
    lists, and each scan gets its list right before it runs: every day,
    `checkupdates` (your Arch and Omarchy mirrors) and `flatpak remote-ls`
@@ -85,13 +99,16 @@ These hold for every pillar, now and in later phases:
    it on those schedules (the `autoUpdate` setting) or when you press a run
    button. Nothing the checks fetch is ever run, except that a Daily check or
    Run all you press installs the waiting updates for your own Flatpak apps,
-   through Flatpak; results are size-capped and validated like any other
+   through Flatpak; Run all also runs Omarchy's own updater, in a terminal
+   (see Commands); results are size-capped and validated like any other
    input. The one program Vigil downloads,
    Bumblebee, is installed only from a button you press (Install, or
    Install Bumblebee on its row after a Vigil update raised the pinned
    version), never by a run, at the version pinned in Vigil's code, after
    its checksum matches.
-6. **Nothing automatic.** Every change to your system is confirmed: removing
+6. **Nothing automatic.** Every change to your system is confirmed (Run all's
+   card lists the Omarchy update and each root step before anything starts):
+   removing
    packages or plugins, moving leftovers to the trash and marking virus
    detections as false positives each ask first, on a card that lists the
    items (the first 40, then how many more; a removal card's command line
@@ -108,7 +125,8 @@ These hold for every pillar, now and in later phases:
    Notifications carry counts, one fixed sentence (the virus signatures are
    over two days old: press Run all), or, after a weekly check or Run all
    you started, a fixed sentence saying it finished, was stopped or did not
-   finish; never data from the report or a file. IPC methods take no
+   finish (with a fixed clause when the Omarchy update in Run all recommended
+   a restart); never data from the report or a file. IPC methods take no
    parameters.
 7. **Removal leaves nothing running.** Vigil has no units, cron jobs or
    daemons of its own, and a run under way stops within seconds of the
@@ -123,10 +141,10 @@ These hold for every pillar, now and in later phases:
 | Part | Runs as | Does |
 |---|---|---|
 | `Panel.qml` + `Model.js` | you, inside `omarchy-shell` | Draws the lighthouse and panel, starts the helper, validates its output, launches confirmed actions. |
-| `bin/vigil` | you, as a child process | Reads local settings and files and returns one JSON report; performs the helper actions (a closed list), moves leftovers you choose to the trash, runs the scans and lookups (and the updates for your own Flatpak apps when you press Daily check or Run all), and starts its two constant pkexec root steps in Run all. |
+| `bin/vigil` | you, as a child process | Reads local settings and files and returns one JSON report; performs the helper actions (a closed list), moves leftovers you choose to the trash, runs the scans and lookups (gitleaks, its own pickle reader, and the updates for your own Flatpak apps when you press Daily check or Run all), and starts its constant pkexec root steps in Run all. |
 | Script actions | root through `pkexec` (Omarchy's password dialog), or you | Constant scripts from `Model.js`, shown in full on a confirmation first; what they print is shown in the panel. |
 | Removing from a list | root through `pkexec` (packages), or you (plugins) | A constant script from `Model.js` with the names you ticked as its arguments, shown in full on the card first: `pacman -Rns`, or Omarchy's `omarchy-plugin-remove`. |
-| Terminal actions | you, in a visible terminal | Omarchy's own interactive commands, and choosing an SSH passphrase. |
+| Terminal actions | you, in a visible terminal | Omarchy's own interactive commands, and choosing an SSH passphrase. Run all's update step is one too: `omarchy-update -y`, just before the virus scan (see Commands). |
 | App actions | you | Open ClamUI with a fixed argv: `/usr/bin/clamui`, or `/usr/bin/flatpak run io.github.linx_systems.ClamUI`. |
 
 No file from the plugin folder is executed as root. The root scripts are text
@@ -196,7 +214,8 @@ program it is running, process group and all, and starts no further step.
   Notifications contain only a count, the constant sentence
   `SIGNATURES_NOTICE` from `Model.js` (at most once a day), or, after a
   weekly check or Run all you started, a fixed sentence naming that run and
-  whether it finished, was stopped or did not finish. They are built from
+  whether it finished, was stopped or did not finish (plus the fixed clause
+  "The update recommends a restart." after a Run all whose update did). They are built from
   constants and a clamped number, never from the report or a file.
 - Size limits: at most 160 checks; at most 300 items per row from the
   helper (the panel accepts 500): leftovers 150, detections 500 before that
@@ -210,9 +229,120 @@ program it is running, process group and all, and starts no further step.
 
 ## Commands
 
+- **Run all's update.** Run all's checks run exactly as before: the panel
+  starts the helper (`refresh-feeds --full --hold-scan`), whose root steps go
+  through Omarchy's password dialog and are listed on the card, and which
+  leaves out only the virus signatures check and the virus scan. When it
+  finishes and the run was not stopped, the panel opens Omarchy's floating
+  terminal with one more script, the last command on the same card, and
+  waits. The script prints what it will do, waits for Enter, then runs
+  `omarchy-update -y` (Omarchy's own updater, told not to ask its
+  confirmation question; sudo asks for your password in that terminal). It
+  goes before the virus scan so that a restart the update asks for cannot cut
+  the scan off, and the scan, the longest step, runs after it
+  (`refresh-feeds --finish-scan`: the signatures check and the virus scan,
+  then the weekly bookkeeping the held run left undone, so a run that never
+  got to the scan is not marked done). Two things the updater does at its end
+  are held back, by programs that exist only for that one update: a `gum`
+  placed first on its PATH answers no to a question that mentions a reboot,
+  noting that it was asked, and passes every other question to the real
+  `gum`; a stand-in `omarchy-restart-shell` notes the request instead of
+  restarting the shell, which would end the panel and lose the run. Both
+  live in a folder made with `mktemp -d` under `XDG_RUNTIME_DIR`, mode 0700,
+  removed when the script ends. The script reports by creating empty marker
+  files in Vigil's state folder (`update-waiting`, `update-running`,
+  `update-ok`, `update-failed`, `update-reboot`, `update-shell`), the way the
+  hand-over scripts do: a no-follow walk from the home folder, a fresh file
+  renamed into place. `vigil update-status` (no arguments) reports only
+  names from that closed list, only for plain files of yours, and calls a
+  waiting or running marker older than three hours failed; the panel
+  validates its answer again. Markers carry no content, so nothing from them
+  reaches a command line or a notification except fixed sentences (the
+  notification adds "The update recommends a restart." and nothing else).
+  The script is a constant from `Model.js` apart from the updater's path
+  (one of the two trusted folders); it starts no part of Vigil. The panel
+  opens it only when the card you confirmed showed exactly that text and the
+  terminal launcher and updater were found, and a background run never
+  starts while the panel waits. Stop while waiting, or three hours without an
+  answer, ends the wait: the scan does not run and the final card says the
+  update may still be going. The final card says whether the update finished,
+  failed, recommended a restart, and wanted the shell restarted (the panel
+  then shows **Restart shell**). Omarchy's own updater is the one thing here
+  that changes your system without a Vigil card per step: the card says so,
+  and that it cannot be stopped once it starts.
+- **The rootkit scan** is the helper's third pkexec step, the constant
+  `RKHUNTER_SCRIPT` (kept identical in `Model.js`, a test checks), shown in
+  full on Run all's card: if rkhunter's file-properties database is missing it
+  records one (`rkhunter --propupd`), then `rkhunter --check --sk --nocolors
+  --nolog --rwo`. It never updates rkhunter's data or checks for a newer
+  version (no network), keeps no log, and writes only rkhunter's own
+  database. Its output is size-capped; only lines that start with `Warning`
+  are kept, with their indented detail lines, cleaned and capped at 240
+  characters. For the two kinds that name a program (a program replaced by a
+  script, changed properties), Vigil, as you, compares the program's SHA-256
+  with pacman's own record of what the owning package shipped (the same
+  mtree records the file-change check uses, no new reader); a match marks the
+  warning explained, and explained warnings do not count. Everything else
+  counts. The row never turns red, since rkhunter warns about harmless things
+  on Arch.
+- **Telemetry hosts** and **Chromium's privacy policy** are script actions
+  like the others: shown in full, run through pkexec, undone by their own
+  Undo. The hosts script refuses unless `/etc/hosts` is a plain file and
+  holds no Vigil block or exactly one, begin before end, so a damaged marker
+  can never make it cut away the rest of the file; it writes a new file next
+  to it (`mktemp` in `/etc`), gives it the old file's owner and mode and
+  renames it over `/etc/hosts`, and removes the new file if anything fails.
+  Its host list is a constant, kept identical in `bin/vigil` (a test checks).
+  The Chromium script writes one file, `90-omarchy-vigil.json`, whose bytes
+  are a constant, and overwrites or deletes a file of that name only if its
+  bytes are exactly that constant. Neither reads anything from the report.
+  The checks that recognise them read the same files as text and never run
+  them.
+- **Variables for agents and developer tools** are written by the helper, as
+  you, into `~/.config/uwsm/env.d`: two files of fixed text, each starting
+  with Vigil's marker line, written the way every note is (the no-follow
+  walk, a random temporary, `rename`). It replaces a file of that name only if
+  its bytes are one of Vigil's own texts, so one you made by hand is
+  never overwritten or deleted.
+- **Rounding the weather location** edits `latitude` and `longitude` in
+  `~/.local/state/omarchy/settings/weather.json` (a file of Omarchy's, yours)
+  through the same no-follow walk and atomic replace, keeping its mode and
+  every other key. A file that is not valid JSON, not an object, or not
+  yours is refused untouched.
+- **Secrets in git repositories**: for each repository found below your home
+  folder (a bounded, no-follow walk; at most 100, four folders deep, ten
+  seconds), the helper runs `/usr/bin/gitleaks dir . --report-format json
+  --report-path <state folder>/gitleaks-report.json --redact --no-banner
+  --no-color --log-level error --exit-code 0 --max-target-megabytes 5` as you,
+  with the empty environment plus `GITLEAKS_CONFIG_TOML` set to `[extend]
+  useDefault = true`, which outranks the repository's own `.gitleaks.toml` (a
+  repository, or a file inside one, cannot switch its own findings off; your
+  `gitleaks:allow` comments and `.gitleaksignore` are your own marks and
+  count). The repository is the folder gitleaks starts in (its working
+  directory), not an argument, so its name, which whoever made the folder
+  chose, can neither be read as an option nor show in `/proc/<pid>/cmdline`;
+  file names in the report are relative to it. The report is read with the usual caps (8 MiB), only `RuleID`,
+  `File` and `StartLine` are used (the match and the secret are redacted by
+  gitleaks and never read), the rule must match a strict pattern, the file
+  name is cleaned, and the report file is deleted after each repository.
+- **AI model files**: the helper opens each candidate with `O_NOFOLLOW`,
+  checks it is a regular file, and reads its pickle instructions with
+  Python's `pickletools.genops`, which disassembles and never executes (no
+  `pickle.load`, no `find_class`). The stream is read through a wrapper that
+  refuses to hand out more than 64 MiB in all and refuses any single read
+  larger than what is left, so a file claiming a gigantic string cannot make
+  Vigil allocate it; a file is also stopped after five seconds or five
+  million instructions. Zip files (PyTorch's format) are opened with
+  `zipfile` and only members ending in `.pkl` are read, at most eight, never
+  extracted. Imports are classified against two lists in Vigil's code:
+  modules that can run programs (`os`, `subprocess`, `socket`, `ctypes`,
+  `importlib` and the like, and `eval`, `exec` and `open` from `builtins`) and
+  modules it knows are ordinary for models. A file it cannot read counts as
+  unreadable, not as safe and not as dangerous.
 - The helper runs only absolute paths, in a new session, with an empty
   environment apart from a fixed `PATH`, `HOME`, `LANG` and `LC_ALL` (plus
-  `CHECKUPDATES_DB` for checkupdates), a deadline, and
+  `CHECKUPDATES_DB` for checkupdates and `GITLEAKS_CONFIG_TOML` for gitleaks,
+  each a constant or Vigil's own folder), a deadline, and
   stdout read incrementally against a byte cap (cap + 1, overflow is a
   failure). Tools it relies on must be root-owned and not group- or
   world-writable, in root-owned directories.
@@ -430,6 +560,10 @@ plain: they are the same on every machine.
 
 ## Files
 
+- The AI model file scan walks your home folder with `os.scandir`, never
+  following a link, with a 25-second and 300,000-entry budget, 3,000 files,
+  eight folders deep, and enters `~/.cache` only for `huggingface`, `torch`
+  and a few other model caches.
 - Reads open the file once with `O_NONBLOCK` (a planted FIFO cannot hang
   the check), `fstat` that descriptor for a regular file, and read at most
   the cap + 1 bytes from it. Files in `/etc`, `/proc`, `/var` and Vigil's
@@ -445,7 +579,8 @@ plain: they are the same on every machine.
   those lines**, which rewrites your shell history without the lines that
   hold a key.
 - Writes (the state file, Vigil's other notes such as the kept list, the
-  file baseline, the opt-out file, and the shell history that Remove those
+  file baseline, the opt-out files, Omarchy's weather file when you press Round it,
+  and the shell history that Remove those
   lines rewrites, only a regular file with one link) walk from your home
   directory
   one component at a time with `O_NOFOLLOW`, refusing any component that is
@@ -542,8 +677,11 @@ by itself, and only once the relevant tool is installed:
   its Last run line say how old it was. Each list is fetched at most once
   per daily check, and only right before the scan that uses it.
 
-Actions you start yourself (package installs, ClamUI, `omarchy-update`)
-say where they connect before they run.
+Actions you start yourself (package installs, ClamUI, `omarchy-update`,
+which is also a step of Run all) say where they connect before they run.
+The secrets scan (gitleaks), the AI model file scan and the rootkit scan make
+no network call: rkhunter is run without `--update` and `--versioncheck`, and
+gitleaks reads local files only.
 
 ## Reading other software
 
@@ -698,5 +836,21 @@ plugins straight from the default branch:
   toolchains (`.npm`, `.cargo`, `.rustup`, `go/pkg`, mise), every
   `node_modules` and `.git` folder, and other filesystems. The daily
   Downloads scan goes 8 folders deep, at most 5,000 files and 10 seconds.
+- The rootkit scan is rkhunter, whose signatures have not been updated in
+  years; it finds old, well-known rootkits and changed system programs, and
+  warns about harmless things on Arch. A rootkit that loads at boot can hide
+  from any program on the same machine, rkhunter and Vigil included.
+- The AI model file scan reads the instructions of a pickle without running
+  it. It lists imports that can run programs, so a pickle that reaches code
+  through a class on Vigil's ordinary list is not caught, and a custom model
+  can import something unusual on purpose (those are counted, not listed as
+  dangerous). A model in a safer format is the answer, not this scan.
+- The secrets scan sees the working tree, not the history, and only keys in
+  the formats gitleaks knows; a repository more than four folders down, past
+  the hundredth, or inside a skipped folder is not read.
+- Telemetry blocking covers the addresses and settings listed in the
+  README, not every program: a program that finds its server another way (its
+  own DNS-over-HTTPS, a numeric address) is not stopped by `/etc/hosts`, and
+  Chromium's policy does not reach other browsers.
 - Vigil cannot prove a machine is not compromised. A compromised account can
   lie to any program running as that account, Vigil included.

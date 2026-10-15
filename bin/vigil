@@ -44,6 +44,7 @@ import zlib
 import hashlib
 import hmac
 import json
+import math
 import os
 import pwd
 import re
@@ -59,7 +60,7 @@ import time
 from base64 import b64decode
 from datetime import date, datetime, timedelta, timezone
 
-VERSION = "0.30.0"
+VERSION = "0.31.0"
 PLUGIN_ID = "keasbeexd.vigil"
 SCHEMA = 1
 
@@ -89,6 +90,7 @@ SELF = os.path.abspath(__file__)
 REMOVED_LOOK_SECONDS = 5
 OPT_OUT_DIR = (".config", "uwsm", "env.d")
 OPT_OUT_NAME = "90-omarchy-vigil-opt-out"
+AGENTS_NAME = "90-omarchy-vigil-agents"
 
 # Directories an Omarchy command may live in. Only root-owned, non-writable
 # files here are ever reported as usable.
@@ -310,12 +312,14 @@ def plugin_removed():
     return not os.path.exists(SELF)
 
 
-def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False, env=None):
+def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False, env=None, cwd=None):
     """Run an absolute argv; return (returncode, stdout_text) or (None, '').
 
     Own session, scrubbed env, deadline, stdout read incrementally against a
     byte budget, stderr discarded. Overflow and timeout both return None.
-    With `on_line`, each output line is handed to it as it arrives and only
+    `cwd` is where the program starts: a folder whose name someone else chose is given
+this way, never as an argument (every account can read /proc/<pid>/cmdline).
+With `on_line`, each output line is handed to it as it arrives and only
     the lines it returns True for are kept (and counted against `limit`).
     During a run (the run lock is held), it also looks every few
     seconds whether the plugin was removed, and if so stops the program.
@@ -326,7 +330,7 @@ def run(argv, timeout=CMD_TIMEOUT, limit=CMD_MAX, on_line=None, raw=False, env=N
         proc = subprocess.Popen(
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, env=dict(SAFE_ENV, HOME=HOME, **(env or {})),
-            start_new_session=True, close_fds=True,
+            cwd=cwd, start_new_session=True, close_fds=True,
             pass_fds=(RUN_LOCK["fd"],) if RUN_LOCK["fd"] is not None else (),
         )
     except OSError:
@@ -1802,6 +1806,10 @@ def missing_helpers():
         out.append("clamui")
     if not bumblebee_ok():
         out.append("bumblebee")
+    if not is_trusted_executable(sys_path(GITLEAKS)):
+        out.append("gitleaks")
+    if not is_trusted_executable(sys_path(RKHUNTER)):
+        out.append("rkhunter")
     return out
 
 
@@ -1990,9 +1998,11 @@ FEED_FILES = {"arch-audit": "arch-audit.json", "osv": "osv.json", "aur": "aur.js
               "full-scan": "full-scan.json", "signatures": "signatures.json",
               "bumblebee-list": "bumblebee-list.json", "bumblebee": "bumblebee.json",
               "pending-updates": "pending-updates.json", "firmware": "firmware.json", "flatpak": "flatpak.json",
-              "downloads-scan": "downloads-scan.json"}
+              "downloads-scan": "downloads-scan.json", "gitleaks": "gitleaks.json", "model-scan": "model-scan.json",
+              "rkhunter": "rkhunter.json"}
 # Two timers: the daily check (each step a day after it last finished) and
-# the weekly check (firmware and the virus scan of the home folder).
+# the weekly check (firmware, the git repositories, the AI model files and the
+# virus scan of the home folder).
 FEED_DAYS = 7
 FEED_RETRY_DAYS = 1
 
@@ -2041,6 +2051,12 @@ def feed_available(name):
         return is_trusted_executable(sys_path(CHECKUPDATES)) and is_trusted_executable(sys_path("/usr/bin/pacman"))
     if name == "firmware":
         return is_trusted_executable(sys_path(FWUPDMGR))
+    if name == "gitleaks":
+        return is_trusted_executable(sys_path(GITLEAKS))
+    if name == "model-scan":
+        return True                        # Vigil reads these files itself: no tool to install
+    if name == "rkhunter":
+        return can_ask_password() and is_trusted_executable(sys_path(RKHUNTER))
     if name == "flatpak":
         return is_trusted_executable(sys_path(FLATPAK)) and flatpak_installations() != []
     return False
@@ -2050,8 +2066,8 @@ def feed_available(name):
 # right after its list (a minute or two, no password in the background). The
 # weekly check is firmware and the whole home folder.
 DAILY_FEEDS = ("pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee", "downloads-scan")
-WEEKLY_FEEDS = ("firmware", "virus-scan")
-FEED_INTERVAL = {n: 1 for n in DAILY_FEEDS}
+WEEKLY_FEEDS = ("firmware", "gitleaks", "model-scan", "virus-scan")
+FEED_INTERVAL = dict({n: 1 for n in DAILY_FEEDS}, rkhunter=FULL_SCAN_STALE_DAYS)
 
 
 def _due_at(meta, days=FEED_DAYS):
@@ -2243,6 +2259,9 @@ def source_status():
             feed(name, "daily", {"bumblebee": "the list", "downloads-scan": "signatures"}.get(name, ""))
     if feed_available("firmware"):
         feed("firmware", "weekly")
+    for name in ("gitleaks", "model-scan"):
+        if feed_available(name):
+            feed(name, "weekly")
     if feed_available("virus-scan"):
         feed("virus-scan", "weekly", "signatures")
         ext = clamui_last("scan")                       # a scan you ran in ClamUI counts too
@@ -2253,6 +2272,8 @@ def source_status():
     d, _ = no_password_scan()
     _, t = _mtime_stamp([home_path(*STATE_DIR, NO_PASSWORD_NAME)]) if d else ("", "")
     add("password-check", "all", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
+    if feed_available("rkhunter"):
+        feed("rkhunter", "all")
     return out
 
 
@@ -3199,14 +3220,535 @@ def check_firmware():
         len(ups), "" if len(ups) == 1 else "s", when), why, clean_block(lines), fix=upd, weight=0, howto=howto)
 
 
+# --- Secrets in git repositories (gitleaks) ----------------------------------
+# Weekly, as you. gitleaks reads the working tree of each git repository below your home folder (not the
+# history: published history would be reported again every week) and finds keys and tokens by their
+# providers' formats. Vigil asks it to redact them, so a secret never reaches Vigil's files or the panel;
+# only the repository, file, line and rule are kept. It makes no network calls.
+
+GITLEAKS = "/usr/bin/gitleaks"
+# Given as the config (it outranks a .gitleaks.toml inside the repository), so a repository cannot switch its
+# own findings off. Your own `gitleaks:allow` comments and .gitleaksignore still count: they are your marks.
+GITLEAKS_CONFIG = "[extend]\nuseDefault = true\n"
+GITLEAKS_REPORT = "gitleaks-report.json"
+GITLEAKS_ARGS = ["--report-format", "json", "--redact", "--no-banner", "--no-color", "--log-level", "error",
+                 "--exit-code", "0", "--max-target-megabytes", "5"]
+GIT_DEPTH = 4
+GIT_MAX_REPOS = 100
+GIT_WALK_SECONDS = 10
+GIT_WALK_ENTRIES = 100000
+GIT_SKIP_HIDDEN = {".cache", ".local", ".config", ".npm", ".cargo", ".rustup", ".var", ".mozilla", ".steam", ".wine",
+                   ".docker", ".gradle", ".m2", ".nvm", ".oh-my-zsh", ".bun", ".pnpm-store", ".Trash", ".claude", ".codex",
+                   ".gemini", ".pi", ".opencode", ".ollama", ".vscode", ".zen"}
+GIT_SKIP = {"node_modules", "__pycache__", "venv", ".venv", "site-packages", "target", "vendor"}
+_RULE_ID = re.compile(r"^[A-Za-z0-9._-]{1,60}$")
+GITLEAKS_KEEP = 200
+
+
+def find_git_repos():
+    """([path], partial): git working trees below your home folder, found without following links, in a
+    budget of time and entries. A folder with a .git inside is a repository and is not searched further."""
+    repos, partial = [], False
+    deadline, seen = time.monotonic() + GIT_WALK_SECONDS, 0
+    queue = [(HOME, 0)]
+    while queue:
+        path, depth = queue.pop(0)
+        if time.monotonic() > deadline or seen > GIT_WALK_ENTRIES:
+            partial = True
+            break
+        try:
+            with os.scandir(path) as it:
+                entries = list(it)[:5000]
+        except OSError:
+            continue
+        seen += len(entries)
+        subdirs = []
+        for e in entries:
+            try:
+                if not e.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            if e.name == ".git" and depth > 0:           # your home folder itself is not "a repository"
+                repos.append(path)
+                subdirs = None
+                break
+            if e.name in GIT_SKIP or (depth == 0 and e.name in GIT_SKIP_HIDDEN):
+                continue
+            subdirs.append(e.path)
+        if subdirs is None:
+            if len(repos) >= GIT_MAX_REPOS:
+                partial = True
+                break
+            continue
+        if depth + 1 <= GIT_DEPTH:
+            queue.extend((d, depth + 1) for d in sorted(subdirs))
+    return repos[:GIT_MAX_REPOS], partial
+
+
+def _shown(path):
+    home = HOME.rstrip("/")
+    return "~" + path[len(home):] if path == home or path.startswith(home + "/") else path
+
+
+def parse_gitleaks(text, repo):
+    """[{repo, file, line, rule}] from a gitleaks JSON report, or None when it is not one. Only
+    the rule, file and line are read: never the match or the secret. Files are relative to the repository."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, list):
+        return None
+    out = []
+    for f in data[:2000]:
+        if not isinstance(f, dict):
+            continue
+        rule = f.get("RuleID") if isinstance(f.get("RuleID"), str) and _RULE_ID.match(f.get("RuleID")) else "secret"
+        name = f.get("File") if isinstance(f.get("File"), str) else ""
+        if name.startswith(repo + "/"):
+            name = name[len(repo) + 1:]
+        line = f.get("StartLine")
+        line = line if isinstance(line, int) and not isinstance(line, bool) and 0 < line < 10 ** 8 else 0
+        out.append({"repo": clean(_shown(repo), 120), "file": clean(name, 160), "line": line, "rule": rule})
+    return out
+
+
+def refresh_gitleaks():
+    repos, partial = find_git_repos()
+    findings, failed, total = [], 0, 0
+    if repos:
+        dirfd = _state_dir()
+        report = home_path(*STATE_DIR, GITLEAKS_REPORT)
+        try:
+            deadline = time.monotonic() + 1800
+            for repo in repos:
+                if STOP["on"] or time.monotonic() > deadline:
+                    partial = True
+                    break
+                try:
+                    os.unlink(GITLEAKS_REPORT, dir_fd=dirfd)
+                except FileNotFoundError:
+                    pass
+                # The repository is where gitleaks starts, not an argument: a folder's name is chosen by
+                # whoever made it, and arguments are readable by every account.
+                rc, _ = run([GITLEAKS, "dir", ".", "--report-path", report] + GITLEAKS_ARGS, timeout=300,
+                            limit=64 * 1024, env={"GITLEAKS_CONFIG_TOML": GITLEAKS_CONFIG}, cwd=repo)
+                try:
+                    text = read_text(report, 8 * 1024 * 1024) if rc == 0 else None
+                except Refused:
+                    text = None
+                found = parse_gitleaks(text, repo) if text else None
+                if found is None:
+                    failed += 1
+                    continue
+                total += len(found)
+                findings += found[:max(0, GITLEAKS_KEEP - len(findings))]
+        finally:
+            try:
+                os.unlink(GITLEAKS_REPORT, dir_fd=dirfd)
+            except OSError:
+                pass
+            os.close(dirfd)
+        if failed == len(repos):
+            save_feed("gitleaks", {}, ok=False)
+            raise Refused("gitleaks could not scan any repository")
+    save_feed("gitleaks", {"repos": len(repos) - failed, "findings": findings, "total": total, "partial": partial,
+                           "failed": failed})
+    return "Scanned %d git repositor%s." % (len(repos) - failed, "y" if len(repos) - failed == 1 else "ies")
+
+
+def _int(value):
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+@check
+def check_git_secrets():
+    cid, cat, title = "git-secrets", "harden", "Secrets in your git repositories"
+    why = ("A key or token committed to a project is readable by everyone who can read the project, and stays "
+           "in its history. The weekly check reads the files of your git repositories for keys in the formats "
+           "their providers publish. It shows where, never the secret.")
+    if not feed_available("gitleaks"):
+        return result(cid, cat, title, "info", "Not checked: gitleaks is not installed.", why,
+                      fix=fix("terminal", "install-helpers", "Install"), weight=0,
+                      howto="Press Install: Vigil installs every missing helper it works with, gitleaks among them "
+                            "(the card lists each), and the next weekly check scans your repositories.")
+    cache = feed_cache("gitleaks")
+    if cache is None:
+        return result(cid, cat, title, "info", "Checked in the next weekly check.", why, weight=0,
+                      howto="Press Weekly check under Run now on the Overview.")
+    items = [i for i in cache.get("findings", []) if isinstance(i, dict)][:GITLEAKS_KEEP] \
+        if isinstance(cache.get("findings"), list) else []
+    total = _int(cache.get("total")) or len(items)
+    repos = _int(cache.get("repos"))
+    when = feed_when(cache)
+    part = " The search stopped early." if cache.get("partial") is True else ""
+    if not items:
+        what = ("No secrets in %d git repositor%s (%s).%s" % (repos, "y" if repos == 1 else "ies", when, part)) if repos \
+            else "No git repositories found below your home folder (%s).%s" % (when, part)
+        return result(cid, cat, title, "pass", what, why, weight=2)
+    lines = ["%s: %s%s (%s)" % (clean(i.get("repo"), 120), clean(i.get("file"), 160),
+                                ":%d" % i["line"] if _int(i.get("line")) else "", clean(i.get("rule"), 60))
+             for i in items]
+    return result(cid, cat, title, "warn", "%d possible secret%s in your git repositories (%s)." % (
+        total, "" if total == 1 else "s", when), why, clean_block(lines), weight=2,
+        howto="Revoke the key with the service that issued it, then take it out of the file (and out of the "
+              "history if the project was ever shared). A line that is safe, such as a test value, can carry a "
+              "`gitleaks:allow` comment.")
+
+
+# --- AI model files that run code when loaded (a native pickle scan) -----------
+# Weekly, as you. Model files in the pickle format (.pt, .pth, .ckpt, .bin, .pkl) run code when loaded. Vigil
+# reads the pickle's opcodes with Python's own disassembler, which never executes anything, and lists
+# imports that can run programs. .safetensors and GGUF files are plain data and are not looked at.
+
+MODEL_SUFFIXES = (".pt", ".pth", ".ckpt", ".bin", ".pkl", ".pickle")
+MODEL_SKIP = {"node_modules", ".git", "__pycache__", ".venv", "venv", "site-packages", ".tox", ".Trash", "Trash",
+              ".steam", "steamapps", ".wine", ".cargo", ".rustup", ".npm", ".var", "flatpak", "containers", ".mozilla"}
+MODEL_CACHE_KEEP = {"huggingface", "torch", "modelscope", "lm-studio", "whisper"}
+MODEL_WALK_SECONDS = 25
+MODEL_WALK_ENTRIES = 300000
+MODEL_MAX_FILES = 3000
+MODEL_MAX_DEPTH = 8
+MODEL_PICKLE_BYTES = 64 * 1024 * 1024
+MODEL_FILE_SECONDS = 5.0
+MODEL_KEEP = 100
+# Imports that can run a program, open a connection or load more code.
+DANGEROUS_MODULES = {
+    "os", "posix", "nt", "subprocess", "sys", "shutil", "socket", "ssl", "pty", "runpy", "importlib", "ctypes",
+    "commands", "webbrowser", "http", "httplib", "urllib", "urllib2", "requests", "ftplib", "smtplib", "telnetlib",
+    "code", "codeop", "pickle", "_pickle", "cPickle", "marshal", "types", "asyncio", "multiprocessing", "threading",
+    "signal", "tempfile", "pip", "setuptools", "distutils", "platform", "pdb", "timeit", "cProfile", "profile",
+    "bdb", "trace", "zipimport", "imp"}
+DANGEROUS_BUILTINS = {"eval", "exec", "compile", "open", "__import__", "getattr", "setattr", "delattr", "globals",
+                      "locals", "vars", "input", "breakpoint", "execfile", "reload", "file"}
+DANGEROUS_NAMES = {("torch.storage", "_load_from_bytes"), ("torch.hub", "load"),
+                   ("torch.hub", "load_state_dict_from_url"), ("numpy.testing._private.utils", "runstring"),
+                   ("numpy", "load"), ("joblib", "load"), ("torch", "load"), ("torch.serialization", "load"),
+                   ("operator", "attrgetter"), ("functools", "reduce")}
+KNOWN_MODULE_ROOTS = {"torch", "numpy", "collections", "_codecs", "copyreg", "builtins", "__builtin__", "array",
+                      "datetime", "decimal", "fractions", "re", "enum", "typing", "dataclasses", "uuid", "pathlib",
+                      "transformers", "tokenizers", "safetensors", "sklearn", "scipy", "pandas", "lightning",
+                      "pytorch_lightning", "omegaconf", "argparse", "torchvision", "torchaudio", "einops", "timm",
+                      "diffusers", "accelerate", "huggingface_hub", "ml_collections", "jax", "flax", "_operator",
+                      "functools", "numbers", "abc", "xgboost", "lightgbm", "catboost", "peft", "bitsandbytes"}
+_STRING_OPS = {"SHORT_BINUNICODE", "BINUNICODE", "BINUNICODE8", "UNICODE", "SHORT_BINSTRING", "BINSTRING", "STRING"}
+_GET_OPS = {"BINGET", "LONG_BINGET", "GET"}
+
+
+class _CappedReader(object):
+    """File-like for pickletools: never reads more than `limit` bytes in total, so a pickle that claims a
+    huge string cannot make Vigil read a huge file into memory."""
+
+    def __init__(self, fh, limit):
+        self.fh, self.left = fh, limit
+
+    def read(self, n=-1):
+        if n is None or n < 0 or n > self.left:
+            raise ValueError("pickle is larger than the scan allows")
+        data = self.fh.read(n)
+        self.left -= len(data)
+        return data
+
+    def readline(self):
+        line = self.fh.readline(min(self.left, 65536))
+        self.left -= len(line)
+        return line
+
+
+def pickle_imports(stream):
+    """The (module, name) imports a pickle stream asks for, read from its opcodes without running it.
+    Raises ValueError for a stream that is not a pickle or is too large or slow to read."""
+    import pickletools
+    found, memo, recent, n = [], {}, [], 0
+    deadline = time.monotonic() + MODEL_FILE_SECONDS
+    for op, arg, _pos in pickletools.genops(stream):
+        n += 1
+        if n > 5000000 or (n % 4096 == 0 and time.monotonic() > deadline):
+            raise ValueError("too long to read")
+        name = op.name
+        if name in _STRING_OPS and isinstance(arg, (str, bytes)):
+            recent.append(arg if isinstance(arg, str) else arg.decode("utf-8", "replace"))
+            recent = recent[-2:]
+        elif name in _GET_OPS:
+            recent.append(memo.get(arg))
+            recent = recent[-2:]
+        elif name == "MEMOIZE":
+            memo[len(memo)] = recent[-1] if recent else None
+        elif name in ("BINPUT", "LONG_BINPUT", "PUT"):
+            memo[arg] = recent[-1] if recent else None
+        elif name == "GLOBAL" and isinstance(arg, str):
+            mod, _, attr = arg.partition(" ")
+            found.append((mod, attr))
+        elif name == "STACK_GLOBAL":
+            if len(recent) == 2 and all(isinstance(x, str) for x in recent):
+                found.append((recent[0], recent[1]))
+            else:
+                found.append(("?", "?"))
+            recent = []
+        elif name not in ("PROTO", "FRAME", "STOP"):
+            recent = []
+    return found
+
+
+def classify_imports(imports):
+    """(dangerous, unfamiliar): sorted 'module.name' strings."""
+    bad, odd = set(), set()
+    for mod, attr in imports:
+        root = mod.split(".")[0]
+        text = "%s.%s" % (mod, attr)
+        if mod == "?" or (mod, attr) in DANGEROUS_NAMES or root in DANGEROUS_MODULES \
+                or (root in ("builtins", "__builtin__") and attr in DANGEROUS_BUILTINS):
+            bad.add(text)
+        elif root not in KNOWN_MODULE_ROOTS:
+            odd.add(text)
+    return sorted(bad), sorted(odd)
+
+
+def scan_model_file(path):
+    """(dangerous, unfamiliar) for one file, or None when it is not a pickle model. Raises OSError or
+    ValueError for a file that could not be read. Never follows a link."""
+    import zipfile
+    fd = os.open(path, O_READ | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size < 4:
+            return None
+        os.set_blocking(fd, True)
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            head = fh.read(4)
+            fh.seek(0)
+            imports = []
+            if head[:2] == b"PK":
+                try:
+                    zf = zipfile.ZipFile(fh)
+                    members = [i for i in zf.infolist()[:200] if i.filename.endswith(".pkl") and not i.is_dir()][:8]
+                    if not members:
+                        return None
+                    for info in members:
+                        with zf.open(info) as member:
+                            imports += pickle_imports(_CappedReader(member, MODEL_PICKLE_BYTES))
+                except zipfile.BadZipFile:
+                    return None
+            elif head[0:1] == b"\x80" and head[1:2] in (b"\x02", b"\x03", b"\x04", b"\x05"):
+                imports = pickle_imports(_CappedReader(fh, MODEL_PICKLE_BYTES))
+            elif path.endswith((".pkl", ".pickle")):
+                imports = pickle_imports(_CappedReader(fh, MODEL_PICKLE_BYTES))
+            else:
+                return None
+        return classify_imports(imports)
+    finally:
+        os.close(fd)
+
+
+def find_model_files():
+    """([path], partial): files below your home folder with a model suffix, in a budget of time and entries.
+    Folders named in MODEL_SKIP are not entered, nor are links; ~/.cache is entered only where models live."""
+    files, partial = [], False
+    deadline, seen = time.monotonic() + MODEL_WALK_SECONDS, 0
+    cache_dir = home_path(".cache")
+    stack = [(HOME, 0)]
+    while stack:
+        path, depth = stack.pop()
+        if time.monotonic() > deadline or seen > MODEL_WALK_ENTRIES or len(files) >= MODEL_MAX_FILES:
+            partial = True
+            break
+        try:
+            with os.scandir(path) as it:
+                entries = list(it)[:20000]
+        except OSError:
+            continue
+        seen += len(entries)
+        for e in sorted(entries, key=lambda x: x.name):
+            try:
+                if e.is_symlink():
+                    continue
+                if e.is_dir(follow_symlinks=False):
+                    if e.name in MODEL_SKIP or depth >= MODEL_MAX_DEPTH:
+                        continue
+                    if path == cache_dir and e.name not in MODEL_CACHE_KEEP:
+                        continue
+                    stack.append((e.path, depth + 1))
+                elif e.is_file(follow_symlinks=False) and e.name.lower().endswith(MODEL_SUFFIXES) \
+                        and path != HOME:                           # loose files in ~ are not models
+                    files.append(e.path)
+            except OSError:
+                continue
+    return files, partial
+
+
+def refresh_model_scan():
+    files, partial = find_model_files()
+    scanned = unreadable = unfamiliar = 0
+    dangerous = []
+    deadline = time.monotonic() + 1200
+    for path in files:
+        if STOP["on"] or time.monotonic() > deadline:
+            partial = True
+            break
+        try:
+            res = scan_model_file(path)
+        except Exception:                                   # noqa: BLE001 - a strange file must not stop the scan
+            unreadable += 1
+            continue
+        if res is None:
+            continue
+        scanned += 1
+        bad, odd = res
+        if bad:
+            dangerous.append({"path": clean(_shown(path), 200), "imports": [clean(b, 80) for b in bad[:5]],
+                              "more": max(0, len(bad) - 5)})
+        elif odd:
+            unfamiliar += 1
+    save_feed("model-scan", {"scanned": scanned, "dangerous": dangerous[:MODEL_KEEP], "unfamiliar": unfamiliar,
+                             "unreadable": unreadable, "partial": partial})
+    return "Checked %d AI model file%s." % (scanned, "" if scanned == 1 else "s")
+
+
+@check
+def check_model_files():
+    cid, cat, title = "model-files", "supply", "AI model files that run code"
+    why = ("Model files in the older pickle format (.pt, .pth, .ckpt, .bin, .pkl) run whatever code they carry "
+           "the moment a program loads them, so a model from a stranger can take over your account. "
+           "Safetensors and GGUF files are plain data and cannot. Vigil reads the pickle's instructions without "
+           "running it and lists files that import something able to run programs.")
+    cache = feed_cache("model-scan")
+    if cache is None:
+        return result(cid, cat, title, "info", "Checked in the next weekly check.", why, weight=0,
+                      howto="Press Weekly check under Run now on the Overview.")
+    scanned = _int(cache.get("scanned"))
+    bad = [i for i in cache.get("dangerous", []) if isinstance(i, dict)][:MODEL_KEEP] \
+        if isinstance(cache.get("dangerous"), list) else []
+    odd = _int(cache.get("unfamiliar"))
+    when = feed_when(cache)
+    part = " The search stopped early." if cache.get("partial") is True else ""
+    if not bad:
+        note = " %d use classes Vigil does not know, which is normal for custom models." % odd if odd else ""
+        return result(cid, cat, title, "pass", "No pickle model file imports anything dangerous (%d checked, %s).%s%s" % (
+            scanned, when, note, part), why, weight=2)
+    lines = []
+    for i in bad:
+        names = [clean(x, 80) for x in i.get("imports", []) if isinstance(x, str)][:5]
+        more = _int(i.get("more"))
+        lines.append("%s: %s%s" % (clean(i.get("path"), 200), ", ".join(names), " and %d more" % more if more else ""))
+    return result(cid, cat, title, "warn", "%d model file%s can run programs when loaded (%s)." % (
+        len(bad), "" if len(bad) == 1 else "s", when), why, clean_block(lines), weight=2,
+        fix=fix("docs", "safetensors", "Learn more"),
+        howto="Do not load these files. Delete them, or download the model again as a .safetensors file from the "
+              "author. A model you made yourself may import classes on purpose; read the list under Details first.")
+
+
+# --- Rootkit scan (rkhunter), Run all only -------------------------------------
+# rkhunter looks for known rootkits, hidden files and changed system programs, and needs root: so, like the
+# password scan, it runs only from Run all, through pkexec, with its command on the card. It makes no
+# network calls here (no --update, no --versioncheck). On the first run it records the current state of the
+# system programs as its baseline (--propupd). Warnings about programs a package shipped, byte for byte,
+# are noted as explained and do not count: rkhunter does not know pacman.
+
+RKHUNTER = "/usr/bin/rkhunter"
+# Must match RKHUNTER_SCRIPT in Model.js (a test checks).
+RKHUNTER_SCRIPT = (
+    "export LC_ALL=C; "
+    "[ -s /var/lib/rkhunter/db/rkhunter.dat ] || /usr/bin/rkhunter --propupd --nolog >/dev/null 2>&1; "
+    "/usr/bin/rkhunter --check --sk --nocolors --nolog --rwo 2>&1; rc=$?; [ \"$rc\" -le 1 ] || exit \"$rc\"")
+RKHUNTER_ARGV = [PKEXEC, "/usr/bin/bash", "-c", RKHUNTER_SCRIPT]
+RKHUNTER_KEEP = 100
+_RK_PATH = re.compile(r"(?<![\w/.-])(/(?:[A-Za-z0-9._+@-]+/)*[A-Za-z0-9._+@-]+)")
+_RK_PACKAGE_ROOTS = ("/usr/", "/etc/", "/bin/", "/sbin/", "/lib/", "/lib64/", "/opt/")
+
+
+def parse_rkhunter(text):
+    """[{text, path}] from `rkhunter --rwo`: one entry per warning, with its indented detail lines folded into
+    the text. path is set for the two kinds Vigil can check against pacman: a program replaced by a script, and
+    one whose properties changed."""
+    blocks, cur = [], None
+    for line in text.splitlines()[:5000]:
+        if line.startswith("Warning") or line.startswith("[Warning"):
+            cur = [line.strip()]
+            blocks.append(cur)
+        elif cur is not None and line[:1] in (" ", "\t") and line.strip() and len(cur) < 8:
+            cur.append(line.strip())
+        else:
+            cur = None
+    out = []
+    for b in blocks[:RKHUNTER_KEEP * 4]:
+        joined = " ".join(b)
+        checkable = "has been replaced by a script" in joined or "properties have changed" in joined
+        m = _RK_PATH.search(joined) if checkable else None
+        out.append({"text": clean(joined, 240),
+                    "path": m.group(1) if m and m.group(1).startswith(_RK_PACKAGE_ROOTS) else ""})
+    return out
+
+
+def explain_rkhunter(warnings):
+    """[{text, explained}]: explained when the program is byte for byte what an installed package shipped."""
+    paths = [w["path"] for w in warnings if w["path"]]
+    same = package_verified(paths, _RK_PACKAGE_ROOTS) if paths else set()
+    return [{"text": w["text"], "explained": bool(w["path"]) and w["path"] in same} for w in warnings]
+
+
+def refresh_rkhunter():
+    if not feed_available("rkhunter"):
+        raise Refused("rkhunter or pkexec is not available")
+    rc, out = run(RKHUNTER_ARGV, timeout=1800, limit=512 * 1024)
+    if rc in (126, 127):
+        raise Refused("no password was given")
+    if rc != 0:
+        save_feed("rkhunter", {}, ok=False)
+        raise Refused("it did not finish")
+    found = explain_rkhunter(parse_rkhunter(out or ""))
+    save_feed("rkhunter", {"warnings": found[:RKHUNTER_KEEP], "total": len(found)})
+    return "Scanned for rootkits."
+
+
+@check
+def check_rootkits():
+    cid, cat, title = "rootkit-scan", "detect", "Rootkit scan (rkhunter)"
+    why = ("A rootkit hides an intruder from the tools you would use to find it. rkhunter looks for known ones, "
+           "hidden files and system programs that changed. It needs root, so it runs only when you press Run all. "
+           "Its signatures are old, so it mainly finds old, well-known rootkits; the changed-program check is "
+           "the useful part.")
+    if not is_trusted_executable(sys_path(RKHUNTER)):
+        return result(cid, cat, title, "info", "Not checked: rkhunter is not installed.", why,
+                      fix=fix("terminal", "install-helpers", "Install"), weight=0,
+                      howto="Press Install: Vigil installs every missing helper it works with, rkhunter among them "
+                            "(the card lists each). Run all then scans for rootkits, and asks for your password to do it.")
+    cache = feed_cache("rkhunter")
+    if cache is None:
+        return result(cid, cat, title, "info", "Not run yet: Run all does it (Omarchy asks for your password).", why,
+                      weight=0, howto="Press Run all on the Overview.")
+    items = [w for w in cache.get("warnings", []) if isinstance(w, dict)][:RKHUNTER_KEEP] \
+        if isinstance(cache.get("warnings"), list) else []
+    real = [w for w in items if w.get("explained") is not True]
+    explained = len(items) - len(real)
+    age = _days_since(cache.get("at"))
+    when = feed_when(cache)
+    note = (" %d more match%s what a package shipped and %s not counted." % (
+        explained, "es" if explained == 1 else "", "is" if explained == 1 else "are")) if explained else ""
+    if age is not None and age > FULL_SCAN_STALE_DAYS:
+        return result(cid, cat, title, "info", "Last run %d days ago: press Run all." % age, why, weight=0)
+    if not real:
+        return result(cid, cat, title, "pass", "rkhunter found nothing (%s).%s" % (when, note), why, weight=2)
+    lines = [clean(w.get("text"), 240) for w in real]
+    return result(cid, cat, title, "warn", "rkhunter has %d warning%s (%s).%s" % (
+        len(real), "" if len(real) == 1 else "s", when, note), why, clean_block(lines), weight=2,
+        howto="Read each warning under Details. They are leads, not proof: rkhunter is known to warn about harmless "
+              "things on Arch. A program or file you do not recognise, or a changed system program that no update "
+              "explains, deserves a closer look. Get help before deleting anything.")
+
+
 FEED_REFRESH = {"arch-audit": refresh_arch_audit, "osv": refresh_osv, "aur": refresh_aur}
 FEED_REFRESH["pending-updates"] = refresh_pending_updates
+FEED_REFRESH["gitleaks"] = refresh_gitleaks
+FEED_REFRESH["model-scan"] = refresh_model_scan
 FEED_LABELS = {"pending-updates": "the system update lookup", "flatpak": "the Flatpak update lookup",
                "firmware": "the firmware lookup", "downloads-scan": "the virus scan of ~/Downloads",
                "flatpak-update": "your Flatpak apps", "arch-audit": "the Arch security scan",
                "osv": "the OSV malware scan", "aur": "the AUR status lookup", "virus-scan": "the virus scan of ~",
                "bumblebee": "the Bumblebee scan", "bumblebee-list": "the Bumblebee list",
                "password-check": "the password scan", "signatures": "the virus signatures",
+               "gitleaks": "the secrets scan of your git repositories", "model-scan": "the AI model file scan",
+               "rkhunter": "the rootkit scan",
                "signatures-update": "the virus signatures update"}
 
 
@@ -3456,7 +3998,7 @@ def refresh_bumblebee():
 
 
 STEP_WEIGHT = {"virus-scan": 30, "downloads-scan": 3, "osv": 2, "bumblebee": 2, "bumblebee-list": 2, "firmware": 2,
-               "signatures-update": 2, "flatpak": 4, "arch-audit": 2}
+               "signatures-update": 2, "flatpak": 4, "arch-audit": 2, "gitleaks": 6, "model-scan": 4, "rkhunter": 10}
 
 # One name for each thing Vigil runs, used everywhere: the progress line, the
 # Last run list and (in Model.js) the run cards, so what will run, what ran
@@ -3468,11 +4010,14 @@ ITEM_NAME = {"pending-updates": "System update lookup", "flatpak": "Flatpak upda
              "arch-audit": "Arch security scan", "osv": "OSV malware scan", "aur": "AUR status lookup",
              "bumblebee-list": "Bumblebee list", "bumblebee": "Bumblebee scan",
              "signatures": "Virus signatures", "downloads-scan": "Virus scan of ~/Downloads",
-             "firmware": "Firmware lookup", "virus-scan": "Virus scan of ~", "password-check": "Password scan"}
+             "firmware": "Firmware lookup", "virus-scan": "Virus scan of ~", "password-check": "Password scan",
+             "gitleaks": "Secrets scan of your git repositories", "model-scan": "AI model file scan",
+             "rkhunter": "Rootkit scan"}
 ASKS = " (Omarchy asks for your password)"
 STEP_TEXT = dict(ITEM_NAME, **{
     "flatpak-update": "Flatpak app updates",
     "password-check": ITEM_NAME["password-check"] + ASKS,
+    "rkhunter": ITEM_NAME["rkhunter"] + ASKS,
     "signatures-update": "Virus signatures update" + ASKS})
 CLAM_SCANS = ("downloads-scan", "virus-scan")
 # Set during a run when the Bumblebee list could not be downloaded and the
@@ -3480,7 +4025,8 @@ CLAM_SCANS = ("downloads-scan", "virus-scan")
 LIST_FALLBACK = {"bumblebee": False}
 
 
-def run_plan(full=False, scan_only=False, daily_only=False, weekly_only=False, signatures=False):
+def run_plan(full=False, scan_only=False, daily_only=False, weekly_only=False, signatures=False, hold_scan=False,
+             finish_scan=False):
     """The steps a run takes, in order. With no flag it is the background run:
     only what is due, never a password. Each scan comes right after its list:
     the Bumblebee list before the Bumblebee scan, the virus signatures before
@@ -3489,7 +4035,12 @@ def run_plan(full=False, scan_only=False, daily_only=False, weekly_only=False, s
     days old (the service has fallen behind), and only when the panel says its
     card showed that command (signatures): no root step runs that the card did
     not show. Run all also runs the password scan first. The daily and weekly
-    checks and a row's Scan now never ask for a password."""
+    checks and a row's Scan now never ask for a password. hold_scan (Run all,
+    when its card showed the Omarchy update) leaves the virus scan out, with
+    the root steps decided as if it were in; finish_scan is that virus scan
+    alone, run after the update."""
+    if finish_scan:
+        return ["signatures", "virus-scan"] if feed_available("virus-scan") else []
     background = not (full or scan_only or daily_only or weekly_only)
     pressed = not background
     run_weekly = full or weekly_only or (background and feed_due("full-scan"))
@@ -3507,13 +4058,20 @@ def run_plan(full=False, scan_only=False, daily_only=False, weekly_only=False, s
                 steps.append(name)
     if run_weekly and feed_available("firmware"):
         steps.append("firmware")
+    for name in ("gitleaks", "model-scan"):
+        if run_weekly and feed_available(name):
+            steps.append(name)
     if (run_weekly or scan_only) and feed_available("virus-scan"):
         steps += ["signatures", "virus-scan"]      # last: it takes longest
     first = []
     if signatures and full and any(n in steps for n in CLAM_SCANS) and signatures_due():
         first.append("signatures-update")
+    if hold_scan and steps[-2:] == ["signatures", "virus-scan"]:
+        steps = steps[:-2]
     if full and can_ask_password():
         first.append("password-check")
+        if feed_available("rkhunter"):
+            first.append("rkhunter")
     return first + steps
 
 
@@ -3532,18 +4090,20 @@ def verify_signatures():
 
 
 def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False, weekly_only=False,
-                      signatures=False):
+                      signatures=False, hold_scan=False, finish_scan=False):
     """Run what is due (the background run), or what a button asks for:
     daily_only (Daily check), weekly_only (Weekly check), full or force
     (Run all), scan_only (the virus scan of your home folder alone, its row's
     Scan now). signatures: the card you confirmed showed the signatures update.
     Emits progress lines when asked to."""
     full = full or force
+    scan_only = scan_only or finish_scan
     background = not (full or scan_only or daily_only or weekly_only)
     pressed = not background
     run_weekly = full or weekly_only or (background and feed_due("full-scan"))
     steps = run_plan(full=full, scan_only=scan_only, daily_only=daily_only, weekly_only=weekly_only,
-                     signatures=signatures)
+                     signatures=signatures, hold_scan=hold_scan, finish_scan=finish_scan)
+    held = hold_scan and full and feed_available("virus-scan")     # the virus scan comes after the Omarchy update
 
     # Each step's share of the progress bar: the virus scan takes most of the
     # time, so it gets most of the bar, and the quick steps a sliver each.
@@ -3598,6 +4158,8 @@ def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False
                 refresh_firmware()
             elif name == "password-check":
                 refresh_no_password()
+            elif name == "rkhunter":
+                refresh_rkhunter()
             elif name == "flatpak" and (full or daily_only) and "user" in flatpak_installations():
                 update_user_flatpaks()
             else:
@@ -3623,15 +4185,19 @@ def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False
         for name in steps:
             if name in FEED_FILES and name not in done:
                 save_feed(name, {}, ok=False)
-    if run_weekly and "virus-scan" in done and feed_available("downloads-scan"):
+    # The weekly bookkeeping belongs to whoever ran the virus scan: a held Run all leaves it to finish_scan.
+    book = (run_weekly and not held) or finish_scan
+    if book and "virus-scan" in done and feed_available("downloads-scan"):
         save_feed("downloads-scan", {"found": [], "files": 0, "byFullScan": True,
                                      "used": (feed_cache("virus-scan") or {}).get("used")})
-    if run_weekly:
+    if book:
         save_feed("full-scan", {}, ok=not stopped and not [n for n in failed if n in ("virus-scan", "firmware")],
                   retry_days=FEED_DAYS if timed_out else None)
+    if held:
+        update_clear()                      # so the update terminal's markers start from nothing
     no_pkexec = " The password scan could not run: pkexec is missing." if full and not can_ask_password() else ""
     if stopped and not done:
-        return {"ok": True, "stopped": True, "action": "", "message": "Stopped."}
+        return {"ok": True, "stopped": True, "held": False, "action": "", "message": "Stopped."}
     if not done and not failed:
         if run_weekly:
             return {"ok": True, "action": "", "message": "Nothing to run yet: none of the tools these scans "
@@ -3643,15 +4209,19 @@ def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False
             "osv": "checked your npm and Bun packages against OSV",
             "aur": "looked up your AUR packages", "bumblebee": "checked your packages with Bumblebee",
             "downloads-scan": "scanned what is new in Downloads", "firmware": "checked for firmware updates",
-            "virus-scan": "scanned your home folder", "password-check": "checked for accounts without a password"}
+            "virus-scan": "scanned your home folder", "password-check": "checked for accounts without a password",
+            "gitleaks": "scanned your git repositories for secrets", "model-scan": "checked your AI model files",
+            "rkhunter": "scanned for rootkits"}
     parts = [said[n] for n in done if n in said]
     msg = (_and(parts)[0].upper() + _and(parts)[1:] + ".") if parts else ""
-    retried = [n for n in failed if n not in ("password-check", "signatures-update", "signatures")
+    retried = [n for n in failed if n not in ("password-check", "rkhunter", "signatures-update", "signatures")
                and n not in timed_out]
     if retried:
         msg += " Could not finish %s; it runs again with the next check." % _and([FEED_LABELS[n] for n in retried])
     if "password-check" in failed:
         msg += " The password scan was skipped: no password was given."
+    if "rkhunter" in failed:
+        msg += " The rootkit scan was skipped: %s." % why.get("rkhunter", "it did not finish")
     if "virus-scan" in timed_out:
         msg += " The virus scan took longer than %d hours, so it was stopped; it tries again next week." % (
             VIRUS_SCAN_SECONDS // 3600)
@@ -3666,11 +4236,15 @@ def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False
         msg += " " + note
     msg += no_pkexec
     found = feed_findings()
-    msg += (" On this machine: %s. See the tabs for details." % "; ".join(found)) if found \
-        else " Nothing on this machine needs attention."
+    if held and not stopped:
+        msg += " The virus scan follows the Omarchy update."
+    else:
+        msg += (" On this machine: %s. See the tabs for details." % "; ".join(found)) if found \
+            else " Nothing on this machine needs attention."
     if stopped:
         msg = "Stopped." + (" Done before that: %s." % _and(parts) if parts else "")
-    return {"ok": not failed or stopped, "stopped": stopped, "action": "", "message": clean(msg.strip(), MESSAGE_MAX)}
+    return {"ok": not failed or stopped, "stopped": stopped, "held": bool(held and not stopped), "action": "",
+            "message": clean(msg.strip(), MESSAGE_MAX)}
 
 
 CLAMUI_APP_ID = "io.github.linx_systems.ClamUI"
@@ -4167,11 +4741,11 @@ def save_baseline(snap):
         os.close(dirfd)
 
 
-def package_verified(paths):
-    """The subset of /etc paths whose current content is exactly what an
+def package_verified(paths, prefixes=("/etc/",)):
+    """The subset of paths (under prefixes) whose current content is exactly what an
     installed package shipped, according to pacman's own mtree records.
     Those changes came from an update, so they are not reported."""
-    wanted = {p: None for p in paths if p.startswith("/etc/")}
+    wanted = {p: None for p in paths if p.startswith(prefixes)}
     if not wanted:
         return set()
     for p in list(wanted):
@@ -4486,6 +5060,9 @@ def check_opt_out():
     why = ("Many developer tools (Homebrew, .NET, Gatsby, Next.js and others) stop sending usage data when "
            "variables such as DO_NOT_TRACK=1 are set for your session.")
     state, name = _opt_out_state()
+    if state == "ours" and _env_file_kind(OPT_OUT_NAME, OPT_OUT_TEXT, OPT_OUT_OLD_TEXTS) == "old":
+        return result(cid, cat, title, "info", "Set by Vigil, but Vigil's list has grown since.", why,
+                      fix=fix("helper", "optout-on", "Update them"), weight=0)
     if state == "ours":
         return result(cid, cat, title, "pass", "Set by Vigil for every new session.", why,
                       fix=fix("helper", "optout-off", "Remove"), weight=0)
@@ -4494,15 +5071,273 @@ def check_opt_out():
     return result(cid, cat, title, "info", "Not set.", why, fix=fix("helper", "optout-on", "Set them"), weight=0)
 
 
+# AI coding agents Omarchy installs (Claude Code, Codex, Gemini, opencode, pi) and the switches that
+# stop them sending usage data. Only Claude Code and pi and Gemini have a variable; Codex has a setting
+# in its own config file that Vigil leaves alone (its crash-report host is blocked with the telemetry hosts).
+AGENT_HOMES = (("Claude Code", (".claude",)), ("Codex", (".codex",)), ("Gemini CLI", (".gemini",)),
+               ("opencode", (".config", "opencode")), ("pi", (".pi",)))
+
+
+def _installed_agents():
+    names = [n for n, parts in AGENT_HOMES if exists(home_path(*parts))]
+    if "Claude Code" not in names and is_trusted_executable(sys_path("/usr/bin/claude")):
+        names.insert(0, "Claude Code")
+    return names
+
+
+def _env_texts():
+    """The text of every uwsm and environment.d file of yours, for 'is this variable set' questions."""
+    out = []
+    for parts in (OPT_OUT_DIR, (".config", "environment.d")):
+        d = home_path(*parts)
+        for name in list_dir(d, 200):
+            try:
+                out.append((name, parts, read_text(d + "/" + name, SMALL_FILE_MAX, follow=True) or ""))
+            except Refused:
+                continue
+    return out
+
+
+def _claude_env_set():
+    """True when Claude Code's own settings file sets DISABLE_TELEMETRY for it."""
+    base = home_path(".claude")
+    try:
+        data = json.loads(read_text(base + "/settings.json", SMALL_FILE_MAX) or "null")
+    except (Refused, ValueError):
+        return False
+    env = data.get("env") if isinstance(data, dict) else None
+    return isinstance(env, dict) and str(env.get("DISABLE_TELEMETRY", "")).lower() in ("1", "true")
+
+
 @check
-def check_black_ops():
-    cid, cat, title = "black-ops", "privacy", "Black Ops"
-    why = ("Black Ops is a separate plugin that blocks telemetry from Omarchy and common apps and keeps "
-           "watch that the protections stay in place. Vigil leaves the protections it manages to it.")
-    if exists(home_path(".config", "omarchy", "plugins", "brightwalker25.black-ops")):
-        return result(cid, cat, title, "pass", "Installed; it manages telemetry blocking.", why, weight=0)
-    return result(cid, cat, title, "info", "Not installed. Vigil covers the basics; Black Ops goes further.",
-                  why, weight=0)
+def check_agent_telemetry():
+    cid, cat, title = "agent-telemetry", "privacy", "AI agent telemetry"
+    why = ("Claude Code reports usage and errors to its maker unless DISABLE_TELEMETRY and "
+           "DISABLE_ERROR_REPORTING are set, and pi and Gemini CLI have switches of their own. Omarchy installs "
+           "these agents, so they are likely on this machine.")
+    agents = _installed_agents()
+    if not agents:
+        return result(cid, cat, title, "na", "No AI coding agent found.", why, weight=0)
+    texts = _env_texts()
+    ours = any(n == AGENTS_NAME and p == OPT_OUT_DIR and t.startswith(OPT_OUT_MARK) for n, p, t in texts)
+    claude = ours or _claude_env_set() or any(re.search(r"^\s*(export\s+)?DISABLE_TELEMETRY=[\"']?1", t, re.M)
+                                              for _, _, t in texts)
+    detail = "Found: " + ", ".join(agents) + "."
+    if ours:
+        return result(cid, cat, title, "pass", "Telemetry is switched off for new sessions.", why, detail,
+                      fix=fix("helper", "agents-off", "Remove"), weight=1)
+    if claude:
+        return result(cid, cat, title, "pass", "Claude Code's telemetry is off.", why, detail, weight=1)
+    if "Claude Code" in agents:
+        return result(cid, cat, title, "warn", "Claude Code sends usage data and error reports.", why, detail,
+                      fix=fix("helper", "agents-on", "Switch it off"), weight=1)
+    return result(cid, cat, title, "info", "No variable is set for these agents.", why, detail,
+                  fix=fix("helper", "agents-on", "Switch it off"), weight=0)
+
+
+# --- Telemetry that other software sends -------------------------------------
+# What Vigil does itself, with no service, timer or watcher: the checks read the
+# files, and each fix is a button you press that shows its commands first.
+# (Black Ops, a separate plugin, did this before; Vigil no longer hands it off.)
+
+# Must match TELEMETRY_HOSTS in Model.js (a test checks).
+TELEMETRY_HOSTS = (
+    "http-intake.logs.us5.datadoghq.com",     # Claude Code, Datadog
+    "o1158394.ingest.us.sentry.io",           # Claude Code, Sentry crash reports
+    "o33249.ingest.us.sentry.io",             # Codex, Sentry crash reports
+    "telemetry.1passwordservices.com",        # 1Password telemetry
+    "core-sentry.1passwordservices.com",      # 1Password, Sentry crash reports
+    "usage-ping.brave.com",                   # Brave daily usage ping
+    "star-randsrv.bsg.brave.com",             # Brave P3A analytics
+    "incoming.telemetry.mozilla.org",         # Firefox-based browsers, such as Zen
+    "google-analytics.com",                   # Google Analytics, in Obsidian, OnlyOffice
+    "www.google-analytics.com",               # and pages that embed it
+    "ssl.google-analytics.com",
+    "region1.google-analytics.com",
+    "analytics.google.com",
+    "region1.analytics.google.com",
+)
+HOSTS_BEGIN = "# BEGIN omarchy-vigil telemetry"
+HOSTS_END = "# END omarchy-vigil telemetry"
+_SINKS = ("0.0.0.0", "::", "127.0.0.1", "::1")
+
+
+def hosts_state():
+    """(blocked, block_ok): which TELEMETRY_HOSTS /etc/hosts sends nowhere, and whether Vigil's marked
+    block is there and well formed (so it can be taken out again). None if /etc/hosts cannot be read."""
+    try:
+        text = read_text(sys_path("/etc/hosts"), FILE_MAX)
+    except Refused:
+        return None
+    if text is None:
+        return None
+    blocked, begins, ends, first = set(), 0, 0, None
+    for i, line in enumerate(text.splitlines()[:20000]):
+        if line == HOSTS_BEGIN:
+            begins += 1
+            first = i if first is None else first
+        elif line == HOSTS_END:
+            ends += 1
+        parts = line.split("#", 1)[0].split()
+        if len(parts) >= 2 and parts[0] in _SINKS:
+            blocked.update(h.lower() for h in parts[1:])
+    return {h for h in TELEMETRY_HOSTS if h in blocked}, (begins == 1 and ends == 1)
+
+
+@check
+def check_telemetry_hosts():
+    cid, cat, title = "telemetry-hosts", "privacy", "Telemetry hosts"
+    why = ("Claude Code, Codex, 1Password, Brave, Firefox-based browsers and pages that embed Google Analytics "
+           "send usage data and crash reports to fixed addresses. Sending those addresses nowhere in /etc/hosts "
+           "stops it for every program, whatever its own settings say.")
+    state = hosts_state()
+    if state is None:
+        return result(cid, cat, title, "unknown", "Could not read /etc/hosts.", why, weight=1)
+    blocked, ours = state
+    undo = ("undo-hosts", "Take the block out") if ours else None
+    if len(blocked) == len(TELEMETRY_HOSTS):
+        return result(cid, cat, title, "pass", "All %d telemetry addresses are blocked." % len(TELEMETRY_HOSTS), why,
+                      weight=1, undo=undo)
+    missing = [h for h in TELEMETRY_HOSTS if h not in blocked]
+    return result(cid, cat, title, "warn", "%d of %d telemetry addresses can be reached." % (len(missing), len(TELEMETRY_HOSTS)),
+                  why, clean_block(missing), fix=fix("terminal", "hosts-block", "Block them"), weight=1, undo=undo,
+                  howto="Press Block them: Vigil adds one marked block to /etc/hosts. Pages that use Google Analytics "
+                        "stop reporting your visits to it; nothing else changes.")
+
+
+# What the Chromium policy sets, in the order it is written. Must match CHROMIUM_POLICY in Model.js.
+CHROMIUM_POLICY = (
+    ("SearchSuggestEnabled", False), ("NetworkPredictionOptions", 2), ("AlternateErrorPagesEnabled", False),
+    ("SpellCheckServiceEnabled", False), ("MetricsReportingEnabled", False),
+    ("UrlKeyedAnonymizedDataCollectionEnabled", False), ("WebRtcIPHandling", "default_public_interface_only"),
+    ("PrivacySandboxAdTopicsEnabled", False), ("PrivacySandboxSiteEnabledAdsEnabled", False),
+    ("PrivacySandboxAdMeasurementEnabled", False), ("PasswordLeakDetectionEnabled", False),
+    ("BackgroundModeEnabled", False), ("EnableMediaRouter", False),
+)
+CHROMIUM_POLICY_DIR = "/etc/chromium/policies/managed"
+CHROMIUM_POLICY_NAME = "90-omarchy-vigil.json"
+CHROMIUM_POLICY_TEXT = json.dumps(dict(CHROMIUM_POLICY), indent=2) + "\n"
+
+
+@check
+def check_chromium_privacy():
+    cid, cat, title = "chromium-privacy", "privacy", "Chromium privacy policy"
+    why = ("Out of the box Chromium sends what you type in the address bar to a search provider as you type, "
+           "preloads pages, sends Google its error pages and spelling checks, reports usage, and searches the "
+           "local network for Cast devices. A managed policy switches that off.")
+    if not exists(sys_path("/usr/bin/chromium")) and not exists(sys_path("/etc/chromium")):
+        return result(cid, cat, title, "na", "Chromium is not installed.", why, weight=1)
+    folder = sys_path(CHROMIUM_POLICY_DIR)
+    have = {}
+    ours = False
+    for name in list_dir(folder, 50):
+        if not name.endswith(".json"):
+            continue
+        try:
+            text = read_text(folder + "/" + name, SMALL_FILE_MAX) or ""
+            data = json.loads(text)
+        except (Refused, ValueError):
+            continue
+        if isinstance(data, dict):
+            ours = ours or (name == CHROMIUM_POLICY_NAME and text == CHROMIUM_POLICY_TEXT)
+            for k, val in data.items():
+                have.setdefault(k, val)
+    missing = [k for k, val in CHROMIUM_POLICY if k not in have or have[k] != val or type(have[k]) is not type(val)]
+    undo = ("undo-chromium", "Take the policy out") if ours else None
+    if not missing:
+        return result(cid, cat, title, "pass", "Chromium's privacy policy is in place.", why, weight=1, undo=undo)
+    return result(cid, cat, title, "warn", "%d of %d privacy settings are not set." % (len(missing), len(CHROMIUM_POLICY)),
+                  why, clean_block(missing), fix=fix("terminal", "chromium-privacy", "Set the policy"), weight=1,
+                  undo=undo, howto="Press Set the policy: Vigil writes one file beside Omarchy's own in "
+                                   "/etc/chromium/policies/managed. Casting from Chromium stops working.")
+
+
+# The weather panel keeps the place you chose to about a metre and sends it with every refresh to wttr.in and
+# open-meteo.com. A forecast needs a few kilometres: snap the point to the centre of a square 1.5 miles across.
+WEATHER_PARTS = (".local", "state", "omarchy", "settings")
+WEATHER_NAME = "weather.json"
+WEATHER_GRID_KM = 2.414
+KM_PER_DEGREE = 111.32
+
+
+def _is_coordinate(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and x == x and abs(x) != float("inf")
+
+
+def snap_location(lat, lon):
+    step = WEATHER_GRID_KM / KM_PER_DEGREE
+    lat = max(-90.0, min(90.0, round(round(lat / step) * step, 4)))
+    lon_step = min(360.0, step / max(math.cos(math.radians(lat)), 1e-6))
+    lon = round(round(lon / lon_step) * lon_step, 4)
+    if lon > 180:
+        lon = round(lon - 360, 4)
+    elif lon < -180:
+        lon = round(lon + 360, 4)
+    return lat, lon
+
+
+def _weather():
+    """(data, error): the parsed weather.json, None when there is none."""
+    try:
+        text = read_text(home_path(*WEATHER_PARTS, WEATHER_NAME), SMALL_FILE_MAX)
+    except Refused:
+        return None, True
+    if text is None:
+        return None, False
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None, True
+    return (data, False) if isinstance(data, dict) else (None, True)
+
+
+@check
+def check_weather_location():
+    cid, cat, title = "weather-location", "privacy", "Weather location"
+    why = ("Omarchy's weather panel stores the place you chose to about a metre and sends those coordinates with "
+           "every refresh to wttr.in and open-meteo.com. A VPN does not hide it: the place is inside the request. "
+           "A forecast only needs a few kilometres.")
+    data, error = _weather()
+    if error:
+        return result(cid, cat, title, "unknown", "Could not read the weather settings.", why, weight=1)
+    lat, lon = (data or {}).get("latitude"), (data or {}).get("longitude")
+    if not (_is_coordinate(lat) and _is_coordinate(lon)):
+        return result(cid, cat, title, "na", "No weather location is stored.", why, weight=1)
+    if snap_location(lat, lon) == (lat, lon):
+        return result(cid, cat, title, "pass", "The stored location is rounded to a 1.5 mile square.", why, weight=1)
+    return result(cid, cat, title, "warn", "The stored location is precise to about a metre.", why,
+                  fix=fix("helper", "weather-round", "Round it"), weight=1,
+                  howto="Press Round it: the stored point moves to the centre of a square 1.5 miles (2.4 km) "
+                        "across. The forecast stays the same. This cannot be undone: the precise figures are not kept.")
+
+
+def fix_weather_round():
+    try:
+        dfd = _open_home_dir(list(WEATHER_PARTS))
+    except FileNotFoundError:
+        return "No weather location is stored."
+    try:
+        try:
+            fd = os.open(WEATHER_NAME, O_READ | os.O_NOFOLLOW, dir_fd=dfd)
+        except FileNotFoundError:
+            return "No weather location is stored."
+        try:
+            st = os.fstat(fd)
+            data = json.loads(_read_fd(fd, SMALL_FILE_MAX).decode("utf-8", "replace"))
+        except ValueError:
+            raise Refused("the weather settings are not valid JSON")
+        finally:
+            os.close(fd)
+        if st.st_uid != os.geteuid() or not isinstance(data, dict):
+            raise Refused("the weather settings are not yours or not an object")
+        lat, lon = data.get("latitude"), data.get("longitude")
+        if not (_is_coordinate(lat) and _is_coordinate(lon)):
+            return "No weather location is stored."
+        data["latitude"], data["longitude"] = snap_location(float(lat), float(lon))
+        write_atomic(dfd, WEATHER_NAME, (json.dumps(data, indent=2) + "\n").encode(), stat.S_IMODE(st.st_mode))
+    finally:
+        os.close(dfd)
+    return "The weather location is rounded. Restart the shell or reopen the weather panel to see it."
 
 
 # --- Care -------------------------------------------------------------------
@@ -5394,7 +6229,7 @@ def undo_available(action):
 # something new turns up, the finding comes back.
 EVIDENCE_CHECKS = {"open-ports", "persistence", "file-changes", "exposed-secrets", "malicious-packages",
                    "virus-scan", "ld-preload", "bumblebee", "scanner-arch-audit", "aur-status",
-                   "accounts", "shell-history", "old-services"}
+                   "accounts", "shell-history", "old-services", "git-secrets", "model-files", "rootkit-scan"}
 # Rows reviewed item by item instead (Keep on each item of a pick list), so
 # the row itself has no Mark as reviewed.
 ITEM_REVIEWED = {"leftovers", "orphans", "aur-packages", "omarchy-plugins"}
@@ -5744,14 +6579,19 @@ CHECK_HELP = {
                    ("terminal", "install-clamui", "Install ClamUI")),
     "bumblebee": ("Bumblebee runs with the daily check. Perplexity explains what it checks and how its list "
                   "is kept.", ("docs", "bumblebee", "Learn more")),
+    "git-secrets": ("Revoke any key the list shows with the service that issued it, then take it out of the file. "
+                    "gitleaks's own page explains how it finds keys and how to mark a safe line.",
+                    ("docs", "gitleaks", "Learn more")),
+    "model-files": ("Do not load a pickle model you do not trust. Safetensors is a format that cannot run code.",
+                    ("docs", "safetensors", "Learn more")),
+    "rootkit-scan": ("Run all runs rkhunter and asks for your password. Read its warnings as leads, not proof.",
+                     ("docs", "rkhunter", "Learn more")),
     "omarchy-plugins": ("Remove plugins you do not use (tick them, then Remove selected); keep the ones you trust.",
                         ("terminal", "show-plugins", "List plugins")),
     "accounts": ("Get help before changing accounts; a mistake can lock you out.",
                  ("docs", "arch-users", "Learn more")),
     "shell-history": ("If you did not set this up yourself, get help before changing anything.",
                       ("docs", "attack-history", "Learn more")),
-    "black-ops": ("Optional. Install Black Ops from the Omarchy plugin catalog to block telemetry.",
-                  ("docs", "black-ops", "Learn more")),
 }
 
 
@@ -5853,23 +6693,59 @@ def audit(peek=False):
 # ---------------------------------------------------------------------------
 # User-level fixes (no root, no network). Each is a fixed action id.
 
-OPT_OUT_TEXT = (
-    "# Written by Vigil (keasbeexd.vigil). Remove from the Vigil panel or delete this file.\n"
-    "# Read by uwsm at login; takes effect from the next session.\n"
-    "export DO_NOT_TRACK=1\n"
-    "export DOTNET_CLI_TELEMETRY_OPTOUT=1\n"
-    "export HOMEBREW_NO_ANALYTICS=1\n"
-    "export GATSBY_TELEMETRY_DISABLED=1\n"
-    "export NEXT_TELEMETRY_DISABLED=1\n"
-    "export NUXT_TELEMETRY_DISABLED=1\n"
-    "export ASTRO_TELEMETRY_DISABLED=1\n"
-    "export AZURE_CORE_COLLECT_TELEMETRY=0\n"
-    "export SAM_CLI_TELEMETRY=0\n"
-    "export POWERSHELL_TELEMETRY_OPTOUT=1\n"
-    "export STORYBOOK_DISABLE_TELEMETRY=1\n"
-    "export TURBO_TELEMETRY_DISABLED=1\n"
-    "export SCARF_ANALYTICS=false\n"
+OPT_OUT_MARK = "# Written by Vigil (keasbeexd.vigil). Remove from the Vigil panel or delete this file."
+OPT_OUT_HEAD = OPT_OUT_MARK + "\n# Read by uwsm at login; takes effect from the next session.\n"
+# What Vigil's earlier versions wrote: still recognised as Vigil's own, so it can be updated or removed.
+OPT_OUT_OLD_TEXTS = (
+    OPT_OUT_HEAD
+    + "export DO_NOT_TRACK=1\nexport DOTNET_CLI_TELEMETRY_OPTOUT=1\nexport HOMEBREW_NO_ANALYTICS=1\n"
+    + "export GATSBY_TELEMETRY_DISABLED=1\nexport NEXT_TELEMETRY_DISABLED=1\nexport NUXT_TELEMETRY_DISABLED=1\n"
+    + "export ASTRO_TELEMETRY_DISABLED=1\nexport AZURE_CORE_COLLECT_TELEMETRY=0\nexport SAM_CLI_TELEMETRY=0\n"
+    + "export POWERSHELL_TELEMETRY_OPTOUT=1\nexport STORYBOOK_DISABLE_TELEMETRY=1\n"
+    + "export TURBO_TELEMETRY_DISABLED=1\nexport SCARF_ANALYTICS=false\n",
 )
+OPT_OUT_VARS = (
+    ("DO_NOT_TRACK", "1"), ("DOTNET_CLI_TELEMETRY_OPTOUT", "1"), ("HOMEBREW_NO_ANALYTICS", "1"),
+    ("GATSBY_TELEMETRY_DISABLED", "1"), ("NEXT_TELEMETRY_DISABLED", "1"), ("NUXT_TELEMETRY_DISABLED", "1"),
+    ("ASTRO_TELEMETRY_DISABLED", "1"), ("AZURE_CORE_COLLECT_TELEMETRY", "0"), ("SAM_CLI_TELEMETRY", "0"),
+    ("POWERSHELL_TELEMETRY_OPTOUT", "1"), ("STORYBOOK_DISABLE_TELEMETRY", "1"), ("TURBO_TELEMETRY_DISABLED", "1"),
+    ("SCARF_ANALYTICS", "false"), ("DENO_NO_UPDATE_CHECK", "1"), ("CHECKPOINT_DISABLE", "1"),
+    ("VCPKG_DISABLE_METRICS", "1"), ("HINT_TELEMETRY", "off"),
+    # onnxruntime (local AI tools bring it in) sends Microsoft telemetry unless told not to.
+    ("ORT_DISABLE_TELEMETRY", "1"),
+    # GitHub's gh reports usage unless told not to; mise asks its own server which versions exist.
+    ("GH_TELEMETRY", "false"), ("MISE_USE_VERSIONS_HOST", "false"),
+)
+AGENTS_VARS = (
+    ("DISABLE_TELEMETRY", "1"), ("DISABLE_ERROR_REPORTING", "1"),   # Claude Code
+    ("PI_TELEMETRY", "0"),                                           # pi
+    ("GEMINI_TELEMETRY_ENABLED", "false"),                           # Gemini CLI
+)
+
+
+def _env_text(variables):
+    return OPT_OUT_HEAD + "".join("export %s=%s\n" % kv for kv in variables)
+
+
+OPT_OUT_TEXT = _env_text(OPT_OUT_VARS)
+AGENTS_TEXT = _env_text(AGENTS_VARS)
+
+
+def _env_file_kind(name, current, older):
+    """'current', 'old' (an earlier Vigil text), 'other' (not Vigil's or edited) or 'none'."""
+    path = home_path(*OPT_OUT_DIR, name)
+    try:
+        if stat.S_ISLNK(os.lstat(path).st_mode):
+            return "none"                    # a link is replaced, never written through
+    except OSError:
+        return "none"
+    try:
+        text = read_text(path, SMALL_FILE_MAX)
+    except Refused:
+        return "other"
+    if text is None:
+        return "none"
+    return "current" if text == current else "old" if text in older else "other"
 
 
 def fix_ssh_perms():
@@ -5912,38 +6788,63 @@ def fix_gnupg_perms():
     return "~/.gnupg is now readable only by you."
 
 
-def fix_optout_on():
+def _write_env_file(name, text, older):
+    """Write Vigil's own file in the uwsm folder; a file of that name that is not Vigil's is left alone."""
+    kind = _env_file_kind(name, text, older)
+    if kind == "other":
+        raise Refused("a file of that name is there and is not Vigil's; leaving it alone")
     dfd = _open_home_dir(list(OPT_OUT_DIR), create=True)
     try:
-        write_atomic(dfd, OPT_OUT_NAME, OPT_OUT_TEXT.encode(), 0o644)
+        write_atomic(dfd, name, text.encode(), 0o644)
     finally:
         os.close(dfd)
-    return "Opt-out variables set. They apply from your next login."
 
 
-def fix_optout_off():
+def _remove_env_file(name, texts):
     try:
         dfd = _open_home_dir(list(OPT_OUT_DIR))
     except FileNotFoundError:
-        return "Nothing to remove."
+        return False
     try:
         try:
-            fd = os.open(OPT_OUT_NAME, O_READ | os.O_NOFOLLOW, dir_fd=dfd)
+            fd = os.open(name, O_READ | os.O_NOFOLLOW, dir_fd=dfd)
         except FileNotFoundError:
-            return "Nothing to remove."
+            return False
         try:
             st = os.fstat(fd)
             data = _read_fd(fd, SMALL_FILE_MAX)
         finally:
             os.close(fd)
         # Remove only a file whose bytes prove Vigil wrote it.
-        if data != OPT_OUT_TEXT.encode() or st.st_uid != os.geteuid():
+        if data.decode("utf-8", "replace") not in texts or st.st_uid != os.geteuid():
             raise Refused("the file was changed by hand; leaving it alone")
-        os.unlink(OPT_OUT_NAME, dir_fd=dfd)
+        os.unlink(name, dir_fd=dfd)
         os.fsync(dfd)
     finally:
         os.close(dfd)
+    return True
+
+
+def fix_optout_on():
+    _write_env_file(OPT_OUT_NAME, OPT_OUT_TEXT, OPT_OUT_OLD_TEXTS)
+    return "Opt-out variables set. They apply from your next login."
+
+
+def fix_optout_off():
+    if not _remove_env_file(OPT_OUT_NAME, (OPT_OUT_TEXT,) + OPT_OUT_OLD_TEXTS):
+        return "Nothing to remove."
     return "Opt-out variables removed. They stop applying from your next login."
+
+
+def fix_agents_on():
+    _write_env_file(AGENTS_NAME, AGENTS_TEXT, ())
+    return "Telemetry is switched off for Claude Code, pi and Gemini CLI. It applies from your next login."
+
+
+def fix_agents_off():
+    if not _remove_env_file(AGENTS_NAME, (AGENTS_TEXT,)):
+        return "Nothing to remove."
+    return "The agent telemetry variables are removed. They stop applying from your next login."
 
 
 def _own_writable_dir(dfd):
@@ -6216,6 +7117,9 @@ FIXES = {
     "gnupg-perms": fix_gnupg_perms,
     "optout-on": fix_optout_on,
     "optout-off": fix_optout_off,
+    "weather-round": fix_weather_round,
+    "agents-on": fix_agents_on,
+    "agents-off": fix_agents_off,
     "clean-thumbnails": fix_clean_thumbnails,
     "empty-trash": fix_empty_trash,
     "clean-user": fix_clean_user,
@@ -6353,6 +7257,63 @@ def take_run_lock():
     return False
 
 
+# Run all with the Omarchy update: the update runs in a terminal, between the checks and the virus scan, and
+# the terminal script leaves empty marker files in the state folder, which the panel reads with `vigil
+# update-status` to know when to go on. The helper only ever reads them (and removes them when a Run all that
+# holds its virus scan back finishes); a marker is a name, never content, so nothing from it can reach
+# anything. A file that is not a plain file, or a name that is not in the list, counts as absent.
+UPDATE_MARKS = ("update-waiting", "update-running", "update-ok", "update-failed", "update-reboot", "update-shell")
+UPDATE_STALE_SECONDS = 3 * 3600
+
+
+def update_clear():
+    try:
+        dirfd = _open_home_dir(list(STATE_DIR))
+    except (OSError, Refused):
+        return
+    try:
+        for name in UPDATE_MARKS:
+            try:
+                os.unlink(name, dir_fd=dirfd)
+            except OSError:
+                pass
+    finally:
+        os.close(dirfd)
+
+
+def update_status():
+    """{update, reboot, shell}: update is none, waiting (for Enter in the terminal), running, ok or failed. A
+    waiting or running marker older than three hours means the terminal was closed: failed. reboot says the
+    update recommended a restart (and was held back); shell that it wanted the shell restarted (held back too)."""
+    out = {"update": "none", "reboot": False, "shell": False}
+    try:
+        dirfd = _open_home_dir(list(STATE_DIR))
+    except (OSError, Refused):
+        return out
+    try:
+        have = {}
+        for name in UPDATE_MARKS:
+            try:
+                st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid():
+                have[name] = st.st_mtime
+    finally:
+        os.close(dirfd)
+    now = time.time()
+    if "update-ok" in have:
+        out.update(update="ok", reboot="update-reboot" in have, shell="update-shell" in have)
+    elif "update-failed" in have:
+        out["update"] = "failed"
+    else:
+        for name, state in (("update-running", "running"), ("update-waiting", "waiting")):
+            if name in have:
+                out["update"] = state if now - have[name] < UPDATE_STALE_SECONDS else "failed"
+                break
+    return out
+
+
 def run_in_progress():
     """What a run started elsewhere is doing, or None if none runs."""
     try:
@@ -6457,9 +7418,10 @@ def main(argv):
         return 0
     # --signatures: the confirmed Run all card showed the virus signatures
     # update, so Run all may run it (only when they are over two days old).
-    if 2 <= len(argv) <= 4 and argv[1] == "refresh-feeds" and argv[2:] in (
+    if 2 <= len(argv) <= 5 and argv[1] == "refresh-feeds" and argv[2:] in (
             [], ["--force"], ["--full"], ["--scan"], ["--daily"], ["--weekly"],
-            ["--full", "--signatures"]):
+            ["--full", "--signatures"], ["--full", "--hold-scan"], ["--full", "--hold-scan", "--signatures"],
+            ["--finish-scan"]):
         PROGRESS["on"] = True
         flag = argv[2] if len(argv) >= 3 else ""
         if not take_run_lock():
@@ -6474,10 +7436,14 @@ def main(argv):
         save_run_info()
         emit(refresh_due_feeds(force=flag == "--force", full=flag == "--full",
                                scan_only=flag == "--scan", daily_only=flag == "--daily",
-                               weekly_only=flag == "--weekly", signatures=argv[3:] == ["--signatures"]))
+                               weekly_only=flag == "--weekly", signatures="--signatures" in argv[3:],
+                               hold_scan="--hold-scan" in argv[3:], finish_scan=flag == "--finish-scan"))
         return 0
     if len(argv) == 2 and argv[1] == "stop":
         emit(stop_run())
+        return 0
+    if len(argv) == 2 and argv[1] == "update-status":
+        emit(update_status())
         return 0
     if len(argv) == 2 and argv[1] == "running":
         # Cheap: lets a panel follow a scan it did not start, without a full check.
@@ -6486,7 +7452,7 @@ def main(argv):
     if len(argv) == 2 and argv[1] == "version":
         emit({"version": VERSION})
         return 0
-    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection>... | vigil keep|unkeep <item>... | vigil trash <leftover>... | vigil refresh-feeds [--force|--daily|--weekly|--full|--scan] [--signatures] | vigil running | vigil stop | vigil version\n")
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection>... | vigil keep|unkeep <item>... | vigil trash <leftover>... | vigil refresh-feeds [--force|--daily|--weekly|--full|--scan|--finish-scan] [--hold-scan] [--signatures] | vigil update-status | vigil running | vigil stop | vigil version\n")
     return 2
 
 
