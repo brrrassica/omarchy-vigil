@@ -606,6 +606,41 @@ test("the rootkit step parses with bash -n and has no network", () => {
   assert.ok(!/\bsudo\b/.test(M.RKHUNTER_SCRIPT))
 })
 
+test("big cache folders are a pick list: ticked one by one or ignored, cleared whole on a card of their own", () => {
+  const item = (id, text, kept = false) => ({ id, kind: "cache", text, kept, ignored: false })
+  const items = [item("0123456789abcdef", "~/.cache/huge \u00b7 3.0 GB"), item("fedcba9876543210", "~/.cache/models \u00b7 1.2 GB"),
+                 item("00000000000000aa", "~/.cache/old \u00b7 1.1 GB", true)]
+  const cacheCheck = check({ id: "user-cache", category: "care", status: "info", weight: 0, items,
+                             fix: { kind: "helper", action: "clean-app-cache", label: "Clear unused" } })
+  const r = parse(report({ checks: [cacheCheck] }))
+  assert.equal(r.checks[0].items.length, 3)
+  const spec = M.pickSpec(r.checks[0])
+  assert.deepEqual(spec, { remove: "Clear", all: false, card: "clear-caches", keep: true, keepLabel: "Ignore" })
+  assert.ok(M.itemPickable(r.checks[0].items[0]) && M.itemRemovable(r.checks[0].items[0]))
+  assert.equal(M.itemPickable(r.checks[0].items[2]), false, "an ignored folder cannot be ticked")
+  assert.deepEqual(M.pickableIds(r, "cache"), ["0123456789abcdef", "fedcba9876543210"])
+  const card = M.confirmation("clear-caches", "0123456789abcdef,fedcba9876543210", r, "/home/a")
+  assert.equal(card.title, "Clear 2 cache folders?")
+  assert.equal(card.lines[0], "~/.cache/huge \u00b7 3.0 GB"); assert.equal(card.lines[1], "~/.cache/models \u00b7 1.2 GB")
+  assert.ok(card.lines.some((l) => /deleted for good, in use or not; the folder itself stays/.test(l)))
+  assert.ok(card.lines.some((l) => /Unlike Clean all, which clears only files nothing has used for a week/.test(l)))
+  assert.ok(card.lines.some((l) => /still listed, 1 GB or more, and not ignored/.test(l)))
+  assert.equal(M.confirmation("clear-caches", "0123456789abcdef", r, "/home/a").title, "Clear this cache folder?")
+  for (const bad of ["", "0123456789abcdef,0123456789abcdef", "0123456789abcdef,00000000000000aa", "0123456789abcdef,0000000000000bbb", "../../x"])
+    assert.equal(M.confirmation("clear-caches", bad, r, "/home/a"), null, bad)
+  assert.equal(M.itemIdList(r, "0123456789abcdef", "leftover"), null)
+  // Clean all is what it was: the unused-for-a-week sweep, and its card does not mention these folders
+  assert.equal(M.cleanAllPlan(r).user, true)
+  const all = M.confirmation("clean-all", "care", r, "/home/a")
+  assert.ok(!all.lines.some((l) => /GB|cache folder/i.test(l)))
+  // items must be well formed and of one kind
+  assert.equal(parse(report({ checks: [check({ id: "user-cache", category: "care", items: [item("", "x")] })] })), null)
+  assert.equal(parse(report({ checks: [check({ id: "user-cache", category: "care", items: [item("0123456789abcdef", "x"),
+    { id: "fedcba9876543210", kind: "leftover", text: "z", kept: false, ignored: false }] })] })), null)
+  // the other lists still say Keep
+  assert.equal(M.PICK_SPECS.leftover.keepLabel, undefined)
+})
+
 test("every terminal says what it does, plainly, then the technical part", () => {
   for (const [id, a] of Object.entries(M.TERMINAL_ACTIONS)) {
     assert.ok(a.what.length >= 2, id)

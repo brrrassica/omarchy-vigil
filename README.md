@@ -259,10 +259,10 @@ something new turns up, the finding comes back.
 
 ### Lists you tick
 
-Five rows list what they found one item per line, each on two lines (what
-it is, then more about it), with a small box to tick: leftover app data and
-orphaned packages (Care), infected files (Detect), and foreign packages and
-other Omarchy plugins (Supply). Tick the items you want to act on (the box,
+Six rows list what they found one item per line (most on two lines: what
+it is, then more about it), with a small box to tick: leftover app data,
+orphaned packages and big cache folders (Care), infected files (Detect), and
+foreign packages and other Omarchy plugins (Supply). Tick the items you want to act on (the box,
 or the item's text), then use the buttons under the list, which say how many
 they act on.
 
@@ -272,6 +272,7 @@ they act on.
 | Orphaned packages | **Remove selected**, or **Remove all** with nothing ticked: `pacman -Rns`, behind your password | **Keep selected** / **Keep all** |
 | AUR and other foreign packages | **Remove selected** only: `pacman -Rns`, behind your password | **Keep selected** / **Keep all** |
 | Other Omarchy plugins | **Remove selected** only: Omarchy's own `omarchy-plugin-remove`, as you | **Keep selected** / **Keep all** |
+| Big cache folders (1 GB or more) | **Clear selected** only: deletes everything inside each ticked folder, for good | **Ignore selected** / **Ignore all** |
 | Infected files | **False positive selected** only: Vigil stops counting that exact file | (none) |
 
 Removing, trashing and marking a false positive always ask first, on a card
@@ -281,12 +282,13 @@ or plugins also shows the exact command it runs (see
 cannot easily get back (foreign packages, plugins) or must be sure of
 (false positives).
 
-**Keep** leaves an item as it is and stops counting it: settings you want
+**Keep** (called **Ignore** on the big cache folders, where it stops pointing the
+folder out) leaves an item as it is and stops counting it: settings you want
 back if you install an app again, an orphan you still use, an AUR package or
 plugin you have looked at and trust. Keeping only changes Vigil's own notes,
 so it does not ask. A kept item, and a file marked as a false positive,
 shows a lock in place of its box and moves to the bottom of the list;
-**click the lock** to count it again. A plugin you kept is counted again by
+**click the lock** to count it (or list it) again. A plugin you kept is counted again by
 itself if its code gains a new capability, and a false positive if the file
 changes.
 
@@ -415,7 +417,7 @@ groups:
 |---|---|---|
 | Thumbnail cache | Previews the file manager made of your pictures and videos | Cleared without root |
 | Trash | Files you deleted in the file manager | Emptied without root, directly in its standard folders |
-| Application caches | Files apps keep in `~/.cache` to start faster | **Clear unused** (no root), see below |
+| Application caches | Files apps keep in `~/.cache` to start faster | **Clear unused** (no root); and for folders of 1 GB or more, tick them and **Clear selected**, or **Ignore** them; see below |
 | Package cache | Packages pacman downloaded | `paccache -rk2` and `paccache -ruk0` (asks for your password), see below |
 | System logs | The system journal; under 500 MB it counts as tidy | Over 500 MB: `journalctl --vacuum-time=2weeks` (asks for your password) |
 
@@ -434,8 +436,22 @@ Apps you use every day touch their caches each time they start, so on a
 busy computer most of `~/.cache` stays "in use", and closing your apps does
 not change that. **Clear unused** appears once more than 1 MB has gone a
 week untouched, such as the cache of an app you stopped using. Caches in use
-are never deleted, since apps would only rebuild them. To see what takes the
-space: `du -sh ~/.cache/* | sort -h`.
+are never deleted by Clear unused or Clean all, since apps would only rebuild them.
+
+**Big cache folders.** To show which caches are getting big, a folder directly
+in `~/.cache` that holds **1 GB or more** is also listed on this row as a
+checklist, each as its place and total size (`~/.cache/chromium · 1.7 GB`),
+biggest first. This list changes nothing about Clear unused or Clean all: they
+clear files nothing has used for a week in every cache folder, big or not, as
+before, and need no ticking. What the list adds is your own choice: tick the
+folders you want and press **Clear selected** (there is no "all"). That deletes
+**everything inside** each ticked folder, in use or not, for good (the folder
+itself stays), so close the app first; the card lists each folder and says so.
+**Ignore** a folder you want to keep: it stays listed, locked at the bottom,
+and stops being pointed out in the row's summary (click the lock to list it
+again). Links are removed, never followed, and the helper checks again that
+each ticked folder is still listed, 1 GB or more, and not ignored. To see what
+takes the space: `du -sh ~/.cache/* | sort -h`.
 
 **Leftover app data.** When you remove an app, its settings and data stay
 in your home folder. A file's age says little here (you set an app up once
@@ -515,7 +531,7 @@ The panel always says which kind an action is:
 2. **Helper actions** run `bin/vigil fix <action>` as you, never as root:
    making `~/.ssh`, `~/.gnupg` and credential files private, the opt-out
    file, accepting file changes, removing leaked keys from shell history,
-   the thumbnail cache, the trash, unused application caches, and the Scan
+   the thumbnail cache, the trash, unused application caches, big cache folders you tick, and the Scan
    now / Look up now buttons. Each is a fixed action name; nothing from a
    file or from the report reaches it. Keeping an item of any list, moving
    leftover app data to the trash and marking false positives work the same

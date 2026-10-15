@@ -5436,19 +5436,25 @@ def _cache_cutoff():
     return time.time() - CACHE_UNUSED_DAYS * 86400
 
 
-@check
-def check_user_cache():
-    cid, cat, title = "user-cache", "care", "Application caches"
-    why = ("Browsers and apps keep caches in ~/.cache and rebuild them when needed, so this is "
-           "about disk space.")
+# Folders directly in ~/.cache of this size are listed on the Application caches row to tick, or to ignore. They
+# are still part of the totals and of Clear unused and Clean all (which clear only files unused for a week):
+# the line only decides which folders the list highlights.
+CACHE_BIG_BYTES = 1024 * 1024 * 1024
+CACHE_BIG_MAX = 40
+
+
+def cache_survey():
+    """[(name, is_dir, total, old)] for what sits directly in ~/.cache (not the thumbnails, which have their
+    own row), measured without following links; None when there is no ~/.cache."""
     try:
         dfd = _open_home_dir([".cache"])
     except (OSError, Refused):
-        return result(cid, cat, title, "pass", "Empty.", why, weight=0)
+        return None
+    out = []
     try:
-        total = old = 0
         budget = [WALK_MAX_ENTRIES]
         deadline = time.monotonic() + WALK_MAX_SECONDS
+        cutoff = _cache_cutoff()
         with os.scandir(dfd) as it:
             tops = [e.name for e in it if e.name not in CACHE_SKIP]
         for name in tops:
@@ -5457,26 +5463,70 @@ def check_user_cache():
                 if stat.S_ISDIR(st.st_mode):
                     sub = os.open(name, O_DIR, dir_fd=dfd)
                     try:
-                        t, o = _cache_scan(sub, _cache_cutoff(), deadline, budget)
+                        t, o = _cache_scan(sub, cutoff, deadline, budget)
                     finally:
                         os.close(sub)
+                    out.append((name, True, t, o))
                 elif stat.S_ISREG(st.st_mode):
                     t = st.st_blocks * 512
-                    o = t if st.st_uid == os.geteuid() and max(st.st_atime, st.st_mtime) < _cache_cutoff() else 0
-                else:
-                    continue
+                    o = t if st.st_uid == os.geteuid() and max(st.st_atime, st.st_mtime) < cutoff else 0
+                    out.append((name, False, t, o))
             except OSError:
                 continue
-            total, old = total + t, old + o
     finally:
         os.close(dfd)
+    return out
+
+
+def cache_records(survey=None):
+    """The cache folders of 1 GB or more, biggest first, as pick-list records ({id, name, total, kind})."""
+    survey = cache_survey() if survey is None else survey
+    big = [{"id": item_id("cache", n), "name": n, "total": t, "kind": "cache"}
+           for n, is_dir, t, o in survey or [] if is_dir and t >= CACHE_BIG_BYTES]
+    return sorted(big, key=lambda c: -c["total"])[:CACHE_BIG_MAX]
+
+
+def _cache_text(c):
+    """One line: where, and how big. A line break in a name is shown as \\n, so a name cannot add a line."""
+    shown = clean(c["name"].replace("\r", "\\r").replace("\n", "\\n"), 120)
+    return "~/.cache/%s \u00b7 %s" % (shown, human(c["total"]))
+
+
+@check
+def check_user_cache():
+    cid, cat, title = "user-cache", "care", "Application caches"
+    why = ("Browsers and apps keep caches in ~/.cache and rebuild them when needed, so this is "
+           "about disk space.")
+    survey = cache_survey()
+    if survey is None:
+        return result(cid, cat, title, "pass", "Empty.", why, weight=0)
+    total, old = sum(e[2] for e in survey), sum(e[3] for e in survey)
+    kept = kept_items()
+    items = [{"id": c["id"], "kind": "cache", "text": _cache_text(c), "kept": is_kept_record(c, kept), "ignored": False}
+             for c in cache_records(survey)]
+    live = [i for i in items if not i["kept"]]
+    howto = ("Clear unused deletes files nothing has used for a week, and Clean all does the same. Folders of %s "
+             "or more are listed below so you can see what is getting big: tick the ones you want and press "
+             "Clear selected, which deletes everything inside them (close the app first; it rebuilds the cache "
+             "when it needs it). Ignore a folder you want to keep: it stays listed, locked at the bottom."
+             % human(CACHE_BIG_BYTES))
     if not total:
         return result(cid, cat, title, "pass", "Empty.", why, weight=0)
+    note = (" %d folder%s of %s or more listed below." % (len(live), "" if len(live) == 1 else "s",
+                                                            human(CACHE_BIG_BYTES))) if live else ""
     if old < 1024 * 1024:
-        return result(cid, cat, title, "pass", "%s, all of it in use." % human(total), why, weight=0)
-    return result(cid, cat, title, "warn" if old >= 5 * 1024 ** 3 else "info",
-                  "%s; %s not used in the past week." % (human(total), human(old)), why,
-                  fix=fix("helper", "clean-app-cache", "Clear unused"), weight=0)
+        if not live:
+            out = result(cid, cat, title, "pass", "%s, all of it in use." % human(total), why, weight=0)
+        else:
+            out = result(cid, cat, title, "info", "%s, all of it in use.%s" % (human(total), note), why, weight=0,
+                         howto=howto)
+    else:
+        out = result(cid, cat, title, "warn" if old >= 5 * 1024 ** 3 else "info",
+                     "%s; %s not used in the past week.%s" % (human(total), human(old), note), why,
+                     fix=fix("helper", "clean-app-cache", "Clear unused"), weight=0, howto=howto)
+    if items:
+        out["items"] = quiet_last(items)
+    return out
 
 
 # --- Leftover app data --------------------------------------------------------
@@ -5918,7 +5968,7 @@ def listed_items(wanted):
     """id -> record of the pick-list items listed right now, looking only as
     far as it takes to find every wanted id."""
     found = {}
-    for source in (orphan_records, foreign_records, plugin_records, leftovers):
+    for source in (orphan_records, foreign_records, plugin_records, leftovers, cache_records):
         for r in source() or []:
             found[r["id"]] = r
         if all(x in found for x in wanted):
@@ -5954,7 +6004,12 @@ def set_kept(lids, on):
     finally:
         os.close(dirfd)
     n = len(lids)
-    if on:
+    caches = all(listed.get(x, {}).get("kind") == "cache" for x in lids)      # that list says "ignore"
+    if caches:
+        msg = (("Ignoring it. It stays listed, locked at the bottom." if n == 1 else
+                "Ignoring %d folders. They stay listed, locked at the bottom." % n) if on else
+               ("Listing it again." if n == 1 else "Listing %d folders again." % n))
+    elif on:
         msg = ("Kept. It stays where it is, locked at the bottom of the list, and Vigil stops counting it."
                if n == 1 else "Kept %d items. They stay where they are, locked at the bottom of the list, "
                "and Vigil stops counting them." % n)
@@ -6581,6 +6636,9 @@ CHECK_HELP = {
                    ("terminal", "install-clamui", "Install ClamUI")),
     "bumblebee": ("Bumblebee runs with the daily check. Perplexity explains what it checks and how its list "
                   "is kept.", ("docs", "bumblebee", "Learn more")),
+    "user-cache": ("Tick the cache folders of 1 GB or more that you want cleared and press Clear selected, or "
+                   "ignore the ones you want to keep. Close the app first; it rebuilds the cache when it needs it.",
+                   ("docs", "arch-xdg", "Learn more")),
     "git-secrets": ("Revoke any key the list shows with the service that issued it, then take it out of the file. "
                     "gitleaks's own page explains how it finds keys and how to mark a safe line.",
                     ("docs", "gitleaks", "Learn more")),
@@ -6867,7 +6925,7 @@ def _clear_dir_contents(dfd, budget):
     with os.scandir(dfd) as it:
         entries = [(e.name, e.is_dir(follow_symlinks=False)) for e in it][:budget[0]]
     for name, is_dir in entries:
-        if budget[0] <= 0:
+        if budget[0] <= 0 or (len(budget) > 1 and time.monotonic() > budget[1]):
             break
         budget[0] -= 1
         if is_dir:
@@ -7022,6 +7080,46 @@ def fix_clean_app_cache():
     if not freed:
         return "No application cache needed clearing."
     return "Freed %s of application cache unused for a week." % human(freed)
+
+
+def clear_caches(ids):
+    """`vigil clear-caches <id>...`: delete everything inside the ticked cache folders. Each must be listed right
+    now (1 GB or more) and not ignored. The folder itself stays; nothing is followed through a link."""
+    listed = {c["id"]: c for c in cache_records()}
+    kept = kept_items()
+    cleared, freed, problems = [], 0, []
+    deadline = time.monotonic() + 100
+    for cid in ids:
+        c = listed.get(cid)
+        if c is None:
+            problems.append("one folder is no longer on the list")
+            continue
+        if is_kept_record(c, kept):
+            problems.append("%s is ignored (click its lock first)" % clean(c["name"], 60))
+            continue
+        try:
+            dfd = _open_home_dir([".cache", c["name"]])
+        except (OSError, Refused) as e:
+            problems.append("%s: %s" % (clean(c["name"], 60), e if isinstance(e, Refused) else "could not open it"))
+            continue
+        try:
+            if not _own_writable_dir(dfd):
+                problems.append("%s: not yours" % clean(c["name"], 60))
+                continue
+            _clear_dir_contents(dfd, [2000000, deadline])
+            left, _ = _cache_scan(dfd, 0, deadline, [WALK_MAX_ENTRIES])
+        finally:
+            os.close(dfd)
+        freed += max(0, c["total"] - left)
+        cleared.append(c)
+    if cleared:
+        msg = "Cleared %s, freed about %s." % (clean(cleared[0]["name"], 80) if len(cleared) == 1
+                                               else "%d cache folders" % len(cleared), human(freed))
+    else:
+        msg = "Nothing was cleared."
+    if problems:
+        msg += " Left alone: %s." % "; ".join(problems[:3])
+    return {"ok": bool(cleared) or not problems, "action": "", "message": clean(msg, MESSAGE_MAX)}
 
 
 def fix_clean_user():
@@ -7358,6 +7456,10 @@ def main(argv):
             and all(re.fullmatch(r"[0-9a-f]{16}", a) for a in argv[2:]):
         emit(trash_leftovers(argv[2:]))
         return 0
+    if 3 <= len(argv) <= 2 + PICK_MAX and argv[1] == "clear-caches" and len(set(argv[2:])) == len(argv) - 2 \
+            and all(re.fullmatch(r"[0-9a-f]{16}", a) for a in argv[2:]):
+        emit(clear_caches(argv[2:]))
+        return 0
     if len(argv) == 3 and argv[1] in ("dismiss", "undismiss") and re.fullmatch(r"[a-z0-9-]{1,40}", argv[2]):
         emit(set_dismissed(argv[2], argv[1] == "dismiss"))
         return 0
@@ -7392,7 +7494,7 @@ def main(argv):
     if len(argv) == 2 and argv[1] == "version":
         emit({"version": VERSION})
         return 0
-    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection>... | vigil keep|unkeep <item>... | vigil trash <leftover>... | vigil refresh-feeds [--force|--daily|--weekly|--full|--scan] [--signatures] | vigil running | vigil stop | vigil version\n")
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection>... | vigil keep|unkeep <item>... | vigil trash <leftover>... | vigil clear-caches <cache folder>... | vigil refresh-feeds [--force|--daily|--weekly|--full|--scan] [--signatures] | vigil running | vigil stop | vigil version\n")
     return 2
 
 

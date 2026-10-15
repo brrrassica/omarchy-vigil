@@ -118,7 +118,9 @@ These hold for every pillar, now and in later phases:
    never deleted, only moved to the trash, where you can restore it. The
    Care cleanups that do delete (the thumbnail cache, caches in `~/.cache`
    unused for a week, and emptying the trash, alone or in Clean all) say so
-   on their card. Removing a plugin is Omarchy's own `omarchy-plugin-remove`, which
+   on their card; so does clearing the cache folders of 1 GB or more that
+   you tick one by one (which deletes everything inside them, not only what
+   is unused, and which Clean all does not do). Removing a plugin is Omarchy's own `omarchy-plugin-remove`, which
    deletes a plugin it cloned from git (add it again to get it back),
    unlinks a development install and backs up any other folder; the card
    says so.
@@ -499,7 +501,8 @@ plain: they are the same on every machine.
   scheme that keeps the key where Vigil (running as you) can read it can
   stop that, and Vigil keeps no root-owned store (design rule 1). What limits
   it: a kept item stays on its list with a lock, and the four lists that can
-  be kept never count toward the score or notify. A reviewed finding stays
+  be kept never count toward the score or notify (nor do the big cache
+  folders you ignore, which sit on a Care row that never counts anyway). A reviewed finding stays
   on its tab marked reviewed, and a false positive stays on the virus list
   with a lock, so neither disappears; but both stop counting toward the
   score and notifications, so such a program could quiet a finding that
@@ -561,7 +564,11 @@ plain: they are the same on every machine.
   through; tests plant one and check the victim file is untouched. The
   permission fixes (`~/.ssh`, `~/.gnupg`, credential files) `fchmod` a
   descriptor opened the same way; moving to the trash is described below.
-- Deletion (thumbnail cache, the trash, unused application caches) works
+- Deletion (thumbnail cache, the trash, unused application caches, and the
+  big cache folders you tick: `vigil clear-caches <keyed id>...`, which
+  re-lists the folders of 1 GB or more first and empties only ids still on
+  that list and not ignored, each opened with the no-follow walk from your home folder, with
+  a deadline) works
   relative to held directory descriptors and never follows a symlink.
   Leftover app data is never deleted, only moved to the trash (see below). The opt-out file is removed only if its bytes
   are exactly what Vigil wrote.

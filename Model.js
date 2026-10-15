@@ -154,7 +154,7 @@ function confirmation(kind, id, report, home) {
     : kind === "remove-orphans" || kind === "remove-foreign" || kind === "remove-plugins" ? removalCommands(kind, id, report)
     : []
   // A remove card with nothing it could run would promise what it cannot do.
-  if (CARD_KINDS[kind] && kind !== "trash" && kind !== "ignore" && card.commands.length === 0) return null
+  if (CARD_KINDS[kind] && kind !== "trash" && kind !== "ignore" && kind !== "clear-caches" && card.commands.length === 0) return null
   return card
 }
 
@@ -207,6 +207,7 @@ function hasSource(report, id) {
 function confirmationText(kind, id, report) {
   if (kind === "clean-all") return cleanAllConfirmation(report)
   if (kind === "ignore") return ignoreConfirmation(id, report)
+if (kind === "clear-caches") return clearCachesConfirmation(id, report)
   if (kind === "trash") return trashConfirmation(id, report)
   if (kind === "remove-orphans" || kind === "remove-foreign") return removePackagesConfirmation(kind, id, report)
   if (kind === "remove-plugins") return removePluginsConfirmation(id, report)
@@ -240,13 +241,16 @@ var PICK_SPECS = {
   orphan: { remove: "Remove", all: true, card: "remove-orphans", keep: true },
   foreign: { remove: "Remove", all: false, card: "remove-foreign", keep: true },
   plugin: { remove: "Remove", all: false, card: "remove-plugins", keep: true },
-  detection: { remove: "False positive", all: false, card: "ignore", keep: false }
+  detection: { remove: "False positive", all: false, card: "ignore", keep: false },
+// Cache folders of 1 GB or more: ticked one by one, never "all". "Ignore" is Keep under another name: an ignored
+// folder stays listed, locked at the bottom, and is no longer counted on the row.
+cache: { remove: "Clear", all: false, card: "clear-caches", keep: true, keepLabel: "Ignore" }
 }
 var MARK_LEVELS = ["high", "medium", "low"]
 
 
 var CARD_KINDS = { "trash": "leftover", "remove-orphans": "orphan", "remove-foreign": "foreign",
-                   "remove-plugins": "plugin", "ignore": "detection" }
+                   "remove-plugins": "plugin", "ignore": "detection", "clear-caches": "cache" }
 
 // Names that may reach a command: Arch's package names, and the plugin ids
 // omarchy-plugin-remove takes (never Vigil's own). Must match REMOVABLE_PACKAGE
@@ -337,6 +341,18 @@ function trashConfirmation(ids, report) {
   var lines = itemLines(report, list, "leftover")
   lines.push("Everything else on the list stays where it is.")
   return { title: "Move " + list.length + " items to the trash?", lines: lines.concat(TRASH_LINES) }
+}
+
+// The card for Clear selected on the Application caches row: every folder it empties, then what that means.
+function clearCachesConfirmation(ids, report) {
+  var list = itemIdList(report, ids, "cache")
+  if (!list) return null
+  var lines = itemLines(report, list, "cache")
+  lines.push("Everything inside " + (list.length === 1 ? "this folder" : "each folder") + " is deleted for good, in use or not; the folder itself stays. Close the app first.")
+  lines.push("Apps rebuild a cache or download it again when they need it, which can take a while and use your connection.")
+  lines.push("Unlike Clean all, which clears only files nothing has used for a week, this empties the whole folder.")
+  lines.push("Technical: deletes the files and folders inside ~/.cache/<name>, relative to a held folder, never following a link. Vigil checks again that each is still listed, 1 GB or more, and not ignored.")
+  return { title: list.length === 1 ? "Clear this cache folder?" : "Clear " + list.length + " cache folders?", lines: lines }
 }
 
 function ignoreConfirmation(ids, report) {

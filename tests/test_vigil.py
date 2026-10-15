@@ -1009,6 +1009,131 @@ def test_clean_app_cache_keeps_what_is_in_use(v, tmp_path):
     assert v.check_user_cache()["status"] == "pass"
 
 
+def big_caches(v):
+    """A ~/.cache with one folder over the (shrunk) 1 GB line, one under it, and some old files."""
+    v.CACHE_BIG_BYTES = 3_000_000
+    cache = Path(v.HOME, ".cache")
+    big = cache / "huge"
+    put(big / "recent.bin", "x" * 2_000_000)
+    aged(put(big / "sub" / "old.bin", "x" * 2_000_000), 10)
+    put(big / ".hidden", "x" * 10)
+    small = aged(put(cache / "small" / "old.bin", "x" * 2_000_000), 10)
+    return cache, big, small
+
+
+def test_the_line_for_a_big_cache_folder_is_1_gigabyte(v):
+    assert v.CACHE_BIG_BYTES == 1024 ** 3
+
+
+def test_clean_all_and_clear_unused_are_exactly_what_they_were_with_big_folders_present(v):
+    cache, big, small = big_caches(v)
+    c = v.check_user_cache()
+    # the row's numbers count every folder, big ones included, as before
+    assert c["fix"]["action"] == "clean-app-cache" and "not used in the past week" in c["summary"]
+    res = v.run_fix("clean-app-cache")
+    assert res["ok"] and not small.exists()
+    assert (big / "recent.bin").exists() and not (big / "sub" / "old.bin").exists(), "the week-old rule applies to big folders too"
+    assert v.run_fix("clean-user")["ok"]
+
+
+def test_big_cache_folders_are_listed_with_size_and_place_only(v):
+    cache, big, small = big_caches(v)
+    c = v.check_user_cache()
+    assert c["items"] == [{"id": v.item_id("cache", "huge"), "kind": "cache", "kept": False, "ignored": False,
+                           "text": c["items"][0]["text"]}]
+    text = c["items"][0]["text"]
+    assert text.startswith("~/.cache/huge \u00b7 ") and "\n" not in text and "past week" not in text
+    assert "1 folder of" in c["summary"] and "listed below" in c["summary"]
+
+
+def test_a_cache_folder_under_the_line_is_not_listed_and_the_row_is_as_before(v):
+    v.CACHE_BIG_BYTES = 10_000_000
+    cache = Path(v.HOME, ".cache")
+    aged(put(cache / "app" / "old.bin", "x" * 2_000_000), 10)
+    c = v.check_user_cache()
+    assert "items" not in c and "listed below" not in c["summary"] and c["fix"]["action"] == "clean-app-cache"
+
+
+def test_a_row_with_only_in_use_caches_and_a_big_folder_is_information_with_the_list(v):
+    v.CACHE_BIG_BYTES = 1_000_000
+    put(Path(v.HOME, ".cache", "busy", "f"), "x" * 2_000_000)
+    c = v.check_user_cache()
+    assert c["status"] == "info" and len(c["items"]) == 1 and "all of it in use" in c["summary"]
+
+
+def test_ignoring_a_big_folder_works_like_keep(v):
+    cache, big, small = big_caches(v)
+    huge = v.item_id("cache", "huge")
+    res = v.set_kept([huge], True)
+    assert res["ok"] and res["message"] == "Ignoring it. It stays listed, locked at the bottom."
+    c = v.check_user_cache()
+    assert c["items"][0]["kept"] is True and "listed below" not in c["summary"]
+    # an ignored folder cannot be cleared until its lock is clicked
+    res = v.clear_caches([huge])
+    assert not res["ok"] and "is ignored (click its lock first)" in res["message"] and (big / "recent.bin").exists()
+    assert v.set_kept([huge], False)["message"] == "Listing it again."
+    assert v.check_user_cache()["items"][0]["kept"] is False
+    assert v.clear_caches([huge])["ok"] and list(big.iterdir()) == []
+
+
+def test_ignored_folders_go_to_the_bottom_and_ignoring_needs_a_listed_folder(v):
+    v.CACHE_BIG_BYTES = 1_000_000
+    for n, size in (("aa", 3_000_000), ("bb", 2_000_000)):
+        put(Path(v.HOME, ".cache", n, "f"), "x" * size)
+    assert [i["text"][:12] for i in v.check_user_cache()["items"]] == ["~/.cache/aa ", "~/.cache/bb "]
+    v.set_kept([v.item_id("cache", "aa")], True)
+    assert [i["text"][:12] for i in v.check_user_cache()["items"]] == ["~/.cache/bb ", "~/.cache/aa "]
+    res = v.set_kept([v.item_id("cache", "nope")], True)
+    assert not res["ok"]
+    assert v.set_kept([v.item_id("cache", "aa"), v.item_id("cache", "bb")], True)["message"].startswith("Ignoring 2 folders.")
+
+
+def test_ticked_cache_folders_are_emptied_whole_and_the_folder_stays(v, tmp_path):
+    cache, big, small = big_caches(v)
+    outside = put(tmp_path / "outside.bin", "keep me")
+    os.symlink(outside, big / "link")
+    os.symlink(tmp_path, big / "dirlink")
+    other = put(cache / "other" / "f", "x" * 2_000_000)
+    res = v.clear_caches([v.item_id("cache", "huge")])
+    assert res["ok"] and res["message"].startswith("Cleared huge, freed about ")
+    assert big.is_dir() and list(big.iterdir()) == []
+    assert outside.read_text() == "keep me" and tmp_path.exists(), "links are removed, never followed"
+    assert small.exists() and other.exists(), "only the ticked folder"
+    assert "items" not in v.check_user_cache() or v.check_user_cache()["items"] == []
+
+
+def test_clear_caches_refuses_what_is_not_listed_right_now(v):
+    cache, big, small = big_caches(v)
+    res = v.clear_caches([v.item_id("cache", "small"), v.item_id("cache", "nope")])
+    assert res["ok"] is False and res["message"].startswith("Nothing was cleared.") and small.exists()
+    assert (big / "recent.bin").exists()
+    res = v.clear_caches([v.item_id("cache", "huge"), v.item_id("cache", "small")])
+    assert res["ok"] and "Left alone: one folder is no longer on the list" in res["message"] and small.exists()
+    assert list(big.iterdir()) == []
+
+
+def test_clear_caches_will_not_walk_through_a_linked_cache_folder(v, tmp_path):
+    v.CACHE_BIG_BYTES = 3_000_000
+    elsewhere = tmp_path / "elsewhere"
+    put(elsewhere / "a", "x" * 4_000_000)
+    cache = Path(v.HOME, ".cache")
+    cache.mkdir(parents=True)
+    os.symlink(elsewhere, cache / "linked")
+    assert v.check_user_cache().get("items", []) == []              # a link is not a cache folder
+    res = v.clear_caches([v.item_id("cache", "linked")])
+    assert not res["ok"] and (elsewhere / "a").exists()
+
+
+def test_clear_caches_verb_takes_only_distinct_keyed_ids(v, capsys):
+    cache, big, small = big_caches(v)
+    good = v.item_id("cache", "huge")
+    assert v.main(["vigil", "clear-caches", good]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True and list(big.iterdir()) == []
+    for bad in (["clear-caches"], ["clear-caches", "huge"], ["clear-caches", good, good], ["clear-caches", "../" + good[:13]],
+                ["clear-caches", good.upper()]):
+        assert v.main(["vigil"] + bad) == 2, bad
+
+
 def test_clean_user_runs_every_no_root_cleanup(v):
     thumbs = Path(v.HOME, ".cache/thumbnails")
     put(thumbs / "normal" / "a.png", "x")

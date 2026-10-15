@@ -125,6 +125,12 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       (from pacman's log) shows beside the button and in the Last run list.
       It is not part of Run all: an earlier build that ran it inside Run all,
       holding back its reboot question, was dropped as clunky.
+- [x] **Big cache folders on the Application caches row.** Folders directly
+      in `~/.cache` of 1 GB or more are listed (place and size) as a
+      checklist: tick and **Clear selected** empties each ticked folder
+      whole, or **Ignore** a folder to keep it (Keep under another name).
+      Clean all and Clear unused are unchanged: they still clear only files
+      unused for a week, in every folder.
 - [x] **Black Ops is no longer detected or handed anything.** Its protections
       are written again as Vigil rows with their own buttons and Undo, and no
       listener, watchdog or service: AI agent telemetry (Claude Code, pi,

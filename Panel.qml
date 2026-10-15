@@ -315,6 +315,12 @@ Panel {
       if (ids) { runHelper(["trash"].concat(ids)); picked = ({}) }
       return
     }
+    if (kind === "clear-caches") {
+      // Exactly the folders the card listed, each still listed (the helper checks its size again).
+      var folders = Model.itemIdList(report, action, "cache")
+      if (folders) { runHelper(["clear-caches"].concat(folders)); picked = ({}) }
+      return
+    }
     if (kind === "remove-orphans" || kind === "remove-foreign" || kind === "remove-plugins") {
       // The steps rebuilt from the same ids, each still listed: the same
       // commands the card showed.
@@ -409,8 +415,8 @@ Panel {
   // the helper made; no file name ever reaches its command line.
   function runHelper(args) {
     if (fixProc.running || args.length < 2) return
-    if (["fix", "dismiss", "undismiss", "ignore", "unignore", "keep", "unkeep", "trash"].indexOf(args[0]) === -1) return
-    var hashed = ["ignore", "unignore", "keep", "unkeep", "trash"].indexOf(args[0]) !== -1
+    if (["fix", "dismiss", "undismiss", "ignore", "unignore", "keep", "unkeep", "trash", "clear-caches"].indexOf(args[0]) === -1) return
+    var hashed = ["ignore", "unignore", "keep", "unkeep", "trash", "clear-caches"].indexOf(args[0]) !== -1
     if (args.length !== 2 && (!hashed || args.length > Model.MAX_PICK + 1)) return
     for (var i = 1; i < args.length; i++) {
       if (!/^[a-z0-9-]{1,40}$/.test(args[i])) return
@@ -469,7 +475,7 @@ Panel {
   function requestRemoveIds(check, ids) {
     var spec = Model.pickSpec(check)
     if (!report || busy || !spec || ids.length === 0 || ids.length > Model.MAX_PICK) return
-    if (spec.card !== "trash" && spec.card !== "ignore"
+    if (spec.card !== "trash" && spec.card !== "ignore" && spec.card !== "clear-caches"
         && Model.confirmation(spec.card, ids.join(","), report, homeDir) === null) {
       setStatus(spec.card === "remove-plugins" ? "This needs Omarchy's omarchy-plugin-remove, which was not found."
                                                : "This needs pkexec, which was not found.", true)
@@ -1795,6 +1801,7 @@ Panel {
             height: Style.space(14)
             text: "\uf023"
             tooltipText: itemRow.modelData.ignored ? "Marked as a false positive. Click to count it again"
+                                                   : itemRow.modelData.kind === "cache" ? "Ignored. Click to list it again"
                                                    : "Kept. Click to count it again"
             horizontalPadding: 0
             verticalPadding: 0
@@ -1878,7 +1885,7 @@ Panel {
             : row.pick.all ? row.pick.remove + " all" : row.pick.remove + " selected"
           tooltipText: row.pick === null ? ""
             : count === 0 && !row.pick.all ? "Tick the items first"
-            : row.pick.card === "trash" || row.pick.card === "ignore" ? "Asks first, listing each item"
+            : row.pick.card === "trash" || row.pick.card === "ignore" || row.pick.card === "clear-caches" ? "Asks first, listing each item"
             : "Asks first, listing each item and the exact command"
           foreground: root.foreground
           fontFamily: root.fontFamily
@@ -1889,8 +1896,10 @@ Panel {
         Button {
           readonly property int count: row.keepIdsNow.length
           visible: row.pickable && row.pick !== null && row.pick.keep
-          text: count > 0 ? "Keep selected (" + count + ")" : "Keep all"
-          tooltipText: "Leave them as they are; Vigil stops counting them and locks them at the bottom of the list"
+          readonly property string word: row.pick !== null && row.pick.keepLabel ? row.pick.keepLabel : "Keep"
+          text: count > 0 ? word + " selected (" + count + ")" : word + " all"
+          tooltipText: word === "Ignore" ? "Stop pointing them out; they stay listed, locked at the bottom, and nothing is deleted"
+                                         : "Leave them as they are; Vigil stops counting them and locks them at the bottom of the list"
           foreground: root.foreground
           fontFamily: root.fontFamily
           enabled: !root.busy && root.pending === null
