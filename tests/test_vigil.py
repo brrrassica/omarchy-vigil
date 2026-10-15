@@ -920,119 +920,23 @@ const ids = ["signatures-update", "password-check", "rkhunter"].concat(M.DAILY_I
 process.stdout.write(JSON.stringify(M.confirmation("full-scan", "all", r, "/home/a").lines))
 """, str(REPO / "Model.js"), json.dumps(src)], capture_output=True, text=True, check=True).stdout
     names = [m.group(1) for m in (re.match(r"\d+\. ([^:.]+):", l) for l in json.loads(out)) if m]
-    known = set(v.ITEM_NAME.values()) | {"Virus signatures update", "System update"}
+    known = set(v.ITEM_NAME.values()) | {"Virus signatures update"}
     assert names and all(n in known for n in names), [n for n in names if n not in known]
     for want in ("Secrets scan of your git repositories", "AI model file scan", "Rootkit scan", "Password scan"):
         assert want in names
 
 
-def test_update_marker_names_agree_between_helper_and_panel(v):
-    assert node_json("M.UPDATE_MARKS") == list(v.UPDATE_MARKS)
-
-
-def test_cli_accepts_the_held_virus_scan_flags_only_in_their_combinations(v):
-    import subprocess as sp
-    vigil = str(REPO / "bin" / "vigil")
-    for args in (["--hold-scan"], ["--scan", "--hold-scan"], ["--daily", "--hold-scan"], ["--finish-scan", "--signatures"],
-                 ["--finish-scan", "--hold-scan"], ["--full", "--signatures", "--hold-scan"], ["--hold-scan", "--full"]):
-        r = sp.run(["python3", "-I", "-S", vigil, "refresh-feeds"] + args, capture_output=True, text=True, timeout=20)
-        assert r.returncode == 2 and r.stdout == "", args
-
-
-def run_all_world(v):
-    """Everything a Run all needs, with fake tools: ClamAV there, signatures fresh, a password scan that works."""
-    pkexec_ok(v)
-    v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan", v.ROOT + "/usr/bin/freshclam"}
-    fresh_signatures(v)
-    return []
-
-
-def test_run_all_can_hold_the_virus_scan_back_and_finish_it_after_the_update(v, monkeypatch):
-    run_all_world(v)
-    ran = []
-    monkeypatch.setattr(v, "refresh_virus_scan", lambda cb=None: ran.append("virus-scan") or v.save_feed("virus-scan", {"found": []}))
-    assert v.run_plan(full=True)[-2:] == ["signatures", "virus-scan"]
-    held = v.run_plan(full=True, hold_scan=True)
-    assert "virus-scan" not in held and "signatures" not in held and held[:2] == ["password-check", "rkhunter"]
-    assert v.run_plan(finish_scan=True) == ["signatures", "virus-scan"]
-    # the root step for old signatures is still decided up front, while the virus scan waits
-    monkeypatch.setattr(v, "signatures_due", lambda: True)
-    assert v.run_plan(full=True, hold_scan=True, signatures=True)[0] == "signatures-update"
-    assert "signatures-update" not in v.run_plan(finish_scan=True)
-    res = v.refresh_due_feeds(full=True, hold_scan=True)
-    assert res["held"] is True and ran == [] and "The virus scan follows the Omarchy update." in res["message"]
-    assert "On this machine" not in res["message"] and "Nothing on this machine" not in res["message"]
-    # the weekly run is not marked done while its virus scan is still to come
-    assert v.feed_cache("full-scan") is None and v.feed_cache("virus-scan") is None
-    res = v.refresh_due_feeds(finish_scan=True)
-    assert ran == ["virus-scan"] and res["held"] is False and "Scanned your home folder" in res["message"].replace("scanned", "Scanned")
-    assert v.feed_cache("full-scan") is not None                   # now it counts
-    assert "Nothing on this machine needs attention" in res["message"]
-
-
-def test_a_stopped_held_run_is_not_held(v, monkeypatch):
-    run_all_world(v)
-    monkeypatch.setattr(v, "plugin_removed", lambda: True)
-    res = v.refresh_due_feeds(full=True, hold_scan=True)
-    assert res["stopped"] is True and res["held"] is False
-    v.STOP["on"] = False
-
-
-def test_holding_without_clamav_changes_nothing(v):
-    pkexec_ok(v)
-    res = v.refresh_due_feeds(full=True, hold_scan=True)
-    assert res["held"] is False and v.run_plan(finish_scan=True) == []
-
-
-def mark_update(v, *names, age=0):
-    d = Path(v.HOME, ".local/state/omarchy-vigil")
-    d.mkdir(parents=True, exist_ok=True)
-    for n in names:
-        f = d / n
-        f.write_text("")
-        if age:
-            os.utime(f, (time.time() - age, time.time() - age))
-
-
-def test_update_status_reads_only_markers_and_clear_removes_them(v, tmp_path):
-    assert v.update_status() == {"update": "none", "reboot": False, "shell": False}
-    mark_update(v, "update-waiting")
-    assert v.update_status()["update"] == "waiting"
-    mark_update(v, "update-running")
-    assert v.update_status()["update"] == "running"
-    mark_update(v, "update-ok", "update-reboot", "update-shell")
-    assert v.update_status() == {"update": "ok", "reboot": True, "shell": True}
-    # a reboot marker means nothing without a finished update, and failure wins over a stale running marker
-    d = Path(v.HOME, ".local/state/omarchy-vigil")
-    for n in ("update-ok", "update-running", "update-waiting"):
-        (d / n).unlink()
-    assert v.update_status() == {"update": "none", "reboot": False, "shell": False} or v.update_status()["update"] == "none"
-    mark_update(v, "update-failed")
-    assert v.update_status()["update"] == "failed" and v.update_status()["reboot"] is False
-    v.update_clear()
-    assert v.update_status() == {"update": "none", "reboot": False, "shell": False}
-    assert not [p for p in d.iterdir() if p.name.startswith("update-")]
-
-
-def test_update_status_ignores_links_and_directories_and_calls_a_forgotten_terminal_failed(v, tmp_path):
-    d = Path(v.HOME, ".local/state/omarchy-vigil")
-    d.mkdir(parents=True)
-    os.symlink(tmp_path, d / "update-ok")
-    (d / "update-failed").mkdir()
-    assert v.update_status()["update"] == "none"
-    mark_update(v, "update-running", age=4 * 3600)
-    assert v.update_status()["update"] == "failed"
-    (d / "update-running").unlink()
-    mark_update(v, "update-waiting", age=4 * 3600)
-    assert v.update_status()["update"] == "failed"
-    mark_update(v, "update-waiting", age=60)
-    assert v.update_status()["update"] == "waiting"
-
-
-def test_update_status_verb_takes_no_arguments(v, capsys):
-    assert v.main(["vigil", "update-status"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"update": "none", "reboot": False, "shell": False}
-    assert v.main(["vigil", "update-status", "x"]) == 2
+def test_omarchy_update_last_run_comes_from_pacmans_log(v):
+    assert v.last_full_update() == ("", "")
+    src = {s["id"]: s for s in v.source_status()}["omarchy-update"]
+    assert src["run"] == "update" and src["state"] == "never" and src["label"] == "Omarchy update"
+    sysfile(v, "/var/log/pacman.log", "[2026-09-01T10:00:00+0000] [PACMAN] starting full system upgrade\n"
+                                      "[2026-10-12T09:41:07+0000] [PACMAN] starting full system upgrade\n"
+                                      "[2026-10-13T18:00:00+0000] [ALPM] installed foo (1-1)\n")
+    assert v.last_full_update() == ("2026-10-12", "09:41")
+    src = {s["id"]: s for s in v.source_status()}["omarchy-update"]
+    assert (src["date"], src["time"]) == ("2026-10-12", "09:41") and src["state"] in ("ok", "stale")
+    assert all(len(s["label"]) <= 40 for s in v.source_status())
 
 
 def test_black_ops_is_gone(v):
@@ -2049,7 +1953,7 @@ def test_cli_refresh_feeds_arguments():
 # When each scan last ran and each source last updated, shown on the Overview
 
 def test_last_run_list_by_run_with_times(v):
-    assert [s["id"] for s in v.source_status()] == ["model-scan", "password-check"]   # always offered
+    assert [s["id"] for s in v.source_status()] == ["model-scan", "password-check", "omarchy-update"]   # always offered
     v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan", v.ROOT + "/usr/bin/arch-audit"}
     got = [(s["id"], s["label"], s["run"], s["state"]) for s in v.source_status()]
     # Each scan and lookup, in the order its run does it: no rows for the lists
@@ -2058,7 +1962,8 @@ def test_last_run_list_by_run_with_times(v):
                    ("downloads-scan", "Virus scan of ~/Downloads", "daily", "never"),
                    ("model-scan", "AI model file scan", "weekly", "never"),
                    ("virus-scan", "Virus scan of ~", "weekly", "never"),
-                   ("password-check", "Password scan", "all", "never")]
+                   ("password-check", "Password scan", "all", "never"),
+                   ("omarchy-update", "Omarchy update", "update", "never")]
     assert all(len(s["label"]) <= 40 and s["note"] == "" for s in v.source_status())   # the panel's limit
     v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
     v.run_fix("arch-audit-refresh")
@@ -2491,7 +2396,7 @@ def test_only_one_run_at_a_time(v, capsys, monkeypatch):
         os.close(fd)                          # the other run ends: the kernel drops its lock
     assert v.main(["vigil", "refresh-feeds", "--full"]) == 0
     assert calls == [{"force": False, "full": True, "scan_only": False, "daily_only": False, "weekly_only": False,
-                      "signatures": False, "hold_scan": False, "finish_scan": False}]
+                      "signatures": False}]
     os.close(v.RUN_LOCK["fd"])
     v.RUN_LOCK["fd"] = None
 

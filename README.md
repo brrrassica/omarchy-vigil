@@ -121,7 +121,7 @@ current (see below).
 |---|---|---|
 | **Daily check** | Looks up waiting system, Omarchy and Flatpak updates. Then: the **Arch security scan** (arch-audit downloads the Arch security team's list and compares your packages with it), the **OSV malware scan** (osv-scanner checks your AUR build folders and global npm, Bun, mise and pnpm installs against OSV.dev as it runs), the **AUR status lookup**, the **Bumblebee list** download followed by the **Bumblebee scan**, and the **Virus signatures** check followed by the **virus scan of what is new in Downloads** | once a day, in the background, at low priority |
 | **Weekly check** | The firmware lookup (fwupd fetches LVFS's list first), the **secrets scan of your git repositories** (gitleaks), the **AI model file scan**, then the **Virus signatures** check followed by the **virus scan of your whole home folder** | once a week, in the background, at low priority |
-| System update (`omarchy-update -y`) | | only when you press **Run all**, in a terminal, just before the virus scan |
+| Omarchy update (`omarchy-update`) | | only when you press **Omarchy Update**, in a terminal |
 | Password scan (accounts without a password) and rootkit scan (rkhunter) | | only when you press **Run all**, since they need your password |
 | Cleaning (Care) | | only when you ask; Vigil only measures sizes by itself |
 
@@ -160,30 +160,24 @@ asks first, on a card that lists exactly what it runs, in order:
   Flatpak and container data, language toolchains, `node_modules` and
   `.git` folders, and other disks; at low priority). It can take a while;
   a notification says when it is done.
-- **Run all** (`R` or `S`) runs the daily check and the weekly check, plus
+- **Run all** (`R` or `S`) runs the daily check, then the weekly check, plus
   the password scan and the rootkit scan, and updates the virus signatures
   first when they are over two days old. Those are the only password prompts
-  in the checks, and they come first, while you are at the screen. The virus
+  in any run, and they come first, while you are at the screen. The virus
   scan of your home folder includes Downloads, so Run all does not scan
-  Downloads twice. **The Omarchy update runs just before the virus scan**, in
-  a terminal: Omarchy's own `omarchy-update -y`, so it does everything that
-  command normally does (system packages, your AUR packages, your mise tools,
-  orphan clean-up). The panel opens it when the other checks are done, waits
-  for it to end (it shows "waiting" or "running" with a Stop button), then
-  runs the virus scan. The terminal is needed because sudo asks for your
-  password there (unless you have passwordless sudo); the card lists the
-  exact script and says the update cannot be stopped once it starts.
-  **A restart the update asks for is held back**: its "Reboot?" question is
-  answered no for you, so the scan is never cut off, and so is the shell
-  restart it ends with. The **final card** then says "The update recommends a
-  restart: restart the computer when you are ready" (and the notification
-  says so), and if the shell restart was held, a **Restart shell** button
-  appears. If the update fails or its terminal is closed, the card says so
-  and the virus scan still runs. A run you stop, or Stop while waiting for the
-  update, skips the scan, which is then due again at the next weekly check.
-  Without a terminal launcher or `omarchy-update`, Run all has no update step.
-  The **Update now** button on the System updates row is still there for an
-  update on its own, with Omarchy's own questions.
+  Downloads twice. Run all does not update the system; that is the
+  **Omarchy Update** button.
+- **Omarchy Update** (under the run buttons) opens a terminal and runs
+  Omarchy's own `omarchy-update`, so it does everything that command
+  normally does: system packages, your AUR packages, your mise tools and
+  the rest. It asks first, on the usual card with the exact script, then
+  sudo and Omarchy's own questions (including any restart) happen in the
+  terminal. Vigil does not follow or alter it. The line beside the button
+  says when the last full update was, from pacman's log, and the Last run
+  list shows the same under **Omarchy Update button**. It is separate from
+  **Update now** on the System updates row because that row looks only at
+  pacman's waiting updates (`checkupdates`), not at AUR packages or mise
+  tools; both start the same updater.
 
 Some rows also have a button of their own: **Scan now** on the Arch
 security and OSV rows runs just that scan, and **Look up now** on the AUR
@@ -535,8 +529,7 @@ The panel always says which kind an action is:
    **Run**. Scripts that need root run through `pkexec`, so Omarchy's own
    password dialog asks; cancelling it changes nothing. The panel then shows
    what the script printed. Only tools that ask you questions as they go
-   still open a terminal: Omarchy's updater (also in Run all, just before the
-   virus scan), its FIDO2 key
+   still open a terminal: Omarchy's updater (also behind the Omarchy Update button), its FIDO2 key
    and fingerprint setup, passwordless sudo, the docker group, and
    choosing an SSH passphrase. Packages Vigil installs come straight from
    the Arch repositories with `pacman --needed --noconfirm`; Bumblebee, the
@@ -648,8 +641,8 @@ Each happens only once the tool is installed, and turning `autoUpdate` off
 limits it to when you press a Run, Scan now or Look up now button. Actions you start yourself also use
 the network and say so first: installing a tool (Arch mirrors; Bumblebee
 from Perplexity's release on GitHub), ClamAV's signatures (ClamAV's
-servers), Flatpak and firmware updates, and `omarchy-update` (also a step of
-Run all, which says so on its card). The rootkit scan in Run all
+servers), Flatpak and firmware updates, and `omarchy-update` (also behind the Omarchy Update button, which says
+so on its card). The rootkit scan in Run all
 reads local files and makes no network call.
 
 ## Files Vigil writes
@@ -676,7 +669,6 @@ reads local files and makes no network call.
 | `~/.local/state/omarchy-vigil/firmware.json` | the helper, mode 0600 | each weekly check: device names and firmware versions with an update waiting |
 | `~/.local/state/omarchy-vigil/gitleaks.json` | the helper, mode 0600 | each weekly check: the repository, file, line and rule of each possible secret, never the secret (gitleaks is asked to redact it). `gitleaks-report.json` is gitleaks's own report, written there while one repository is scanned and deleted right after |
 | `~/.local/state/omarchy-vigil/model-scan.json` | the helper, mode 0600 | each weekly check: how many model files were read, and the paths and dangerous imports of those that can run code |
-| `~/.local/state/omarchy-vigil/update-*` | the update terminal's script, empty files | only during Run all's update: `update-waiting`, `update-running`, `update-ok`, `update-failed`, `update-reboot`, `update-shell`, so the panel knows when to go on and what to tell you; removed when the next Run all that includes the update finishes its checks |
 | `~/.local/state/omarchy-vigil/rkhunter.json` | the helper, mode 0600 | each Run all: rkhunter's warnings (text capped), and whether each matches what a package shipped |
 | `~/.local/state/omarchy-vigil/downloads-scan.json`, `downloads-scan.list` | the helper, mode 0600 | each daily check: the new files in Downloads it scanned, and any it found infected |
 | `~/.local/state/omarchy-vigil/confirm-scan.list` | the helper, mode 0600 | only while a scan double-checks what it found: the paths of those files, deleted when it is done |

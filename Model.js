@@ -182,8 +182,7 @@ function actionCommands(id, tools, home) {
 // any besides the checks themselves: the root steps through pkexec (the virus
 // signatures when ClamAV's own update service has let them get over two days
 // old, which the helper says in signaturesDue; the password scan; the rootkit
-// scan), and then, before the virus scan, the Omarchy update in a terminal
-// (when the panel can open one). The daily and weekly checks run entirely as you.
+// scan). The daily and weekly checks run entirely as you.
 function runCommands(kind, report) {
   if (!report || kind !== "full-scan") return []
   var out = []
@@ -197,82 +196,12 @@ function runCommands(kind, report) {
       out.push({ who: "As root, through pkexec, for the rootkit scan (rkhunter; only its warnings are kept):",
                  text: commandText([PKEXEC, BASH, "-c", RKHUNTER_SCRIPT]) })
   }
-  var update = fullScanUpdate(report)
-  if (update !== "")
-    out.push({ who: "Then, before the virus scan: in a terminal, as you, the Omarchy update (sudo asks for your password there):",
-               text: update })
   return out
 }
 
 function hasSource(report, id) {
   for (var i = 0; i < report.sources.length; i++) if (report.sources[i].id === id) return true
   return false
-}
-
-// Run all's update step, when the panel can open a terminal and Omarchy's updater is found. It comes after the
-// checks and before the virus scan (the scan takes longest, and a restart the update offers must not cut it
-// off). The terminal runs `omarchy-update -y` (Omarchy's own updater, told not to ask its confirmation
-// question) and tells the panel how it went by leaving empty marker files in Vigil's state folder, which
-// `vigil update-status` reads (names must match UPDATE_MARKS in bin/vigil; a test checks).
-//
-// Two things Omarchy's updater would do at its end are held back until the run is done, and the panel says so
-// on the final card: the question "Reboot?" (a program named gum, found first on the PATH of this one update,
-// answers no and writes down that it was asked, and passes every other question to the real gum), and
-// restarting the shell (which would end the panel and lose the run). Both shims live in a folder made for this
-// update and removed when it ends. The script is a constant apart from the updater's path, which must be in a
-// trusted folder.
-var UPDATE_MARKS = ["update-waiting", "update-running", "update-ok", "update-failed", "update-reboot", "update-shell"]
-var GUM_SHIM = "#!/bin/bash\n"
-  + "if [ \"$1\" = confirm ]; then\n"
-  + "  case \"$*\" in *eboot*) printf '%s\\n' \"$*\" >> \"$VIGIL_HOLD/reboot\"; exit 1 ;; esac\n"
-  + "fi\n"
-  + "PATH=${PATH#\"$VIGIL_HOLD\":}\n"
-  + "exec gum \"$@\"\n"
-var SHELL_SHIM = "#!/bin/bash\n"
-  + "echo 'Vigil held the shell restart back until its run is done.'\n"
-  + ": > \"$VIGIL_HOLD/shell\"\n"
-
-function fullScanUpdate(report) {
-  if (!report) return ""
-  var launcher = launcherPath(report.tools)
-  var dir = toolDir(report.tools, "omarchy-update")
-  if (launcher === "" || dir === "") return ""
-  var intro = ["Vigil: Run all, the Omarchy update", "",
-               "The checks before the virus scan are done. Now the Omarchy update (omarchy-update -y): system packages,",
-               "AUR packages, mise tools and the rest. It cannot be stopped once it starts.",
-               "If it wants a restart, Vigil holds that question back and tells you on its final card, after the",
-               "virus scan; it also holds back the shell restart until then.", ""]
-  var shown = []
-  for (var i = 0; i < intro.length; i++) shown.push("'" + intro[i] + "'")
-  return stateDirSh("", true) + MARK_SH
-    + "for m in " + UPDATE_MARKS.join(" ") + "; do /usr/bin/rm -f -- \"$s/$m\"; done\n"
-    + "mark update-waiting\n"
-    + "d=; finished=\n"
-    + "cleanup() { /usr/bin/rm -f -- \"$s/update-running\" \"$s/update-waiting\"; [ -n \"$finished\" ] || mark update-failed; [ -z \"$d\" ] || /usr/bin/rm -rf -- \"$d\"; }\n"
-    + "trap cleanup EXIT\n"
-    + "trap 'exit 1' HUP TERM INT\n"
-    + "printf '%s\\n' " + shown.join(" ") + "\n"
-    + "read -r -p 'Press Enter to continue, or Ctrl+C to cancel. ' _ || exit 1\n"
-    + "d=$(/usr/bin/mktemp -d \"${XDG_RUNTIME_DIR:-$HOME}/vigil-update.XXXXXX\") || exit 1\n"
-    + "/usr/bin/cat > \"$d/gum\" <<'VIGIL_SHIM'\n" + GUM_SHIM + "VIGIL_SHIM\n"
-    + "/usr/bin/cat > \"$d/omarchy-restart-shell\" <<'VIGIL_SHIM'\n" + SHELL_SHIM + "VIGIL_SHIM\n"
-    + "/usr/bin/chmod 0700 \"$d/gum\" \"$d/omarchy-restart-shell\"\n"
-    + "/usr/bin/rm -f -- \"$s/update-waiting\"; mark update-running\n"
-    + "if ( set -e; VIGIL_HOLD=\"$d\" PATH=\"$d:$PATH\" " + dir + "/omarchy-update -y ); then\n"
-    + "  [ -s \"$d/reboot\" ] && mark update-reboot\n"
-    + "  [ -e \"$d/shell\" ] && mark update-shell\n"
-    + "  mark update-ok; finished=1\n"
-    + "  [ -s \"$d/reboot\" ] && echo 'The update recommends a restart. Vigil held it back; it tells you on its final card.'\n"
-    + "else\n"
-    + "  mark update-failed; finished=1\n"
-    + "  echo 'The update did not finish. Vigil goes on with the virus scan.'\n"
-    + "fi\n"
-}
-
-// Whether the card you confirmed shows exactly this terminal script among its commands.
-function cardShowsUpdate(card, script) {
-  if (!card || !Array.isArray(card.commands) || script === "") return false
-  return card.commands.some(function(c) { return c && c.text === script })
 }
 
 function confirmationText(kind, id, report) {
@@ -957,7 +886,8 @@ var TERMINAL_ACTIONS = {
   },
   "update": {
     title: "Update the system",
-    what: ["Installs every waiting update, including security fixes. Restart afterwards if Vigil asks you to.",
+    what: ["Installs every waiting update, including security fixes: system packages, your AUR packages, your mise tools",
+           "and the rest of what Omarchy updates. Restart afterwards if Omarchy or Vigil asks you to.",
            "Technical: runs omarchy-update"],
     tool: "omarchy-update", args: ""
   },
@@ -1514,8 +1444,8 @@ function validCheck(c) {
 // runs. The virus scans say which signatures they used (note), Bumblebee only
 // when it fell back to an old list; old marks one over two days old.
 var SOURCE_IDS = ["pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee", "downloads-scan",
-                  "firmware", "gitleaks", "model-scan", "virus-scan", "password-check", "rkhunter"]
-var SOURCE_RUNS = ["daily", "weekly", "all"]
+                  "firmware", "gitleaks", "model-scan", "virus-scan", "password-check", "rkhunter", "omarchy-update"]
+var SOURCE_RUNS = ["daily", "weekly", "all", "update"]
 var SOURCE_STATES = ["ok", "stale", "never", "failed"]
 var DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
@@ -1570,7 +1500,15 @@ function sourceNote(src) {
   return src.state === "never" || src.state === "failed" ? "" : src.note
 }
 
-var RUN_HEADINGS = { daily: "Daily check", weekly: "Weekly check", all: "Run all only" }
+var RUN_HEADINGS = { daily: "Daily check", weekly: "Weekly check", all: "Run all only", update: "Omarchy Update button" }
+
+// The line under the Omarchy Update button: when the last full update was, from pacman's log.
+function updateCaption(report, now) {
+  var src = null
+  if (report) for (var i = 0; i < report.sources.length; i++) if (report.sources[i].id === "omarchy-update") src = report.sources[i]
+  if (!src || src.state === "never") return "No full update found in the package log"
+  return "Last update: " + relativeDay(src.date, now) + (src.time ? " at " + src.time : "")
+}
 
 // The Overview's LAST RUN list: when your settings and files were last read,
 // then each run's scans and lookups under its name, in the order it runs them.
@@ -1759,7 +1697,7 @@ function missingLabel(report) {
 
 // The three run buttons share one helper: what each runs, in the names the
 // Last run list uses, one numbered line each.
-function runLines(report, ids, updates) {
+function runLines(report, ids) {
   var has = function(id) {
     for (var i = 0; i < report.sources.length; i++) if (report.sources[i].id === id) return true
     return false
@@ -1769,16 +1707,11 @@ function runLines(report, ids, updates) {
     if (ids[i] === "bumblebee-list") return has("bumblebee")
     if (ids[i] === "signatures") return i + 1 < ids.length && has(ids[i + 1])
     if (ids[i] === "signatures-update") return report.signaturesDue === true
-    if (ids[i] === "system-update") return updates === true
     if (ids[i] === "password-check") return has("password-check") && toolDir(report.tools, "pkexec") !== ""
     if (ids[i] === "rkhunter") return has("rkhunter") && toolDir(report.tools, "pkexec") !== ""
     return has(ids[i])
   }
   var what = {
-    "system-update": "System update: Omarchy's own omarchy-update -y, in a terminal window, before the virus scan."
-      + " It updates the system packages, your AUR packages, your mise tools and the rest of what Omarchy updates, takes a"
-      + " snapshot first where Snapper is set up, and cannot be stopped once it starts. A restart it asks for is held back"
-      + " until the final card, so nothing is cut off.",
     "signatures-update": "Virus signatures update: they are over two days old (ClamAV's own update service has"
       + " fallen behind), so Vigil updates them first. Omarchy asks for your password.",
     "password-check": "Password scan: checks that every account has a password. Omarchy asks for your password.",
@@ -1848,17 +1781,13 @@ function weeklyConfirmation(report) {
 // ask for your password come first.
 function fullScanConfirmation(report) {
   if (!report) return null
-  var updates = fullScanUpdate(report) !== ""
-  var weekly = WEEKLY_IDS.filter(function(id) { return id !== "signatures" && id !== "virus-scan" })
   var ids = ["signatures-update", "password-check", "rkhunter"]
-    .concat(DAILY_IDS.filter(function(id) { return id !== "downloads-scan" && id !== "signatures" })).concat(weekly)
-    .concat(["system-update", "signatures", "virus-scan"])
+    .concat(DAILY_IDS.filter(function(id) { return id !== "downloads-scan" && id !== "signatures" })).concat(WEEKLY_IDS)
   var asks = (report.signaturesDue ? 1 : 0) + (toolDir(report.tools, "pkexec") !== "" ? 1 + (hasSource(report, "rkhunter") ? 1 : 0) : 0)
-  var lines = ["Runs the daily check and the weekly check, in this order:"].concat(runLines(report, ids, updates))
+  var lines = ["Runs the daily check and the weekly check, in this order:"].concat(runLines(report, ids))
     .concat(["The virus scan of ~ includes Downloads, so ~/Downloads is not scanned twice.", CARE_RUN_LINE])
   var password = asks === 0 ? "No password is needed. "
     : "Omarchy asks for your password at the start" + (asks === 1 ? ". " : asks === 2 ? ", twice. " : ", " + asks + " times. ")
-  if (updates) password += "The update opens a terminal before the virus scan, where sudo asks for your password unless sudo is passwordless there; the scan starts when it ends. "
   return { title: "Run all", lines: lines.concat([password + DONE_LINE]) }
 }
 
@@ -2008,50 +1937,7 @@ function parseFixResult(text) {
   try { d = JSON.parse(text) } catch (e) { return null }
   if (!d || typeof d !== "object" || typeof d.ok !== "boolean" || !isString(d.message, MAX_MESSAGE)) return null
   // Shown whole: the helper caps a message at MESSAGE_MAX, the same length.
-  return { ok: d.ok, message: plain(d.message, MAX_MESSAGE), stopped: d.stopped === true, held: d.held === true }
-}
-
-// What `vigil update-status` says about the Omarchy update Run all opened in a terminal.
-var UPDATE_STATES = ["none", "waiting", "running", "ok", "failed"]
-
-function parseUpdateStatus(text) {
-  if (typeof text !== "string" || text.length === 0 || text.length > 1024) return null
-  var d
-  try { d = JSON.parse(text) } catch (e) { return null }
-  if (!d || typeof d !== "object" || !inList(d.update, UPDATE_STATES)) return null
-  if (typeof d.reboot !== "boolean" || typeof d.shell !== "boolean") return null
-  return { update: d.update, reboot: d.update === "ok" && d.reboot, shell: d.update === "ok" && d.shell }
-}
-
-// What the panel shows while it waits for the update in its terminal.
-function updateWaitText(update) {
-  return update && update.update === "running"
-    ? "The Omarchy update is running in its terminal. The virus scan starts when it ends."
-    : "Waiting for you to start the Omarchy update in its terminal. The virus scan starts when it ends."
-}
-
-// The final card of a Run all that included the update: the checks' message, the virus scan's, then what the
-// update said. The restart it recommended was held back so the virus scan could finish.
-function finalRunMessage(heldMessage, scanMessage, update) {
-  var parts = []
-  if (typeof heldMessage === "string" && heldMessage !== "") parts.push(heldMessage)
-  if (typeof scanMessage === "string" && scanMessage !== "") parts.push(scanMessage)
-  if (update && update.update === "ok") {
-    parts.push("The Omarchy update finished.")
-    if (update.reboot) parts.push("The update recommends a restart: restart the computer when you are ready.")
-    if (update.shell) parts.push("It also wants the shell restarted, which was held back: press Restart shell when you are ready.")
-  } else if (update && update.update !== "none") {
-    parts.push("The Omarchy update did not finish (or its terminal was closed). Run it again from the System updates row.")
-  }
-  return plain(parts.join(" "), MAX_MESSAGE)
-}
-
-// The notification at the end of Run all or the weekly check: fixed sentences, never data.
-function finishNotice(name, parsed, update) {
-  if (parsed && parsed.stopped) return name + " was stopped."
-  if (!parsed) return name + " did not finish."
-  return name + " finished." + (update && update.reboot ? " The update recommends a restart." : "")
-    + " Open the lighthouse in the bar for the results."
+  return { ok: d.ok, message: plain(d.message, MAX_MESSAGE), stopped: d.stopped === true }
 }
 
 // ---------------------------------------------------------------------------
@@ -2303,7 +2189,7 @@ if (typeof module !== "undefined") {
     VERSION: VERSION, parseFixResult: parseFixResult, MAX_PICK: MAX_PICK, terminalScript: terminalScript,
     terminalAction: terminalAction, actionPlan: actionPlan, runMode: runMode, stripSudo: stripSudo, launcherPath: launcherPath, canRun: canRun, checksFor: checksFor, withSettings: withSettings,
     countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
-    tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
+    updateCaption: updateCaption, tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
     categoryLabel: categoryLabel, pillarCounts: pillarCounts, tabCaption: tabCaption, tabCounts: tabCounts,
     CARE_NOTE: CARE_NOTE, SIGNATURES_NOTICE: SIGNATURES_NOTICE, rowHeading: rowHeading, rowHeadingNote: rowHeadingNote, currentNote: currentNote, CURRENT_HEADING: CURRENT_HEADING, runCaptions: runCaptions,
     scheduleNotes: scheduleNotes, heroMeta: heroMeta, keyHints: keyHints, separateFromCleanAll: separateFromCleanAll,
@@ -2313,8 +2199,7 @@ if (typeof module !== "undefined") {
     relativeDay: relativeDay, sourceLine: sourceLine, sourceNote: sourceNote, MAX_MESSAGE: MAX_MESSAGE, countdown: countdown, 
     BUMBLEBEE_INSTALL: BUMBLEBEE_INSTALL, BUMBLEBEE_VERSION: BUMBLEBEE_VERSION,
     SIGNATURES_SCRIPT: SIGNATURES_SCRIPT, NO_PASSWORD_STEP: NO_PASSWORD_STEP, RKHUNTER_SCRIPT: RKHUNTER_SCRIPT,
-    fullScanUpdate: fullScanUpdate, cardShowsUpdate: cardShowsUpdate, UPDATE_MARKS: UPDATE_MARKS, parseUpdateStatus: parseUpdateStatus,
-    updateWaitText: updateWaitText, finalRunMessage: finalRunMessage, finishNotice: finishNotice,
+    
     SOURCE_IDS: SOURCE_IDS, DAILY_IDS: DAILY_IDS, WEEKLY_IDS: WEEKLY_IDS, cardShowsSignatures: cardShowsSignatures,
     parseProgress: parseProgress, parseRunning: parseRunning, detectionItem: detectionItem, leftoverItem: leftoverItem, leftoverIdList: leftoverIdList, leftoverTrashIds: leftoverTrashIds,
     PICK_SPECS: PICK_SPECS, MARK_LEVELS: MARK_LEVELS, pickSpec: pickSpec, itemPickable: itemPickable, itemRemovable: itemRemovable, pickableIds: pickableIds,

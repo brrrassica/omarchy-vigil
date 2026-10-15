@@ -117,16 +117,14 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 
 ## 0.31.0 (this release): the update in Run all, telemetry done in Vigil, three new scans
 
-- [x] **Run all includes the Omarchy update, just before the virus scan.**
-      The checks run in the panel as before; then a terminal window opens
-      with `omarchy-update -y` and the panel waits for it; then the virus
-      scan runs. The update's "Reboot?" question is answered no for it, and
-      its shell restart is held back, so nothing is cut off; the final card
-      and notification say the update recommends a restart, and a Restart
-      shell button appears when the shell restart was held. The card shows
-      the exact terminal script. Without a terminal launcher or updater,
-      Run all has no update step. The System updates row keeps its own
-      **Update now**.
+- [x] **Omarchy Update button** on the Overview, under the run buttons:
+      opens a terminal and runs Omarchy's own `omarchy-update` (system
+      packages, AUR packages, mise tools and the rest), on the usual card
+      with the exact script. Separate from the System updates row's **Update
+      now**, whose lookup covers pacman's waiting updates only. A last run
+      (from pacman's log) shows beside the button and in the Last run list.
+      It is not part of Run all: an earlier build that ran it inside Run all,
+      holding back its reboot question, was dropped as clunky.
 - [x] **Black Ops is no longer detected or handed anything.** Its protections
       are written again as Vigil rows with their own buttons and Undo, and no
       listener, watchdog or service: AI agent telemetry (Claude Code, pi,

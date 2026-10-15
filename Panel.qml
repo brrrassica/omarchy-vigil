@@ -123,19 +123,7 @@ Panel {
   // A run this copy did not start (another monitor's, or one left
   // running when the shell restarted). The helper allows one at a time.
   property var otherRun: null
-  // Run all with the Omarchy update: the checks run first (the virus scan held back), then the update opens in
-  // a terminal (updateAfter is the script the card showed), the panel waits for it to end (updateWait; it asks
-  // the helper for its markers every few seconds), then the virus scan runs and the final card says how the
-  // update went, including a restart it recommended and the panel held back.
-  property string updateAfter: ""
-  property bool updateWait: false
-  property bool heldScan: false
-  property string heldMessage: ""
-  property var updateInfo: null
-  property real updateUntil: 0
-  property bool shellRestartHeld: false
   readonly property bool runElsewhere: !feedProc.running && otherRun !== null
-  readonly property bool runBusy: feedProc.running || runElsewhere || updateWait
   readonly property var runProgress: feedProc.running ? scanProgress : otherRun
   property string actionId: ""
   property int actionStageNow: -1
@@ -208,27 +196,23 @@ Panel {
   // "full" (Run all); "scan" is the virus scan of the home folder alone (its
   // row's Scan now button). Each scan gets its list right before it runs;
   // ClamAV's own service keeps the virus signatures current.
-  readonly property var feedFlags: ({ daily: "--daily", weekly: "--weekly", full: "--full", scan: "--scan",
-                                      finish: "--finish-scan" })
+  readonly property var feedFlags: ({ daily: "--daily", weekly: "--weekly", full: "--full", scan: "--scan" })
   readonly property var feedTitles: ({ daily: "Daily check", weekly: "Weekly check", full: "Run all",
                                        scan: "Virus scan of ~" })
   // withSignatures (Run all only): the card you confirmed showed the virus
   // signatures update (they were over two days old), so the helper may run
   // it. Without it, the helper never asks for that password.
-  function refreshFeeds(mode, withSignatures, holdScan) {
-    if (feedProc.running || runElsewhere || updateWait) return
-    if (mode !== "full" && mode !== "finish") updateAfter = ""
-    if (mode === "full") { heldMessage = ""; updateInfo = null; heldScan = false }
+  function refreshFeeds(mode, withSignatures) {
+    if (feedProc.running || runElsewhere) return
     feedBuffer = ""
     feedResult = ""
     scanProgress = null
     feedOverflow = false
     feedForced = feedFlags.hasOwnProperty(mode)
-    feedFull = mode === "full" || mode === "weekly" || mode === "finish"
+    feedFull = mode === "full" || mode === "weekly"
     feedMode = mode
     feedProc.command = ["/usr/bin/python3", "-I", "-S", root.helperPath, "refresh-feeds"]
       .concat(feedForced ? [feedFlags[mode]] : [])
-      .concat(mode === "full" && holdScan === true ? ["--hold-scan"] : [])
       .concat(mode === "full" && withSignatures === true ? ["--signatures"] : [])
     feedProc.running = true
     // Anything that scans files can take hours.
@@ -242,14 +226,23 @@ Panel {
 
   // Every run button asks first, on the usual card, which lists what it runs.
   function requestRun(kind) {
-    if (!report || busy || runBusy) return
+    if (!report || busy || feedProc.running || runElsewhere) return
     pendingKind = kind
     pendingAction = "all"
   }
   function requestFullScan() { requestRun("full-scan") }
 
+  // The Omarchy Update button: Omarchy's own updater in a terminal (system packages, AUR packages, mise
+  // tools and the rest), on the same card as every action. It is not part of any run.
+  function requestOmarchyUpdate() {
+    if (!report || busy || feedProc.running || runElsewhere || pending !== null) return
+    if (!Model.canRun({ kind: "terminal", action: "update", label: "" }, report.tools, report.apps)) return
+    pendingKind = "terminal"
+    pendingAction = "update"
+  }
+
   function requestInstallHelpers() {
-    if (!report || busy || runBusy) return
+    if (!report || busy || feedProc.running || runElsewhere) return
     pendingKind = "terminal"
     pendingAction = "install-helpers"
   }
@@ -333,12 +326,9 @@ Panel {
       return
     }
     if (kind === "full-scan") {
-      // The checks run here, with Omarchy's password dialogs. If the card you confirmed showed the Omarchy
-      // update, the helper holds the virus scan back; the update opens in a terminal when the rest is done,
-      // and the virus scan runs when it ends.
-      var update = Model.fullScanUpdate(report)
-      updateAfter = Model.cardShowsUpdate(shown, update) ? update : ""
-      refreshFeeds("full", Model.cardShowsSignatures(shown), updateAfter !== "")
+      // No terminal: the password steps use Omarchy's own password dialog,
+      // so the panel stays open and shows the progress.
+      refreshFeeds("full", Model.cardShowsSignatures(shown))
       return
     }
     if (kind === "daily-check" || kind === "weekly-check") {
@@ -608,7 +598,6 @@ Panel {
   // copy's own or one left from before a shell restart.
   property bool stopRequested: false
   function stopRun() {
-    if (updateWait) { cancelUpdateWait(); return }
     if (stopProc.running || stopRequested) return
     if (feedProc.running) {
       // This copy's own run: the helper stops its current step on TERM,
@@ -760,108 +749,37 @@ Panel {
     onExited: function(exitCode, exitStatus) {
       feedKill.stop()
       feedDeadline.stop()
-      var wasStopped = root.stopRequested
       root.stopRequested = false
       var parsed = (!root.feedOverflow && exitCode === 0)
         ? Model.parseFixResult((root.feedResult !== "" ? root.feedResult : root.feedBuffer).trim()) : null
       root.feedBuffer = ""
       root.feedResult = ""
       root.scanProgress = null
-      // Run all with the Omarchy update: the checks are done, the virus scan is held back. Open the update in
-      // a terminal and wait for it; the final card and notification come after the virus scan.
-      var launch = root.report ? Model.launcherPath(root.report.tools) : ""
-      if (root.feedMode === "full" && root.updateAfter !== "" && !wasStopped && !(parsed && parsed.stopped) && launch !== "") {
-        root.heldMessage = parsed ? parsed.message : "The checks did not finish."
-        root.heldScan = parsed !== null && parsed.held === true
-        root.updateInfo = null
-        Quickshell.execDetached([launch, root.updateAfter])
-        root.updateUntil = Date.now() + 3 * 3600000
-        root.updateWait = true
-        root.feedForced = false
-        root.feedFull = false
-        root.setStatus("", false)
-        root.runAudit()
-        return
-      }
       // Only the buttons report back, on the result card, which stays until
       // you close it; the background runs stay quiet.
-      var message = parsed ? parsed.message : "It did not finish."
-      if (root.feedMode === "finish")
-        message = Model.finalRunMessage(root.heldMessage, parsed ? parsed.message : "The virus scan did not finish.", root.updateInfo)
       if (root.feedForced) {
         root.setStatus("", false)
         root.actionResult = {
           title: root.feedTitles[root.feedMode] || "Vigil",
-          verdict: message,
+          verdict: parsed ? parsed.message : "It did not finish.",
           ok: parsed !== null && parsed.ok,
           output: ""
         }
       }
       // The long runs (Run all, the weekly check) also send a notification.
       if (root.feedFull) {
+        var name = root.feedTitles[root.feedMode]
         Quickshell.execDetached(["/usr/bin/notify-send", "--app-name=Vigil", "--", "Vigil",
-          Model.finishNotice(root.feedTitles[root.feedMode], parsed, root.updateInfo)])
+          parsed && parsed.stopped ? name + " was stopped."
+            : (parsed ? name + " finished. Open the lighthouse in the bar for the results." : name + " did not finish.")])
       }
-      if (root.feedMode === "finish" && root.updateInfo && root.updateInfo.shell) root.shellRestartHeld = true
       root.feedForced = false
       root.feedFull = false
-      root.updateAfter = ""
       root.runAudit()
     }
   }
 
-  // The Omarchy update's terminal leaves markers in the state folder; this reads them through the helper.
-  Process {
-    id: updateStatusProc
-    clearEnvironment: true
-    environment: root.helperEnv
-    command: ["/usr/bin/python3", "-I", "-S", root.helperPath, "update-status"]
-    property string buffer: ""
-    stdout: SplitParser {
-      splitMarker: ""
-      onRead: function(data) { updateStatusProc.buffer = (updateStatusProc.buffer + data).slice(-2048) }
-    }
-    onExited: function(exitCode, exitStatus) {
-      var r = exitCode === 0 ? Model.parseUpdateStatus(updateStatusProc.buffer.trim()) : null
-      updateStatusProc.buffer = ""
-      if (!r || !root.updateWait) return
-      root.updateInfo = r
-      if (r.update === "ok" || r.update === "failed") root.endUpdateWait()
-    }
-  }
-  Timer {
-    interval: 4000
-    repeat: true
-    running: root.updateWait
-    onTriggered: {
-      if (Date.now() > root.updateUntil) root.cancelUpdateWait()
-      else if (!updateStatusProc.running) updateStatusProc.running = true
-    }
-  }
-
-  // The update ended (done or failed): go on with the virus scan, or, with no virus scan to run, show the card.
-  function endUpdateWait() {
-    updateWait = false
-    if (heldScan) { refreshFeeds("finish"); return }
-    actionResult = { title: "Run all", verdict: Model.finalRunMessage(heldMessage, "", updateInfo), ok: true, output: "" }
-    Quickshell.execDetached(["/usr/bin/notify-send", "--app-name=Vigil", "--", "Vigil",
-      Model.finishNotice("Run all", { ok: true, stopped: false }, updateInfo)])
-    if (updateInfo && updateInfo.shell) shellRestartHeld = true
-    updateAfter = ""
-    runAudit()
-  }
-
-  // Stop while waiting for the update, or three hours without an answer: the virus scan does not run (it is due
-  // again at the next weekly check), and the card says the update may still be going.
-  function cancelUpdateWait() {
-    updateWait = false
-    updateAfter = ""
-    actionResult = { title: "Run all", verdict: heldMessage + " Stopped while waiting for the Omarchy update: the virus scan did not run, "
-                     + "and the update may still be going in its terminal.", ok: true, output: "" }
-    runAudit()
-  }
-
-// The helper bounds its own children; these are the outer backstops.
+  // The helper bounds its own children; these are the outer backstops.
   Timer { id: auditDeadline; interval: 90000; onTriggered: if (auditProc.running) { auditProc.signal(15); auditKill.restart() } }
   Timer { id: auditKill; interval: 2000; onTriggered: if (auditProc.running) auditProc.signal(9) }
   Timer { id: fixDeadline; interval: 120000; onTriggered: if (fixProc.running) { fixProc.signal(15); fixKill.restart() } }
@@ -904,7 +822,7 @@ Panel {
     bar: root.bar
     // A lighthouse: it keeps watch and warns. Its beams show while a scan or
     // update runs (Nerd Font md-lighthouse_on / md-lighthouse).
-    text: root.runBusy ? "󰨀" : "󰧿"
+    text: feedProc.running || root.runElsewhere ? "󰨀" : "󰧿"
     tooltipText: Model.tooltip(root.report, auditProc.running)
     dimmed: root.report === null
     active: root.report !== null && root.report.level !== "ok"
@@ -1233,14 +1151,14 @@ Panel {
           }
 
           Button {
-            visible: root.updatePending || root.shellRestartHeld
+            visible: root.updatePending
             text: restartProc.running ? "Restarting\u2026" : "Restart shell"
             tooltipText: "Loads the updated Vigil. The bar and panels come back after a moment"
             foreground: root.foreground
             fontFamily: root.fontFamily
             bordered: true
             enabled: !restartProc.running
-            onClicked: { root.shellRestartHeld = false; restartProc.running = true }
+            onClicked: restartProc.running = true
           }
 
           Text {
@@ -1303,7 +1221,7 @@ Panel {
               foreground: root.urgent
               fontFamily: root.fontFamily
               bordered: true
-              enabled: !root.busy && !root.runBusy && root.pending === null
+              enabled: !root.busy && !feedProc.running && !root.runElsewhere && root.pending === null
               onClicked: root.requestInstallHelpers()
             }
 
@@ -1331,12 +1249,38 @@ Panel {
               RunCell {
                 id: runAll; kind: "full-scan"; mode: "full"; label: "Run all"; primary: true
                 caption: runStrip.captions.all; width: naturalWidth + runStrip.spare
-                tip: "Now: the daily check and the weekly check, plus the password scan and the rootkit scan, with the Omarchy update in a terminal before the virus scan"
+                tip: "Now: the daily check and the weekly check, plus the password scan and the rootkit scan"
+              }
+            }
+            // Omarchy's updater, on its own: it also updates AUR packages and mise tools, which the
+            // System updates lookup does not look at. Opens a terminal; sudo asks for your password there.
+            Row {
+              visible: root.report !== null
+              width: parent.width
+              spacing: Style.spacing.md
+              Button {
+                id: omarchyUpdateButton
+                text: "Omarchy Update"
+                tooltipText: "Run Omarchy's own updater in a terminal: system packages, AUR packages, mise tools and the rest"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                bordered: true
+                enabled: !root.busy && !feedProc.running && !root.runElsewhere && root.pending === null
+                         && root.report !== null && Model.canRun({ kind: "terminal", action: "update", label: "" }, root.report.tools, root.report.apps)
+                onClicked: root.requestOmarchyUpdate()
+              }
+              Text {
+                textFormat: Text.PlainText
+                anchors.verticalCenter: omarchyUpdateButton.verticalCenter
+                text: Model.updateCaption(root.report, new Date())
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
               }
             }
             // While an update or scan runs: what it is doing, and how far along.
             Column {
-              visible: root.runBusy
+              visible: feedProc.running || root.runElsewhere
               width: parent.width
               spacing: Style.space(4)
               Rectangle {
@@ -1354,9 +1298,8 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 width: parent.width
-                text: root.updateWait ? Model.updateWaitText(root.updateInfo)
-                      : (root.runElsewhere ? "Already running. " : "")
-                        + (root.runProgress ? Model.progressText(root.runProgress) : "Starting\u2026")
+                text: (root.runElsewhere ? "Already running. " : "")
+                      + (root.runProgress ? Model.progressText(root.runProgress) : "Starting\u2026")
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -1636,7 +1579,7 @@ Panel {
       foreground: root.foreground
       fontFamily: root.fontFamily
       bordered: runCell.primary
-      enabled: !root.runBusy && !root.busy && root.pending === null
+      enabled: !feedProc.running && !root.runElsewhere && !root.busy && root.pending === null
       onClicked: root.requestRun(runCell.kind)
     }
     Text {

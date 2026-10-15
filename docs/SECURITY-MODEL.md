@@ -15,7 +15,7 @@ These hold for every pillar, now and in later phases:
    in full on a confirmation in the panel, then run through `pkexec`, so
    Omarchy's own polkit dialog asks for your password each time. Tools that
    ask questions as they go run in a visible terminal: Omarchy's own
-   commands (`omarchy-update -y` too, in Run all, before the virus scan), and
+   commands (`omarchy-update` too, behind the Omarchy Update button), and
    `ssh-keygen` when you add a passphrase to an SSH key. No
    root helper, sudoers rule, polkit policy, service or timer, ever. Some
    steps that run as you make a system service ask through its own rules
@@ -107,7 +107,7 @@ These hold for every pillar, now and in later phases:
    version), never by a run, at the version pinned in Vigil's code, after
    its checksum matches.
 6. **Nothing automatic.** Every change to your system is confirmed (Run all's
-   card lists the Omarchy update and each root step before anything starts):
+   card lists each root step before anything starts):
    removing
    packages or plugins, moving leftovers to the trash and marking virus
    detections as false positives each ask first, on a card that lists the
@@ -125,8 +125,7 @@ These hold for every pillar, now and in later phases:
    Notifications carry counts, one fixed sentence (the virus signatures are
    over two days old: press Run all), or, after a weekly check or Run all
    you started, a fixed sentence saying it finished, was stopped or did not
-   finish (with a fixed clause when the Omarchy update in Run all recommended
-   a restart); never data from the report or a file. IPC methods take no
+   finish; never data from the report or a file. IPC methods take no
    parameters.
 7. **Removal leaves nothing running.** Vigil has no units, cron jobs or
    daemons of its own, and a run under way stops within seconds of the
@@ -144,7 +143,7 @@ These hold for every pillar, now and in later phases:
 | `bin/vigil` | you, as a child process | Reads local settings and files and returns one JSON report; performs the helper actions (a closed list), moves leftovers you choose to the trash, runs the scans and lookups (gitleaks, its own pickle reader, and the updates for your own Flatpak apps when you press Daily check or Run all), and starts its constant pkexec root steps in Run all. |
 | Script actions | root through `pkexec` (Omarchy's password dialog), or you | Constant scripts from `Model.js`, shown in full on a confirmation first; what they print is shown in the panel. |
 | Removing from a list | root through `pkexec` (packages), or you (plugins) | A constant script from `Model.js` with the names you ticked as its arguments, shown in full on the card first: `pacman -Rns`, or Omarchy's `omarchy-plugin-remove`. |
-| Terminal actions | you, in a visible terminal | Omarchy's own interactive commands, and choosing an SSH passphrase. Run all's update step is one too: `omarchy-update -y`, just before the virus scan (see Commands). |
+| Terminal actions | you, in a visible terminal | Omarchy's own interactive commands, and choosing an SSH passphrase. The Omarchy Update button is one too: `omarchy-update` (see Commands). |
 | App actions | you | Open ClamUI with a fixed argv: `/usr/bin/clamui`, or `/usr/bin/flatpak run io.github.linx_systems.ClamUI`. |
 
 No file from the plugin folder is executed as root. The root scripts are text
@@ -214,8 +213,7 @@ program it is running, process group and all, and starts no further step.
   Notifications contain only a count, the constant sentence
   `SIGNATURES_NOTICE` from `Model.js` (at most once a day), or, after a
   weekly check or Run all you started, a fixed sentence naming that run and
-  whether it finished, was stopped or did not finish (plus the fixed clause
-  "The update recommends a restart." after a Run all whose update did). They are built from
+  whether it finished, was stopped or did not finish. They are built from
   constants and a clamped number, never from the report or a file.
 - Size limits: at most 160 checks; at most 300 items per row from the
   helper (the panel accepts 500): leftovers 150, detections 500 before that
@@ -229,47 +227,20 @@ program it is running, process group and all, and starts no further step.
 
 ## Commands
 
-- **Run all's update.** Run all's checks run exactly as before: the panel
-  starts the helper (`refresh-feeds --full --hold-scan`), whose root steps go
-  through Omarchy's password dialog and are listed on the card, and which
-  leaves out only the virus signatures check and the virus scan. When it
-  finishes and the run was not stopped, the panel opens Omarchy's floating
-  terminal with one more script, the last command on the same card, and
-  waits. The script prints what it will do, waits for Enter, then runs
-  `omarchy-update -y` (Omarchy's own updater, told not to ask its
-  confirmation question; sudo asks for your password in that terminal). It
-  goes before the virus scan so that a restart the update asks for cannot cut
-  the scan off, and the scan, the longest step, runs after it
-  (`refresh-feeds --finish-scan`: the signatures check and the virus scan,
-  then the weekly bookkeeping the held run left undone, so a run that never
-  got to the scan is not marked done). Two things the updater does at its end
-  are held back, by programs that exist only for that one update: a `gum`
-  placed first on its PATH answers no to a question that mentions a reboot,
-  noting that it was asked, and passes every other question to the real
-  `gum`; a stand-in `omarchy-restart-shell` notes the request instead of
-  restarting the shell, which would end the panel and lose the run. Both
-  live in a folder made with `mktemp -d` under `XDG_RUNTIME_DIR`, mode 0700,
-  removed when the script ends. The script reports by creating empty marker
-  files in Vigil's state folder (`update-waiting`, `update-running`,
-  `update-ok`, `update-failed`, `update-reboot`, `update-shell`), the way the
-  hand-over scripts do: a no-follow walk from the home folder, a fresh file
-  renamed into place. `vigil update-status` (no arguments) reports only
-  names from that closed list, only for plain files of yours, and calls a
-  waiting or running marker older than three hours failed; the panel
-  validates its answer again. Markers carry no content, so nothing from them
-  reaches a command line or a notification except fixed sentences (the
-  notification adds "The update recommends a restart." and nothing else).
-  The script is a constant from `Model.js` apart from the updater's path
-  (one of the two trusted folders); it starts no part of Vigil. The panel
-  opens it only when the card you confirmed showed exactly that text and the
-  terminal launcher and updater were found, and a background run never
-  starts while the panel waits. Stop while waiting, or three hours without an
-  answer, ends the wait: the scan does not run and the final card says the
-  update may still be going. The final card says whether the update finished,
-  failed, recommended a restart, and wanted the shell restarted (the panel
-  then shows **Restart shell**). Omarchy's own updater is the one thing here
-  that changes your system without a Vigil card per step: the card says so,
-  and that it cannot be stopped once it starts.
+- **The Omarchy Update button.** It is an ordinary terminal action (the
+  existing `update` entry in `Model.js`), with its own card showing the
+  script: it prints what it will do, waits for Enter, then runs Omarchy's
+  own `omarchy-update`, resolved to a root-owned file in one of the two
+  trusted folders, in the visible terminal. Omarchy's updater asks its own
+  questions there, sudo asks for your password there, and a restart or shell
+  restart it offers is yours to answer. Vigil does not start it from a run,
+  shim anything it calls, follow it or write anything about it. Its "last
+  run" is read, not recorded: the helper takes the last "starting full system
+  upgrade" line from the tail of `/var/log/pacman.log` (the same bounded,
+  no-follow read the System updates check uses; date and HH:MM only) and
+  shows it as the Omarchy update source. Omarchy's own updater is the one
+  thing here that changes your system without a Vigil card per step: the card
+  says so.
 - **The rootkit scan** is the helper's third pkexec step, the constant
   `RKHUNTER_SCRIPT` (kept identical in `Model.js`, a test checks), shown in
   full on Run all's card: if rkhunter's file-properties database is missing it
@@ -678,7 +649,7 @@ by itself, and only once the relevant tool is installed:
   per daily check, and only right before the scan that uses it.
 
 Actions you start yourself (package installs, ClamUI, `omarchy-update`,
-which is also a step of Run all) say where they connect before they run.
+which is also behind the Omarchy Update button) say where they connect before they run.
 The secrets scan (gitleaks), the AI model file scan and the rootkit scan make
 no network call: rkhunter is run without `--update` and `--versioncheck`, and
 gitleaks reads local files only.

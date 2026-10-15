@@ -185,7 +185,7 @@ def test_black_ops_is_not_part_of_the_code_or_the_docs_as_a_dependency():
 
 def test_docs_name_the_root_steps_and_the_update():
     model = (REPO / "docs" / "SECURITY-MODEL.md").read_text()
-    assert "three constant pkexec commands" in model and "omarchy-update -y" in model
+    assert "three constant pkexec commands" in model and "The Omarchy Update button" in model
     assert "rkhunter --check --sk --nocolors" in model and "GITLEAKS_CONFIG_TOML" in model
     readme = (REPO / "README.md").read_text()
-    assert "**The Omarchy update runs just before the virus scan**" in readme
+    assert "**Omarchy Update** (under the run buttons)" in readme and "Run all does not update the system" in readme

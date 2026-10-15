@@ -1181,6 +1181,22 @@ def pending_updates(last_update):
     return max(0, min(cache["count"], 100000)), om
 
 
+def last_full_update():
+    """(date, HH:MM) of the last full system upgrade in pacman's log, which is what omarchy-update ends up
+    running (the Omarchy Update button and the System updates row both start it), or ("", "")."""
+    try:
+        text = read_tail(sys_path("/var/log/pacman.log"), PACMAN_LOG_TAIL)
+    except Refused:
+        return "", ""
+    last = ("", "")
+    for line in (text or "").splitlines():
+        if "starting full system upgrade" in line or "pacman -Syu" in line:
+            m = _PACMAN_TS.match(line)
+            if m:
+                last = (m.group(1), m.group(2)[:5])
+    return last
+
+
 @check
 def check_updates():
     cid, cat, title = "updates", "harden", "System updates"
@@ -2274,6 +2290,10 @@ def source_status():
     add("password-check", "all", d, t, fresh(d, FULL_SCAN_STALE_DAYS))
     if feed_available("rkhunter"):
         feed("rkhunter", "all")
+    # The Omarchy Update button starts omarchy-update in a terminal, which Vigil cannot follow; what it did
+    # shows in pacman's log, so the last full upgrade there is its "last run".
+    d, t = last_full_update()
+    add("omarchy-update", "update", d, t, fresh(d, 14))
     return out
 
 
@@ -4012,7 +4032,7 @@ ITEM_NAME = {"pending-updates": "System update lookup", "flatpak": "Flatpak upda
              "signatures": "Virus signatures", "downloads-scan": "Virus scan of ~/Downloads",
              "firmware": "Firmware lookup", "virus-scan": "Virus scan of ~", "password-check": "Password scan",
              "gitleaks": "Secrets scan of your git repositories", "model-scan": "AI model file scan",
-             "rkhunter": "Rootkit scan"}
+             "rkhunter": "Rootkit scan", "omarchy-update": "Omarchy update"}
 ASKS = " (Omarchy asks for your password)"
 STEP_TEXT = dict(ITEM_NAME, **{
     "flatpak-update": "Flatpak app updates",
@@ -4025,8 +4045,7 @@ CLAM_SCANS = ("downloads-scan", "virus-scan")
 LIST_FALLBACK = {"bumblebee": False}
 
 
-def run_plan(full=False, scan_only=False, daily_only=False, weekly_only=False, signatures=False, hold_scan=False,
-             finish_scan=False):
+def run_plan(full=False, scan_only=False, daily_only=False, weekly_only=False, signatures=False):
     """The steps a run takes, in order. With no flag it is the background run:
     only what is due, never a password. Each scan comes right after its list:
     the Bumblebee list before the Bumblebee scan, the virus signatures before
@@ -4035,12 +4054,7 @@ def run_plan(full=False, scan_only=False, daily_only=False, weekly_only=False, s
     days old (the service has fallen behind), and only when the panel says its
     card showed that command (signatures): no root step runs that the card did
     not show. Run all also runs the password scan first. The daily and weekly
-    checks and a row's Scan now never ask for a password. hold_scan (Run all,
-    when its card showed the Omarchy update) leaves the virus scan out, with
-    the root steps decided as if it were in; finish_scan is that virus scan
-    alone, run after the update."""
-    if finish_scan:
-        return ["signatures", "virus-scan"] if feed_available("virus-scan") else []
+    checks and a row's Scan now never ask for a password."""
     background = not (full or scan_only or daily_only or weekly_only)
     pressed = not background
     run_weekly = full or weekly_only or (background and feed_due("full-scan"))
@@ -4066,8 +4080,6 @@ def run_plan(full=False, scan_only=False, daily_only=False, weekly_only=False, s
     first = []
     if signatures and full and any(n in steps for n in CLAM_SCANS) and signatures_due():
         first.append("signatures-update")
-    if hold_scan and steps[-2:] == ["signatures", "virus-scan"]:
-        steps = steps[:-2]
     if full and can_ask_password():
         first.append("password-check")
         if feed_available("rkhunter"):
@@ -4090,20 +4102,18 @@ def verify_signatures():
 
 
 def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False, weekly_only=False,
-                      signatures=False, hold_scan=False, finish_scan=False):
+                      signatures=False):
     """Run what is due (the background run), or what a button asks for:
     daily_only (Daily check), weekly_only (Weekly check), full or force
     (Run all), scan_only (the virus scan of your home folder alone, its row's
     Scan now). signatures: the card you confirmed showed the signatures update.
     Emits progress lines when asked to."""
     full = full or force
-    scan_only = scan_only or finish_scan
     background = not (full or scan_only or daily_only or weekly_only)
     pressed = not background
     run_weekly = full or weekly_only or (background and feed_due("full-scan"))
     steps = run_plan(full=full, scan_only=scan_only, daily_only=daily_only, weekly_only=weekly_only,
-                     signatures=signatures, hold_scan=hold_scan, finish_scan=finish_scan)
-    held = hold_scan and full and feed_available("virus-scan")     # the virus scan comes after the Omarchy update
+                     signatures=signatures)
 
     # Each step's share of the progress bar: the virus scan takes most of the
     # time, so it gets most of the bar, and the quick steps a sliver each.
@@ -4185,19 +4195,15 @@ def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False
         for name in steps:
             if name in FEED_FILES and name not in done:
                 save_feed(name, {}, ok=False)
-    # The weekly bookkeeping belongs to whoever ran the virus scan: a held Run all leaves it to finish_scan.
-    book = (run_weekly and not held) or finish_scan
-    if book and "virus-scan" in done and feed_available("downloads-scan"):
+    if run_weekly and "virus-scan" in done and feed_available("downloads-scan"):
         save_feed("downloads-scan", {"found": [], "files": 0, "byFullScan": True,
                                      "used": (feed_cache("virus-scan") or {}).get("used")})
-    if book:
+    if run_weekly:
         save_feed("full-scan", {}, ok=not stopped and not [n for n in failed if n in ("virus-scan", "firmware")],
                   retry_days=FEED_DAYS if timed_out else None)
-    if held:
-        update_clear()                      # so the update terminal's markers start from nothing
     no_pkexec = " The password scan could not run: pkexec is missing." if full and not can_ask_password() else ""
     if stopped and not done:
-        return {"ok": True, "stopped": True, "held": False, "action": "", "message": "Stopped."}
+        return {"ok": True, "stopped": True, "action": "", "message": "Stopped."}
     if not done and not failed:
         if run_weekly:
             return {"ok": True, "action": "", "message": "Nothing to run yet: none of the tools these scans "
@@ -4236,15 +4242,11 @@ def refresh_due_feeds(force=False, full=False, scan_only=False, daily_only=False
         msg += " " + note
     msg += no_pkexec
     found = feed_findings()
-    if held and not stopped:
-        msg += " The virus scan follows the Omarchy update."
-    else:
-        msg += (" On this machine: %s. See the tabs for details." % "; ".join(found)) if found \
-            else " Nothing on this machine needs attention."
+    msg += (" On this machine: %s. See the tabs for details." % "; ".join(found)) if found \
+        else " Nothing on this machine needs attention."
     if stopped:
         msg = "Stopped." + (" Done before that: %s." % _and(parts) if parts else "")
-    return {"ok": not failed or stopped, "stopped": stopped, "held": bool(held and not stopped), "action": "",
-            "message": clean(msg.strip(), MESSAGE_MAX)}
+    return {"ok": not failed or stopped, "stopped": stopped, "action": "", "message": clean(msg.strip(), MESSAGE_MAX)}
 
 
 CLAMUI_APP_ID = "io.github.linx_systems.ClamUI"
@@ -7257,63 +7259,6 @@ def take_run_lock():
     return False
 
 
-# Run all with the Omarchy update: the update runs in a terminal, between the checks and the virus scan, and
-# the terminal script leaves empty marker files in the state folder, which the panel reads with `vigil
-# update-status` to know when to go on. The helper only ever reads them (and removes them when a Run all that
-# holds its virus scan back finishes); a marker is a name, never content, so nothing from it can reach
-# anything. A file that is not a plain file, or a name that is not in the list, counts as absent.
-UPDATE_MARKS = ("update-waiting", "update-running", "update-ok", "update-failed", "update-reboot", "update-shell")
-UPDATE_STALE_SECONDS = 3 * 3600
-
-
-def update_clear():
-    try:
-        dirfd = _open_home_dir(list(STATE_DIR))
-    except (OSError, Refused):
-        return
-    try:
-        for name in UPDATE_MARKS:
-            try:
-                os.unlink(name, dir_fd=dirfd)
-            except OSError:
-                pass
-    finally:
-        os.close(dirfd)
-
-
-def update_status():
-    """{update, reboot, shell}: update is none, waiting (for Enter in the terminal), running, ok or failed. A
-    waiting or running marker older than three hours means the terminal was closed: failed. reboot says the
-    update recommended a restart (and was held back); shell that it wanted the shell restarted (held back too)."""
-    out = {"update": "none", "reboot": False, "shell": False}
-    try:
-        dirfd = _open_home_dir(list(STATE_DIR))
-    except (OSError, Refused):
-        return out
-    try:
-        have = {}
-        for name in UPDATE_MARKS:
-            try:
-                st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
-            except OSError:
-                continue
-            if stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid():
-                have[name] = st.st_mtime
-    finally:
-        os.close(dirfd)
-    now = time.time()
-    if "update-ok" in have:
-        out.update(update="ok", reboot="update-reboot" in have, shell="update-shell" in have)
-    elif "update-failed" in have:
-        out["update"] = "failed"
-    else:
-        for name, state in (("update-running", "running"), ("update-waiting", "waiting")):
-            if name in have:
-                out["update"] = state if now - have[name] < UPDATE_STALE_SECONDS else "failed"
-                break
-    return out
-
-
 def run_in_progress():
     """What a run started elsewhere is doing, or None if none runs."""
     try:
@@ -7418,10 +7363,9 @@ def main(argv):
         return 0
     # --signatures: the confirmed Run all card showed the virus signatures
     # update, so Run all may run it (only when they are over two days old).
-    if 2 <= len(argv) <= 5 and argv[1] == "refresh-feeds" and argv[2:] in (
+    if 2 <= len(argv) <= 4 and argv[1] == "refresh-feeds" and argv[2:] in (
             [], ["--force"], ["--full"], ["--scan"], ["--daily"], ["--weekly"],
-            ["--full", "--signatures"], ["--full", "--hold-scan"], ["--full", "--hold-scan", "--signatures"],
-            ["--finish-scan"]):
+            ["--full", "--signatures"]):
         PROGRESS["on"] = True
         flag = argv[2] if len(argv) >= 3 else ""
         if not take_run_lock():
@@ -7436,14 +7380,10 @@ def main(argv):
         save_run_info()
         emit(refresh_due_feeds(force=flag == "--force", full=flag == "--full",
                                scan_only=flag == "--scan", daily_only=flag == "--daily",
-                               weekly_only=flag == "--weekly", signatures="--signatures" in argv[3:],
-                               hold_scan="--hold-scan" in argv[3:], finish_scan=flag == "--finish-scan"))
+                               weekly_only=flag == "--weekly", signatures=argv[3:] == ["--signatures"]))
         return 0
     if len(argv) == 2 and argv[1] == "stop":
         emit(stop_run())
-        return 0
-    if len(argv) == 2 and argv[1] == "update-status":
-        emit(update_status())
         return 0
     if len(argv) == 2 and argv[1] == "running":
         # Cheap: lets a panel follow a scan it did not start, without a full check.
@@ -7452,7 +7392,7 @@ def main(argv):
     if len(argv) == 2 and argv[1] == "version":
         emit({"version": VERSION})
         return 0
-    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection>... | vigil keep|unkeep <item>... | vigil trash <leftover>... | vigil refresh-feeds [--force|--daily|--weekly|--full|--scan|--finish-scan] [--hold-scan] [--signatures] | vigil update-status | vigil running | vigil stop | vigil version\n")
+    sys.stderr.write("usage: vigil audit [--peek] | vigil fix <action> | vigil dismiss|undismiss <check> | vigil ignore|unignore <detection>... | vigil keep|unkeep <item>... | vigil trash <leftover>... | vigil refresh-feeds [--force|--daily|--weekly|--full|--scan] [--signatures] | vigil running | vigil stop | vigil version\n")
     return 2
 
 
