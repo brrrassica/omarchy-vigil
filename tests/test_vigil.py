@@ -815,6 +815,18 @@ def torch_zip(path, data_pkl):
         z.writestr("archive/data/0", b"\0" * 64)
 
 
+def zip_with_records(path, count):
+    """An archive built only of central-directory records, so its table of contents can be made as
+    large as a test needs without much on disk behind it."""
+    import zipfile
+    name = b"x" * 90 + b".pkl"
+    record = struct.pack(zipfile.structCentralDir, b"PK\x01\x02", 20, 3, 20, 0, 0, 0, 0, 0x21,
+                         0, 0, 0, len(name), 0, 0, 0, 0, 0, 0) + name
+    Path(path).write_bytes(record * count + struct.pack(zipfile.structEndArchive, b"PK\x05\x06", 0, 0,
+                                                       count & 0xFFFF, count & 0xFFFF,
+                                                       count * len(record), 0, 0))
+
+
 def test_pickle_scan_finds_imports_without_running_anything(v, tmp_path):
     import pickle
     marker = tmp_path / "pwned"
@@ -896,6 +908,51 @@ def test_model_scan_clean_and_odd_classes(v):
     assert v.refresh_due_feeds(weekly_only=True)["ok"]
     c = v.check_model_files()
     assert c["status"] == "pass" and "1 checked" in c["summary"]
+
+
+def test_model_scan_reads_an_archive_directory_under_a_cap(v, tmp_path, monkeypatch):
+    """ZipFile reads a whole table of contents in one read, sized by the archive, and builds a record
+    per member -- before any limit of ours or the per-file timer exists. So the directory is read
+    under a cap of its own and a file past it is refused, not read and then judged."""
+    # 20000 records is a 2.7 MiB directory: past the 1 MiB cap, and nowhere near the 400k records
+    # measured at 260 MiB of resident memory while this read was unbounded.
+    p = tmp_path / "bomb.pt"
+    zip_with_records(p, 20000)
+    with pytest.raises(ValueError, match="table of contents"):
+        v.scan_model_file(str(p))
+    # And the same cap governs the directory read itself, not the members found after it: a small
+    # archive is refused once the cap is lowered under its directory.
+    import pickle
+    small = tmp_path / "small.pt"
+    torch_zip(small, pickle.dumps({"a": 1}, protocol=2))
+    assert v.scan_model_file(str(small)) == ([], [])
+    monkeypatch.setattr(v, "MODEL_ZIP_DIR_BYTES", 64)
+    with pytest.raises(ValueError, match="table of contents"):
+        v.scan_model_file(str(small))
+
+
+def test_model_scan_is_not_skipped_by_a_zip64_trailer(v, tmp_path, monkeypatch):
+    """A ZIP64 trailer moves the directory numbers into a second record. Asking for one is a one-line
+    change to how an archive is written, so it must not become a way to be passed over."""
+    import pickle
+    import zipfile
+    monkeypatch.setattr(zipfile, "ZIP64_LIMIT", 0)
+    monkeypatch.setattr(zipfile, "ZIP_FILECOUNT_LIMIT", 0)
+    p = tmp_path / "z64.pt"
+    with zipfile.ZipFile(p, "w", allowZip64=True) as z:
+        z.writestr("archive/data.pkl", pickle.dumps(evil(), protocol=2))
+    assert b"PK\x06\x07" in p.read_bytes()                           # the locator really is there
+    assert v.scan_model_file(str(p))[0]                              # and it was read, not skipped
+
+
+def test_model_scan_says_when_it_could_not_read_a_file(v, tmp_path):
+    """A refused archive is counted and shown, so a refusal cannot read as a pass over the folder."""
+    h = Path(v.HOME)
+    (h / "models").mkdir()
+    zip_with_records(h / "models/refused.pt", 20000)                 # past MODEL_ZIP_DIR_BYTES
+    assert v.refresh_due_feeds(weekly_only=True)["ok"]
+    c = v.check_model_files()
+    assert c["status"] == "pass" and "1 file could not be read" in c["summary"]
 
 
 def test_weekly_check_runs_the_new_scans_in_order_before_the_virus_scan(v, monkeypatch):

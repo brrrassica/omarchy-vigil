@@ -3431,6 +3431,7 @@ MODEL_WALK_ENTRIES = 300000
 MODEL_MAX_FILES = 3000
 MODEL_MAX_DEPTH = 8
 MODEL_PICKLE_BYTES = 64 * 1024 * 1024
+MODEL_ZIP_DIR_BYTES = 1024 * 1024             # table of contents a model archive may declare
 MODEL_FILE_SECONDS = 5.0
 MODEL_KEEP = 100
 # Imports that can run a program, open a connection or load more code.
@@ -3474,6 +3475,49 @@ class _CappedReader(object):
         line = self.fh.readline(min(self.left, 65536))
         self.left -= len(line)
         return line
+
+
+class _CappedFile(object):
+    """File-like for zipfile: never hands back more than `limit` bytes in one read.
+
+    _CappedReader bounds what pickletools may pull out of a stream; this bounds what zipfile may pull
+    out of a file. Opening an archive is itself an allocation: ZipFile reads the whole central
+    directory into memory in one read, sized by a number the archive itself declares, and builds a
+    ZipInfo and a NameToInfo entry for every record in it -- all before the member count or the byte
+    cap of a single member could apply, and outside the per-file timer. Measured, a file of 400k
+    directory records cost 260 MiB of resident memory for the 53 MiB it occupied on disk, so one
+    archive found by the walk could take the machine down.
+
+    The cap is therefore strict while the directory is read and raised once the archive is open, so
+    member data is bounded by the pickle cap alone. Exceeding it raises, like _CappedReader, rather
+    than truncating: the caller counts the file unreadable and says so, where a quiet None would
+    read as "nothing wrong in here".
+    """
+
+    def __init__(self, fh, limit):
+        self.fh, self.limit = fh, limit
+
+    def allow(self, limit):
+        self.limit = limit
+
+    def read(self, n=-1):
+        if n is None or n < 0:
+            raise ValueError("archive read without a size")
+        if n > self.limit:
+            raise ValueError("archive declares more table of contents than the scan allows")
+        return self.fh.read(n)
+
+    def seek(self, *args):
+        return self.fh.seek(*args)
+
+    def tell(self):
+        return self.fh.tell()
+
+    def close(self):
+        pass                                    # the descriptor belongs to the caller, which closes it
+
+    def __getattr__(self, name):
+        return getattr(self.fh, name)
 
 
 def pickle_imports(stream):
@@ -3541,7 +3585,13 @@ def scan_model_file(path):
             imports = []
             if head[:2] == b"PK":
                 try:
-                    zf = zipfile.ZipFile(fh)
+                    # The constructor reads the whole table of contents and makes a record per
+                    # member, so it is read under the directory cap -- raising if the archive
+                    # declares more than a model archive's worth -- and the cap is raised once
+                    # the archive is open, leaving member data to _CappedReader below.
+                    archive = _CappedFile(fh, MODEL_ZIP_DIR_BYTES)
+                    zf = zipfile.ZipFile(archive)
+                    archive.allow(MODEL_PICKLE_BYTES)
                     members = [i for i in zf.infolist()[:200] if i.filename.endswith(".pkl") and not i.is_dir()][:8]
                     if not members:
                         return None
@@ -3641,18 +3691,22 @@ def check_model_files():
         if isinstance(cache.get("dangerous"), list) else []
     odd = _int(cache.get("unfamiliar"))
     when = feed_when(cache)
+    # A file the scan would not open is said out loud rather than dropped: an archive refused for
+    # declaring an absurd table of contents reads, otherwise, as a pass.
+    unread = _int(cache.get("unreadable"))
+    unread = " %d file%s could not be read." % (unread, "" if unread == 1 else "s") if unread else ""
     part = " The search stopped early." if cache.get("partial") is True else ""
     if not bad:
         note = " %d use classes Vigil does not know, which is normal for custom models." % odd if odd else ""
-        return result(cid, cat, title, "pass", "No pickle model file imports anything dangerous (%d checked, %s).%s%s" % (
-            scanned, when, note, part), why, weight=2)
+        return result(cid, cat, title, "pass", "No pickle model file imports anything dangerous (%d checked, %s).%s%s%s" % (
+            scanned, when, note, unread, part), why, weight=2)
     lines = []
     for i in bad:
         names = [clean(x, 80) for x in i.get("imports", []) if isinstance(x, str)][:5]
         more = _int(i.get("more"))
         lines.append("%s: %s%s" % (clean(i.get("path"), 200), ", ".join(names), " and %d more" % more if more else ""))
-    return result(cid, cat, title, "warn", "%d model file%s can run programs when loaded (%s)." % (
-        len(bad), "" if len(bad) == 1 else "s", when), why, clean_block(lines), weight=2,
+    return result(cid, cat, title, "warn", "%d model file%s can run programs when loaded (%s).%s" % (
+        len(bad), "" if len(bad) == 1 else "s", when, unread), why, clean_block(lines), weight=2,
         fix=fix("docs", "safetensors", "Learn more"),
         howto="Do not load these files. Delete them, or download the model again as a .safetensors file from the "
               "author. A model you made yourself may import classes on purpose; read the list under Details first.")
