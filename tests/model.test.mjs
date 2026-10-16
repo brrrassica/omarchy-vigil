@@ -245,6 +245,93 @@ test("avahi undo restores the backup", () => {
   rmSync(r.dir, { recursive: true })
 })
 
+const HOSTS_BEFORE = "127.0.0.1 localhost\n::1 localhost\n10.0.0.5 nas.lan\n"
+
+test("hosts-block adds one marked block, keeps every other line, and runs twice without duplicating", () => {
+  let hosts
+  let r = runUndo("hosts-block", (d) => { hosts = place(d, "/etc/hosts", HOSTS_BEFORE) })
+  assert.equal(r.status, 0, r.out)
+  let text = readFileSync(hosts, "utf8")
+  assert.ok(text.startsWith(HOSTS_BEFORE))
+  assert.equal(text.split("\n").filter((l) => l === "# BEGIN omarchy-vigil telemetry").length, 1)
+  for (const h of M.TELEMETRY_HOSTS) {
+    assert.ok(text.includes("\n0.0.0.0 " + h + "\n"), h)
+    assert.ok(text.includes("\n:: " + h + "\n"), h)
+  }
+  assert.ok(text.endsWith("# END omarchy-vigil telemetry\n"))
+  // again: the old block is cut out first, so there is still one
+  const body = M.TERMINAL_ACTIONS["hosts-block"].run.split("/etc/").join(r.dir + "/etc/").split("sudo ").join("")
+  const again = spawnSync("/usr/bin/bash", ["-c", "( set -e; " + body + " )"], { encoding: "utf8" })
+  assert.equal(again.status, 0, again.stderr)
+  assert.equal(readFileSync(hosts, "utf8"), text)
+  // and undo takes exactly the block out
+  const undo = M.TERMINAL_ACTIONS["undo-hosts"].run.split("/etc/").join(r.dir + "/etc/").split("sudo ").join("")
+  const un = spawnSync("/usr/bin/bash", ["-c", "( set -e; " + undo + " )"], { encoding: "utf8" })
+  assert.equal(un.status, 0, un.stderr)
+  assert.equal(readFileSync(hosts, "utf8"), HOSTS_BEFORE)
+  rmSync(r.dir, { recursive: true })
+})
+
+test("hosts-block refuses a damaged block, a link and a missing file, changing nothing", () => {
+  const lone = HOSTS_BEFORE + "# BEGIN omarchy-vigil telemetry\n0.0.0.0 mine.example\n10.9.9.9 keep.me\n"
+  const swapped = HOSTS_BEFORE + "# END omarchy-vigil telemetry\n# BEGIN omarchy-vigil telemetry\n"
+  const twice = "# BEGIN omarchy-vigil telemetry\n# BEGIN omarchy-vigil telemetry\n# END omarchy-vigil telemetry\n"
+  for (const bad of [lone, swapped, twice]) {
+    for (const id of ["hosts-block", "undo-hosts"]) {
+      let hosts
+      const r = runUndo(id, (d) => { hosts = place(d, "/etc/hosts", bad) })
+      assert.equal(r.status, 1, id + " " + r.out)
+      assert.match(r.out, /damaged/)
+      assert.equal(readFileSync(hosts, "utf8"), bad)
+      rmSync(r.dir, { recursive: true })
+    }
+  }
+  let victim
+  let r = runUndo("hosts-block", (d) => {
+    victim = place(d, "/etc/real-hosts", HOSTS_BEFORE); symlinkSync(victim, d + "/etc/hosts")
+  })
+  assert.equal(r.status, 1); assert.match(r.out, /not a plain file/)
+  assert.equal(readFileSync(victim, "utf8"), HOSTS_BEFORE)
+  rmSync(r.dir, { recursive: true })
+  r = runUndo("hosts-block", (d) => { mkdirSync(d + "/etc") })
+  assert.equal(r.status, 1)
+  rmSync(r.dir, { recursive: true })
+})
+
+test("undo-hosts on a file without the block says so and changes nothing", () => {
+  let hosts
+  const r = runUndo("undo-hosts", (d) => { hosts = place(d, "/etc/hosts", HOSTS_BEFORE) })
+  assert.equal(r.status, 0); assert.match(r.out, /Nothing to undo/)
+  assert.equal(readFileSync(hosts, "utf8"), HOSTS_BEFORE)
+  rmSync(r.dir, { recursive: true })
+})
+
+test("the Chromium policy is written once, never over a file that is not Vigil's, and undone only while unchanged", () => {
+  const rel = "/etc/chromium/policies/managed/90-omarchy-vigil.json"
+  let f
+  let r = runUndo("chromium-privacy", () => {})
+  assert.equal(r.status, 0, r.out)
+  f = r.dir + rel
+  assert.equal(readFileSync(f, "utf8"), M.CHROMIUM_POLICY_TEXT)
+  assert.equal(statSync(f).mode & 0o777, 0o644)
+  assert.deepEqual(JSON.parse(M.CHROMIUM_POLICY_TEXT).EnableMediaRouter, false)
+  assert.equal("BlockThirdPartyCookies" in JSON.parse(M.CHROMIUM_POLICY_TEXT), false)
+  const body = (id) => M.TERMINAL_ACTIONS[id].run.split("/etc/").join(r.dir + "/etc/").split("sudo ").join("")
+  const go = (id) => spawnSync("/usr/bin/bash", ["-c", "( set -e; " + body(id) + " )"], { encoding: "utf8" })
+  assert.equal(go("chromium-privacy").status, 0)                       // idempotent
+  writeFileSync(f, "{\"mine\": true}\n")
+  let again = go("chromium-privacy")
+  assert.equal(again.status, 1); assert.match(again.stdout, /did not write/)
+  again = go("undo-chromium")
+  assert.equal(again.status, 1); assert.match(again.stdout, /left alone/)
+  assert.equal(readFileSync(f, "utf8"), "{\"mine\": true}\n")
+  writeFileSync(f, M.CHROMIUM_POLICY_TEXT)
+  assert.equal(go("undo-chromium").status, 0)
+  assert.equal(existsSync(f), false)
+  assert.match(go("undo-chromium").stdout, /Nothing to undo/)
+  rmSync(r.dir, { recursive: true })
+})
+
 test("undo, review and history fields are validated", () => {
   const undo = (u) => parse(report({ checks: [check({ undo: u })] }))
   assert.equal(undo({ action: "undo-sysctl", label: "Undo" }).checks[0].undo.action, "undo-sysctl")
@@ -405,7 +492,7 @@ test("learn-more pages come only from the fixed table", () => {
   assert.equal(M.docsUrl("arch-dm-crypt"), "https://wiki.archlinux.org/title/Dm-crypt")
   for (const bad of ["lynis-auth-9262", "lynis-../x", "https://evil.example", "", null, "toString", "__proto__"])
     assert.equal(M.docsUrl(bad), "", String(bad))
-  for (const url of Object.values(M.DOCS)) assert.match(url, /^https:\/\/(wiki\.archlinux\.org|github\.com|attack\.mitre\.org)\//)
+  for (const url of Object.values(M.DOCS)) assert.match(url, /^https:\/\/(wiki\.archlinux\.org|github\.com|attack\.mitre\.org|huggingface\.co|rkhunter\.sourceforge\.net)\//)
   assert.deepEqual(M.docsCommand("arch-users", TOOLS), ["/usr/bin/xdg-open", "https://wiki.archlinux.org/title/Users_and_groups"])
   assert.deepEqual(M.docsCommand("arch-users", {}), [])
   const r = parse(report({ checks: [check({ status: "info", fix: { kind: "docs", action: "nope", label: "Learn more" } })] }))
@@ -482,6 +569,76 @@ test("old signatures: only the Run all card asks for the password, and shows the
   // The notification: constant words, pointing to Run all.
   assert.match(M.SIGNATURES_NOTICE, /over two days\. Open Vigil and press Run all/)
   assert.doesNotMatch(M.SIGNATURES_NOTICE, /[<>&]/)
+})
+
+test("the Omarchy Update button is Omarchy's own updater in a terminal, not part of any run, and has a last run", () => {
+  const r = parse(report({ sources: [{ id: "omarchy-update", label: "Omarchy update", run: "update", date: "2026-10-12", time: "09:41",
+                                         state: "ok", tried: "" }] }))
+  assert.equal(r.sources[0].run, "update")
+  assert.equal(M.runMode("update"), "terminal")
+  assert.ok(M.canRun({ kind: "terminal", action: "update", label: "" }, TOOLS, {}))
+  const noLauncher = Object.assign({}, TOOLS); delete noLauncher["omarchy-launch-floating-terminal-with-presentation"]
+  assert.equal(M.canRun({ kind: "terminal", action: "update", label: "" }, noLauncher, {}), false)
+  const script = M.terminalScript("update", TOOLS)
+  assert.match(script, /\( set -e; \/usr\/bin\/omarchy-update \)$/)
+  assert.ok(!/gum|PATH=|omarchy-restart-shell|update-/.test(script), "no shims, no markers: it just runs the updater")
+  assert.equal(spawnSync("/usr/bin/bash", ["-n", "-c", script]).status, 0)
+  const card = M.confirmation("terminal", "update", r, "/home/a")
+  assert.match(card.lines.join(" "), /AUR packages, your mise tools/)
+  assert.match(card.commands[0].text, /omarchy-update/)
+  for (const k of ["full-scan", "daily-check", "weekly-check"])
+    assert.ok(!JSON.stringify(M.confirmation(k, "all", r, "/home/a")).includes("omarchy-update"), k)
+  const now = new Date(2026, 9, 14, 12, 0)
+  assert.equal(M.updateCaption(r, now), "Last update: Oct 12 at 09:41")
+  assert.equal(M.updateCaption(parse(report({ sources: [{ id: "omarchy-update", label: "Omarchy update", run: "update", date: "2026-10-14",
+                                                           time: "08:00", state: "ok", tried: "" }] })), now), "Last update: today at 08:00")
+  assert.equal(M.updateCaption(parse(report({ sources: [{ id: "omarchy-update", label: "Omarchy update", run: "update", date: "", time: "",
+                                                           state: "never", tried: "" }] })), now), "No full update found in the package log")
+  assert.equal(M.updateCaption(parse(report()), now), "No full update found in the package log")
+  const rows = M.lastRunRows(r, now)
+  assert.deepEqual(rows.slice(-2).map((x) => x.label), ["Omarchy Update button", "Omarchy update"])
+})
+
+test("the rootkit step parses with bash -n and has no network", () => {
+  assert.equal(spawnSync("/usr/bin/bash", ["-n", "-c", M.RKHUNTER_SCRIPT]).status, 0)
+  assert.match(M.RKHUNTER_SCRIPT, /--check --sk --nocolors --nolog --rwo/)
+  assert.ok(!/--update|--versioncheck|curl|wget/.test(M.RKHUNTER_SCRIPT), "no network from the rootkit scan")
+  assert.ok(!/\bsudo\b/.test(M.RKHUNTER_SCRIPT))
+})
+
+test("big cache folders are a pick list: ticked one by one or ignored, cleared whole on a card of their own", () => {
+  const item = (id, text, kept = false) => ({ id, kind: "cache", text, kept, ignored: false })
+  const items = [item("0123456789abcdef", "~/.cache/huge \u00b7 3.0 GB"), item("fedcba9876543210", "~/.cache/models \u00b7 1.2 GB"),
+                 item("00000000000000aa", "~/.cache/old \u00b7 1.1 GB", true)]
+  const cacheCheck = check({ id: "user-cache", category: "care", status: "info", weight: 0, items,
+                             fix: { kind: "helper", action: "clean-app-cache", label: "Clear unused" } })
+  const r = parse(report({ checks: [cacheCheck] }))
+  assert.equal(r.checks[0].items.length, 3)
+  const spec = M.pickSpec(r.checks[0])
+  assert.deepEqual(spec, { remove: "Clear", all: false, card: "clear-caches", keep: true, keepLabel: "Ignore" })
+  assert.ok(M.itemPickable(r.checks[0].items[0]) && M.itemRemovable(r.checks[0].items[0]))
+  assert.equal(M.itemPickable(r.checks[0].items[2]), false, "an ignored folder cannot be ticked")
+  assert.deepEqual(M.pickableIds(r, "cache"), ["0123456789abcdef", "fedcba9876543210"])
+  const card = M.confirmation("clear-caches", "0123456789abcdef,fedcba9876543210", r, "/home/a")
+  assert.equal(card.title, "Clear 2 cache folders?")
+  assert.equal(card.lines[0], "~/.cache/huge \u00b7 3.0 GB"); assert.equal(card.lines[1], "~/.cache/models \u00b7 1.2 GB")
+  assert.ok(card.lines.some((l) => /deleted for good, in use or not; the folder itself stays/.test(l)))
+  assert.ok(card.lines.some((l) => /Unlike Clean all, which clears only files nothing has used for a week/.test(l)))
+  assert.ok(card.lines.some((l) => /still listed, 1 GB or more, and not ignored/.test(l)))
+  assert.equal(M.confirmation("clear-caches", "0123456789abcdef", r, "/home/a").title, "Clear this cache folder?")
+  for (const bad of ["", "0123456789abcdef,0123456789abcdef", "0123456789abcdef,00000000000000aa", "0123456789abcdef,0000000000000bbb", "../../x"])
+    assert.equal(M.confirmation("clear-caches", bad, r, "/home/a"), null, bad)
+  assert.equal(M.itemIdList(r, "0123456789abcdef", "leftover"), null)
+  // Clean all is what it was: the unused-for-a-week sweep, and its card does not mention these folders
+  assert.equal(M.cleanAllPlan(r).user, true)
+  const all = M.confirmation("clean-all", "care", r, "/home/a")
+  assert.ok(!all.lines.some((l) => /GB|cache folder/i.test(l)))
+  // items must be well formed and of one kind
+  assert.equal(parse(report({ checks: [check({ id: "user-cache", category: "care", items: [item("", "x")] })] })), null)
+  assert.equal(parse(report({ checks: [check({ id: "user-cache", category: "care", items: [item("0123456789abcdef", "x"),
+    { id: "fedcba9876543210", kind: "leftover", text: "z", kept: false, ignored: false }] })] })), null)
+  // the other lists still say Keep
+  assert.equal(M.PICK_SPECS.leftover.keepLabel, undefined)
 })
 
 test("every terminal says what it does, plainly, then the technical part", () => {
@@ -585,7 +742,7 @@ test("missing helpers: a red Install button that names them, and one plan for al
   assert.equal(card.lines[0], "Missing now: ClamAV, ClamUI.")
   const plan = M.actionPlan("install-helpers", TOOLS, "/home/marc")
   assert.equal(plan.length, 1)
-  assert.match(plan[0].argv[5], /pacman -S --needed --noconfirm clamav \$c arch-audit osv-scanner fwupd\n/)
+  assert.match(plan[0].argv[5], /pacman -S --needed --noconfirm clamav \$c arch-audit osv-scanner fwupd gitleaks rkhunter\n/)
   assert.match(plan[0].argv[5], /c=clamui; \[ -d "\$HOME\/\.local\/share\/flatpak\/app\/io\.github\.linx_systems\.ClamUI" \] && c=/)
   assert.ok(!plan[0].argv[5].includes("flathub"))
   assert.equal(M.missingLabel(parse(report({ missing: ["bumblebee"] }))), "MISSING Bumblebee. INSTALL")
@@ -670,7 +827,7 @@ test("an action in the panel shows how far it got; the words come from Vigil, no
   // Every stage is announced, in order, and a failed pacman stops the script.
   const all = steps.map(s => s.argv[s.argv.length - 1]).join("\n")
   assert.deepEqual([...all.matchAll(/^echo VIGIL-STEP ([0-9])$/gm)].map(m => Number(m[1])), [0, 1, 2, 3])
-  assert.match(all, /^\/usr\/bin\/pacman -S --needed --noconfirm clamav \$c arch-audit osv-scanner fwupd$/m)
+  assert.match(all, /^\/usr\/bin\/pacman -S --needed --noconfirm clamav \$c arch-audit osv-scanner fwupd gitleaks rkhunter$/m)
 })
 
 test("a scan started elsewhere is followed, and anything odd is refused", () => {

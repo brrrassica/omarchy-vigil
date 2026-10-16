@@ -10,7 +10,7 @@
 // Must match manifest.json and VERSION in bin/vigil (a test checks). The
 // helper runs from disk every time, but this file stays loaded until the
 // shell restarts, so after an update the two can differ for a while.
-var VERSION = "0.30.0"
+var VERSION = "0.31.0"
 var MAX_REPORT_CHARS = 512 * 1024
 var MAX_CHECKS = 160
 var MAX_STR = 400
@@ -58,8 +58,8 @@ function inList(v, list) {
 // No value from the report, a file or the network is ever put into a script:
 // the report only names an action id, and an unknown id does nothing.
 
-var HELPER_ACTIONS = ["ssh-perms", "gnupg-perms", "optout-on", "optout-off", "clean-thumbnails", "empty-trash",
-                      "credential-perms", "integrity-accept", "arch-audit-refresh", "osv-refresh", "aur-refresh",
+var HELPER_ACTIONS = ["ssh-perms", "gnupg-perms", "optout-on", "optout-off", "agents-on", "agents-off", "clean-thumbnails", "empty-trash",
+                      "credential-perms", "weather-round", "integrity-accept", "arch-audit-refresh", "osv-refresh", "aur-refresh",
                       "virus-scan-now", "clean-user", "clean-app-cache", "remove-secret-lines"]
 
 // What the confirmation card says before a helper action runs.
@@ -68,8 +68,18 @@ var HELPER_INFO = {
                  what: ["Sets ~/.ssh to 700 and your private keys to 600, so only you can read them."] },
   "gnupg-perms": { title: "Make ~/.gnupg private", what: ["Sets ~/.gnupg to 700."] },
   "optout-on": { title: "Set telemetry opt-out variables",
-                 what: ["Writes ~/.config/uwsm/env.d/90-omarchy-vigil-opt-out with DO_NOT_TRACK=1 and similar.",
+                 what: ["Writes ~/.config/uwsm/env.d/90-omarchy-vigil-opt-out with DO_NOT_TRACK=1 and similar,",
+                        "for developer tools such as .NET, Next.js, Deno, gh and mise.",
                         "Applies from your next login. Remove it here at any time."] },
+"agents-on": { title: "Switch off AI agent telemetry",
+               what: ["Writes ~/.config/uwsm/env.d/90-omarchy-vigil-agents: DISABLE_TELEMETRY and DISABLE_ERROR_REPORTING",
+                      "for Claude Code, PI_TELEMETRY=0 for pi and GEMINI_TELEMETRY_ENABLED=false for Gemini CLI.",
+                      "Applies from your next login. Remove it here at any time."] },
+"weather-round": { title: "Round the weather location",
+               what: ["Moves the place stored for the weather panel to the centre of a square 1.5 miles (2.4 km) across.",
+                      "The forecast stays the same. This cannot be undone: the precise figures are not kept anywhere."] },
+"agents-off": { title: "Remove the AI agent telemetry variables",
+                what: ["Deletes ~/.config/uwsm/env.d/90-omarchy-vigil-agents if Vigil wrote it and it is unchanged."] },
   "optout-off": { title: "Remove the opt-out variables",
                   what: ["Deletes ~/.config/uwsm/env.d/90-omarchy-vigil-opt-out if Vigil wrote it and it is unchanged."] },
   "clean-thumbnails": { title: "Clear the thumbnail cache",
@@ -144,7 +154,7 @@ function confirmation(kind, id, report, home) {
     : kind === "remove-orphans" || kind === "remove-foreign" || kind === "remove-plugins" ? removalCommands(kind, id, report)
     : []
   // A remove card with nothing it could run would promise what it cannot do.
-  if (CARD_KINDS[kind] && kind !== "trash" && kind !== "ignore" && card.commands.length === 0) return null
+  if (CARD_KINDS[kind] && kind !== "trash" && kind !== "ignore" && kind !== "clear-caches" && card.commands.length === 0) return null
   return card
 }
 
@@ -168,25 +178,36 @@ function actionCommands(id, tools, home) {
   return out
 }
 
-// The run cards' root steps, exactly as the helper starts them. Only Run all
-// has any: the virus signatures when ClamAV's own update service has let them
-// get over two days old (the helper says so in signaturesDue), and the
-// password scan. The daily and weekly checks run entirely as you.
+// The run cards' commands, exactly as they start. Run all is the only one with
+// any besides the checks themselves: the root steps through pkexec (the virus
+// signatures when ClamAV's own update service has let them get over two days
+// old, which the helper says in signaturesDue; the password scan; the rootkit
+// scan). The daily and weekly checks run entirely as you.
 function runCommands(kind, report) {
-  if (!report || kind !== "full-scan" || toolDir(report.tools, "pkexec") === "") return []
+  if (!report || kind !== "full-scan") return []
   var out = []
-  if (report.signaturesDue)
-    out.push({ who: "As root, through pkexec (Omarchy asks for your password), for the virus signatures:",
-               text: commandText([PKEXEC, BASH, "-c", SIGNATURES_SCRIPT]) })
-  if (kind === "full-scan")
+  if (toolDir(report.tools, "pkexec") !== "") {
+    if (report.signaturesDue)
+      out.push({ who: "As root, through pkexec (Omarchy asks for your password), for the virus signatures:",
+                 text: commandText([PKEXEC, BASH, "-c", SIGNATURES_SCRIPT]) })
     out.push({ who: "As root, through pkexec, for the password scan (only account names are kept):",
                text: commandText([PKEXEC, BASH, "-c", NO_PASSWORD_STEP]) })
+    if (hasSource(report, "rkhunter"))
+      out.push({ who: "As root, through pkexec, for the rootkit scan (rkhunter; only its warnings are kept):",
+                 text: commandText([PKEXEC, BASH, "-c", RKHUNTER_SCRIPT]) })
+  }
   return out
+}
+
+function hasSource(report, id) {
+  for (var i = 0; i < report.sources.length; i++) if (report.sources[i].id === id) return true
+  return false
 }
 
 function confirmationText(kind, id, report) {
   if (kind === "clean-all") return cleanAllConfirmation(report)
   if (kind === "ignore") return ignoreConfirmation(id, report)
+  if (kind === "clear-caches") return clearCachesConfirmation(id, report)
   if (kind === "trash") return trashConfirmation(id, report)
   if (kind === "remove-orphans" || kind === "remove-foreign") return removePackagesConfirmation(kind, id, report)
   if (kind === "remove-plugins") return removePluginsConfirmation(id, report)
@@ -220,13 +241,16 @@ var PICK_SPECS = {
   orphan: { remove: "Remove", all: true, card: "remove-orphans", keep: true },
   foreign: { remove: "Remove", all: false, card: "remove-foreign", keep: true },
   plugin: { remove: "Remove", all: false, card: "remove-plugins", keep: true },
-  detection: { remove: "False positive", all: false, card: "ignore", keep: false }
+  detection: { remove: "False positive", all: false, card: "ignore", keep: false },
+// Cache folders of 1 GB or more: ticked one by one, never "all". "Ignore" is Keep under another name: an ignored
+// folder stays listed, locked at the bottom, and is no longer counted on the row.
+cache: { remove: "Clear", all: false, card: "clear-caches", keep: true, keepLabel: "Ignore" }
 }
 var MARK_LEVELS = ["high", "medium", "low"]
 
 
 var CARD_KINDS = { "trash": "leftover", "remove-orphans": "orphan", "remove-foreign": "foreign",
-                   "remove-plugins": "plugin", "ignore": "detection" }
+                   "remove-plugins": "plugin", "ignore": "detection", "clear-caches": "cache" }
 
 // Names that may reach a command: Arch's package names, and the plugin ids
 // omarchy-plugin-remove takes (never Vigil's own). Must match REMOVABLE_PACKAGE
@@ -317,6 +341,18 @@ function trashConfirmation(ids, report) {
   var lines = itemLines(report, list, "leftover")
   lines.push("Everything else on the list stays where it is.")
   return { title: "Move " + list.length + " items to the trash?", lines: lines.concat(TRASH_LINES) }
+}
+
+// The card for Clear selected on the Application caches row: every folder it empties, then what that means.
+function clearCachesConfirmation(ids, report) {
+  var list = itemIdList(report, ids, "cache")
+  if (!list) return null
+  var lines = itemLines(report, list, "cache")
+  lines.push("Everything inside " + (list.length === 1 ? "this folder" : "each folder") + " is deleted for good, in use or not; the folder itself stays. Close the app first.")
+  lines.push("Apps rebuild a cache or download it again when they need it, which can take a while and use your connection.")
+  lines.push("Unlike Clean all, which clears only files nothing has used for a week, this empties the whole folder.")
+  lines.push("Technical: deletes the files and folders inside ~/.cache/<name>, relative to a held folder, never following a link, up to 100 seconds, two million entries and 128 folders deep per folder. Vigil checks again that each is still listed, 1 GB or more, and not ignored. Anything of a megabyte or more left behind is named in the answer.")
+  return { title: list.length === 1 ? "Clear this cache folder?" : "Clear " + list.length + " cache folders?", lines: lines }
 }
 
 function ignoreConfirmation(ids, report) {
@@ -570,6 +606,9 @@ var BUMBLEBEE_INSTALL = "set -o pipefail\nv=0.1.2\ncase \"$(/usr/bin/uname -m)\"
 // test checks).
 var SIGNATURES_SCRIPT = "if /usr/bin/systemctl is-active --quiet clamav-freshclam.service; then start=$(/usr/bin/date +%s); /usr/bin/systemctl kill --signal=SIGUSR1 --kill-whom=main clamav-freshclam.service || exit 4; for i in $(/usr/bin/seq 120); do if /usr/bin/journalctl -u clamav-freshclam.service --since \"@$start\" -o cat --no-pager 2>/dev/null | /usr/bin/grep -qE 'daily\\.c[lv]d (database is up-to-date|updated)'; then exit 0; fi; [ \"$(/usr/bin/stat -c %Y /var/lib/clamav/freshclam.dat 2>/dev/null || echo 0)\" -gt \"$start\" ] && exit 0; /usr/bin/sleep 1; done; exit 3; else /usr/bin/freshclam >/dev/null 2>&1; rc=$?; [ \"$rc\" -le 1 ] || exit 5; fi"
 var NO_PASSWORD_STEP = "/usr/bin/awk -F: '$2 == \"\" { print $1 }' /etc/shadow"
+// Must match RKHUNTER_SCRIPT in bin/vigil (a test checks). rkhunter makes no network call here: no --update.
+var RKHUNTER_SCRIPT = "export LC_ALL=C; [ -s /var/lib/rkhunter/db/rkhunter.dat ] || /usr/bin/rkhunter --propupd --nolog >/dev/null 2>&1; "
+  + "/usr/bin/rkhunter --check --sk --nocolors --nolog --rwo 2>&1; rc=$?; [ \"$rc\" -le 1 ] || exit \"$rc\""
 
 // The user-level scripts that keep notes in ~/.local/state/omarchy-vigil walk
 // there one folder at a time, as the helper does: a link, or anything that is
@@ -602,6 +641,57 @@ var CLAMUI_EDIT_SH = "edit() {\n"
   + "  if /usr/bin/jq \"$2\" \"$1\" > \"$t\" && /usr/bin/chmod --reference=\"$1\" \"$t\" && /usr/bin/mv -f -T -- \"$t\" \"$1\"; then return 0; fi\n"
   + "  /usr/bin/rm -f -- \"$t\"; return 1\n"
   + "}\n"
+
+// Must match TELEMETRY_HOSTS in bin/vigil (a test checks).
+var TELEMETRY_HOSTS = [
+  "http-intake.logs.us5.datadoghq.com", "o1158394.ingest.us.sentry.io", "o33249.ingest.us.sentry.io",
+  "telemetry.1passwordservices.com", "core-sentry.1passwordservices.com", "usage-ping.brave.com",
+  "star-randsrv.bsg.brave.com", "incoming.telemetry.mozilla.org", "google-analytics.com",
+  "www.google-analytics.com", "ssl.google-analytics.com", "region1.google-analytics.com",
+  "analytics.google.com", "region1.analytics.google.com"
+]
+var HOSTS_BEGIN = "# BEGIN omarchy-vigil telemetry"
+var HOSTS_END = "# END omarchy-vigil telemetry"
+
+// Shared start of the two /etc/hosts scripts: a plain file, and either no Vigil block or exactly one, begin before
+// end (a begin without its end would make the cut below swallow the rest of the file).
+var HOSTS_CHECK_SH = "f=/etc/hosts; b='" + HOSTS_BEGIN + "'; e='" + HOSTS_END + "'; "
+  + "[ -f \"$f\" ] && [ ! -L \"$f\" ] || { echo '/etc/hosts is not a plain file, so nothing was changed.'; exit 1; }; "
+  + "/usr/bin/awk -v b=\"$b\" -v e=\"$e\" '$0 == b { if (nb++ || ne) bad = 1 } $0 == e { if (!nb || ne++) bad = 1 } "
+  + "END { exit (bad || nb != ne) }' \"$f\" "
+  + "|| { echo 'The Vigil block in /etc/hosts is damaged, so nothing was changed.'; exit 1; }; "
+// /etc/hosts without Vigil's block, then (for the add) the block, written to a new file that takes the old one's
+// owner and mode and replaces it in one rename.
+var HOSTS_CUT_SH = "/usr/bin/awk -v b=\"$b\" -v e=\"$e\" '$0 == b { skip = 1; next } $0 == e { skip = 0; next } !skip' \"$f\""
+function hostsSwap(producer, done) {
+  return "t=$(sudo /usr/bin/mktemp /etc/.hosts.vigil.XXXXXXXX) || exit 1; "
+    + "{ " + producer + "; } | sudo /usr/bin/tee \"$t\" >/dev/null "
+    + "&& sudo /usr/bin/chown --reference=\"$f\" \"$t\" && sudo /usr/bin/chmod --reference=\"$f\" \"$t\" "
+    + "&& sudo /usr/bin/mv -f -T -- \"$t\" \"$f\" && echo '" + done + "' "
+    + "|| { sudo /usr/bin/rm -f -- \"$t\"; echo 'It did not apply, so /etc/hosts is as it was.'; exit 1; }"
+}
+function hostsBlockScript() {
+  var lines = []
+  for (var i = 0; i < TELEMETRY_HOSTS.length; i++) lines.push("'0.0.0.0 " + TELEMETRY_HOSTS[i] + "' ':: " + TELEMETRY_HOSTS[i] + "'")
+  return HOSTS_CHECK_SH + hostsSwap(HOSTS_CUT_SH + "; printf '%s\\n' \"$b\" " + lines.join(" ") + " \"$e\"",
+    "Telemetry addresses are blocked in /etc/hosts.")
+}
+var HOSTS_UNBLOCK_SCRIPT = HOSTS_CHECK_SH + "/usr/bin/grep -qxF -e \"$b\" \"$f\" || { echo 'Nothing to undo.'; exit 0; }; "
+  + hostsSwap(HOSTS_CUT_SH, "Removed. /etc/hosts is as it was apart from your own lines.")
+
+// Must match CHROMIUM_POLICY in bin/vigil (a test checks).
+var CHROMIUM_POLICY = {
+  SearchSuggestEnabled: false, NetworkPredictionOptions: 2, AlternateErrorPagesEnabled: false,
+  SpellCheckServiceEnabled: false, MetricsReportingEnabled: false, UrlKeyedAnonymizedDataCollectionEnabled: false,
+  WebRtcIPHandling: "default_public_interface_only", PrivacySandboxAdTopicsEnabled: false,
+  PrivacySandboxSiteEnabledAdsEnabled: false, PrivacySandboxAdMeasurementEnabled: false,
+  PasswordLeakDetectionEnabled: false, BackgroundModeEnabled: false, EnableMediaRouter: false
+}
+var CHROMIUM_POLICY_TEXT = JSON.stringify(CHROMIUM_POLICY, null, 2) + "\n"
+var CHROMIUM_POLICY_FILE = "/etc/chromium/policies/managed/90-omarchy-vigil.json"
+// True when the file is there and not byte for byte what Vigil writes.
+var CHROMIUM_FOREIGN_SH = "f=" + CHROMIUM_POLICY_FILE + "; "
+  + "same() { printf '%s' '" + CHROMIUM_POLICY_TEXT + "' | /usr/bin/cmp -s - \"$f\"; }; "
 
 var TERMINAL_ACTIONS = {
   "firewall-on": {
@@ -812,7 +902,8 @@ var TERMINAL_ACTIONS = {
   },
   "update": {
     title: "Update the system",
-    what: ["Installs every waiting update, including security fixes. Restart afterwards if Vigil asks you to.",
+    what: ["Installs every waiting update, including security fixes: system packages, your AUR packages, your mise tools",
+           "and the rest of what Omarchy updates. Restart afterwards if Omarchy or Vigil asks you to.",
            "Technical: runs omarchy-update"],
     tool: "omarchy-update", args: ""
   },
@@ -867,20 +958,21 @@ var TERMINAL_ACTIONS = {
     title: "Install the missing helpers",
     what: ["Installs the tools Vigil works with that are missing: ClamAV (virus scanner) with its service",
            "that keeps virus signatures up to date, arch-audit (known security holes), osv-scanner",
-           "(malicious packages), fwupd (firmware updates), ClamUI (virus scans and quarantine) and Bumblebee by Perplexity",
-           "(known-compromised packages). Ones you already have are left alone.",
+           "(malicious packages), fwupd (firmware updates), ClamUI (virus scans and quarantine), gitleaks (secrets in your git",
+           "repositories), rkhunter (rootkit scan, in Run all) and Bumblebee by Perplexity (known-compromised packages).",
+           "Ones you already have are left alone.",
            "Bumblebee " + BUMBLEBEE_VERSION + " comes from Perplexity on GitHub, installed only if it matches the checksum",
            "written into Vigil. The rest come from the Arch repositories,",
            "so the Omarchy update keeps them current.",
-           "Technical: pacman -S --needed clamav clamui arch-audit osv-scanner fwupd, enable clamav-freshclam, bumblebee to /usr/local/bin"],
+           "Technical: pacman -S --needed clamav clamui arch-audit osv-scanner fwupd gitleaks rkhunter, enable clamav-freshclam, bumblebee to /usr/local/bin"],
     // What the progress bar says at each "VIGIL-STEP n" line the script prints.
-    stages: ["Installing ClamAV, ClamUI, arch-audit, osv-scanner and fwupd from the Arch repositories",
+    stages: ["Installing ClamAV, ClamUI, arch-audit, osv-scanner, fwupd, gitleaks and rkhunter from the Arch repositories",
              "Turning on automatic virus signature updates",
              "Downloading Bumblebee from Perplexity and checking it"],
     // ClamUI from the Arch repositories, unless you already have it as a Flatpak.
     run: "echo VIGIL-STEP 1\n"
       + "c=clamui; [ -d \"$HOME/.local/share/flatpak/app/io.github.linx_systems.ClamUI\" ] && c=\n"
-      + "/usr/bin/pacman -S --needed --noconfirm clamav $c arch-audit osv-scanner fwupd\necho 'Packages installed.'\n"
+      + "/usr/bin/pacman -S --needed --noconfirm clamav $c arch-audit osv-scanner fwupd gitleaks rkhunter\necho 'Packages installed.'\n"
       + "echo VIGIL-STEP 2\n"
       + "/usr/bin/systemctl enable --now clamav-freshclam.service\n"
       + "echo VIGIL-STEP 3\n"
@@ -1084,6 +1176,38 @@ var TERMINAL_ACTIONS = {
   "undo-mac": undoDropIn("the hardware address", "/etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf",
     "Then reloads NetworkManager. Takes effect when you next connect.",
     "sudo /usr/bin/systemctl reload NetworkManager.service"),
+  "hosts-block": {
+    title: "Block the telemetry addresses",
+    what: ["Sends the addresses Claude Code, Codex, 1Password, Brave, Firefox-based browsers and Google Analytics report to",
+           "nowhere, for every program on this computer. Pages that use Google Analytics stop reporting your visits to it;",
+           "nothing else changes. Undo appears on this finding afterwards.",
+           "Technical: adds one marked block of 0.0.0.0 and :: lines to /etc/hosts, keeping every other line as it is"],
+    run: hostsBlockScript()
+  },
+  "undo-hosts": {
+    title: "Undo: take the telemetry block out of /etc/hosts",
+    what: ["Removes the block Vigil added; every other line of /etc/hosts stays.",
+           "Technical: rewrites /etc/hosts without the lines between the Vigil markers"],
+    run: HOSTS_UNBLOCK_SCRIPT
+  },
+  "chromium-privacy": {
+    title: "Set the Chromium privacy policy",
+    what: ["Switches off search suggestions as you type, page preloading, the Google error pages and spelling service,",
+           "usage reports, the Privacy Sandbox ad features, password leak lookups, background running, and the search",
+           "for Cast devices on your network. Casting from Chromium stops working. Safe Browsing and updates are untouched.",
+           "Technical: writes " + CHROMIUM_POLICY_FILE + " (a managed policy, read by Chromium at start)"],
+    run: CHROMIUM_FOREIGN_SH + "if [ -e \"$f\" ] && ! same; then echo 'A file of that name is there that Vigil did not write, so nothing was changed.'; exit 1; fi; "
+      + "sudo /usr/bin/install -d -m 0755 /etc/chromium/policies/managed && printf '%s' '" + CHROMIUM_POLICY_TEXT + "' | sudo /usr/bin/tee \"$f\" >/dev/null "
+      + "&& sudo /usr/bin/chmod 0644 \"$f\" && echo 'The policy is in place. Restart Chromium to apply it.'"
+  },
+  "undo-chromium": {
+    title: "Undo: take the Chromium privacy policy out",
+    what: ["Removes the policy file Vigil wrote, only if nobody has changed it since. Restart Chromium to apply.",
+           "Technical: deletes " + CHROMIUM_POLICY_FILE],
+    run: CHROMIUM_FOREIGN_SH + "[ -e \"$f\" ] || { echo 'Nothing to undo.'; exit 0; }; "
+      + "same || { echo 'The file was changed since Vigil wrote it, so it was left alone.'; exit 1; }; "
+      + "sudo /usr/bin/rm -f -- \"$f\" && echo 'Removed. Restart Chromium to apply.'"
+  },
   "undo-avahi": {
     title: "Undo: restore the original Avahi settings",
     what: ["Puts back the Avahi settings file as it was before Vigil first changed it, and restarts Avahi.",
@@ -1109,12 +1233,14 @@ var DOCS = {
   "arch-autostart": "https://wiki.archlinux.org/title/Autostarting",
   "arch-aur": "https://wiki.archlinux.org/title/Arch_User_Repository",
   "bumblebee": "https://github.com/perplexityai/bumblebee",
-  "black-ops": "https://github.com/brightwalker25/omarchy-black-ops",
-  "arch-users": "https://wiki.archlinux.org/title/Users_and_groups",
+    "arch-users": "https://wiki.archlinux.org/title/Users_and_groups",
   "attack-history": "https://attack.mitre.org/techniques/T1070/003/",
   "arch-xdg": "https://wiki.archlinux.org/title/XDG_Base_Directory",
   "arch-clamav": "https://wiki.archlinux.org/title/ClamAV",
-  "arch-orphans": "https://wiki.archlinux.org/title/Pacman/Tips_and_tricks#Removing_unused_packages_(orphans)"
+  "arch-orphans": "https://wiki.archlinux.org/title/Pacman/Tips_and_tricks#Removing_unused_packages_(orphans)",
+"safetensors": "https://huggingface.co/docs/safetensors",
+"gitleaks": "https://github.com/gitleaks/gitleaks",
+"rkhunter": "https://rkhunter.sourceforge.net/"
 }
 
 function docsUrl(id) {
@@ -1334,8 +1460,8 @@ function validCheck(c) {
 // runs. The virus scans say which signatures they used (note), Bumblebee only
 // when it fell back to an old list; old marks one over two days old.
 var SOURCE_IDS = ["pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee", "downloads-scan",
-                  "firmware", "virus-scan", "password-check"]
-var SOURCE_RUNS = ["daily", "weekly", "all"]
+                  "firmware", "gitleaks", "model-scan", "virus-scan", "password-check", "rkhunter", "omarchy-update"]
+var SOURCE_RUNS = ["daily", "weekly", "all", "update"]
 var SOURCE_STATES = ["ok", "stale", "never", "failed"]
 var DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
@@ -1390,7 +1516,15 @@ function sourceNote(src) {
   return src.state === "never" || src.state === "failed" ? "" : src.note
 }
 
-var RUN_HEADINGS = { daily: "Daily check", weekly: "Weekly check", all: "Run all only" }
+var RUN_HEADINGS = { daily: "Daily check", weekly: "Weekly check", all: "Run all only", update: "Omarchy Update button" }
+
+// The line under the Omarchy Update button: when the last full update was, from pacman's log.
+function updateCaption(report, now) {
+  var src = null
+  if (report) for (var i = 0; i < report.sources.length; i++) if (report.sources[i].id === "omarchy-update") src = report.sources[i]
+  if (!src || src.state === "never") return "No full update found in the package log"
+  return "Last update: " + relativeDay(src.date, now) + (src.time ? " at " + src.time : "")
+}
 
 // The Overview's LAST RUN list: when your settings and files were last read,
 // then each run's scans and lookups under its name, in the order it runs them.
@@ -1568,7 +1702,7 @@ function actionOutputText(output) {
 
 // What the red Install button lists, by id from the report's "missing".
 var HELPER_NAMES = { "clamav": "ClamAV", "arch-audit": "arch-audit", "osv-scanner": "osv-scanner", "fwupd": "fwupd",
-                     "clamui": "ClamUI", "bumblebee": "Bumblebee" }
+                     "clamui": "ClamUI", "bumblebee": "Bumblebee", "gitleaks": "gitleaks", "rkhunter": "rkhunter" }
 
 function missingLabel(report) {
   if (!report || !report.missing || report.missing.length === 0) return ""
@@ -1590,12 +1724,15 @@ function runLines(report, ids) {
     if (ids[i] === "signatures") return i + 1 < ids.length && has(ids[i + 1])
     if (ids[i] === "signatures-update") return report.signaturesDue === true
     if (ids[i] === "password-check") return has("password-check") && toolDir(report.tools, "pkexec") !== ""
+    if (ids[i] === "rkhunter") return has("rkhunter") && toolDir(report.tools, "pkexec") !== ""
     return has(ids[i])
   }
   var what = {
     "signatures-update": "Virus signatures update: they are over two days old (ClamAV's own update service has"
       + " fallen behind), so Vigil updates them first. Omarchy asks for your password.",
     "password-check": "Password scan: checks that every account has a password. Omarchy asks for your password.",
+    "rkhunter": "Rootkit scan: rkhunter looks for known rootkits, hidden files and changed system programs (no network)."
+      + " The first time it also records the current system programs as its baseline. Omarchy asks for your password.",
     "pending-updates": "System update lookup: waiting system and Omarchy updates (nothing is installed).",
     "flatpak": "Flatpak update lookup, and the updates for your own Flatpak apps (no password).",
     "arch-audit": "Arch security scan: downloads the Arch security team's newest list, then compares your packages with it.",
@@ -1607,6 +1744,10 @@ function runLines(report, ids) {
       + " service keeps them current; this step never updates them).",
     "downloads-scan": "Virus scan of ~/Downloads: what is new there since the last scan.",
     "firmware": "Firmware lookup: firmware updates for this computer, from LVFS.",
+    "gitleaks": "Secrets scan of your git repositories: gitleaks reads the files of your git repositories for keys and tokens (nothing leaves"
+      + " this computer, and a secret is never shown).",
+    "model-scan": "AI model file scan: reads the instructions inside pickle model files (.pt, .pth, .ckpt, .bin, .pkl)"
+      + " without running them.",
     "virus-scan": "Virus scan of ~: your whole home folder, Downloads included. This can take a while."
   }
   var lines = [], n = 1
@@ -1619,7 +1760,7 @@ function runLines(report, ids) {
 // Bumblebee scan, the check of the virus signatures before each virus scan.
 var DAILY_IDS = ["pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee-list", "bumblebee", "signatures",
                  "downloads-scan"]
-var WEEKLY_IDS = ["firmware", "signatures", "virus-scan"]
+var WEEKLY_IDS = ["firmware", "gitleaks", "model-scan", "signatures", "virus-scan"]
 var DONE_LINE = "The panel shows the progress, and you get a notification when it is done."
 var DAILY_DONE_LINE = "The panel shows the progress and the result."
 
@@ -1651,17 +1792,19 @@ function weeklyConfirmation(report) {
     .concat(lines).concat([NO_PASSWORD_LINE + "You can close this panel. " + DONE_LINE]) }
 }
 
-// Run all: the daily check and the weekly check, plus the password scan. The
-// scan of your home folder covers Downloads, so Downloads is not scanned
-// twice. The steps that ask for your password come first.
+// Run all: the Omarchy update (in a terminal), then the daily check and the weekly check, plus the password and
+// rootkit scans. The scan of your home folder covers Downloads, so Downloads is not scanned twice. The steps that
+// ask for your password come first.
 function fullScanConfirmation(report) {
   if (!report) return null
-  var ids = ["signatures-update", "password-check"]
+  var ids = ["signatures-update", "password-check", "rkhunter"]
     .concat(DAILY_IDS.filter(function(id) { return id !== "downloads-scan" && id !== "signatures" })).concat(WEEKLY_IDS)
-  return { title: "Run all", lines: ["Runs the daily check and the weekly check, in this order:"]
-    .concat(runLines(report, ids))
-    .concat(["The virus scan of ~ includes Downloads, so ~/Downloads is not scanned twice.", CARE_RUN_LINE,
-             "Omarchy asks for your password at the start" + (report.signaturesDue ? ", twice. " : ". ") + DONE_LINE]) }
+  var asks = (report.signaturesDue ? 1 : 0) + (toolDir(report.tools, "pkexec") !== "" ? 1 + (hasSource(report, "rkhunter") ? 1 : 0) : 0)
+  var lines = ["Runs the daily check and the weekly check, in this order:"].concat(runLines(report, ids))
+    .concat(["The virus scan of ~ includes Downloads, so ~/Downloads is not scanned twice.", CARE_RUN_LINE])
+  var password = asks === 0 ? "No password is needed. "
+    : "Omarchy asks for your password at the start" + (asks === 1 ? ". " : asks === 2 ? ", twice. " : ", " + asks + " times. ")
+  return { title: "Run all", lines: lines.concat([password + DONE_LINE]) }
 }
 
 function parseHistory(h) {
@@ -1837,6 +1980,7 @@ function withSettings(report, autoUpdate) {
 // The virus scan row holds both scans, the daily one of new downloads and the
 // weekly one of your home folder, so it has a group of its own between them.
 var CHECK_SCHEDULE = { "virus-scan": 1.5, "updates": 1, "flatpak-apps": 1, "bumblebee": 1, "firmware": 2,
+                       "git-secrets": 2, "model-files": 2, "rootkit-scan": 3,
                        "scanner-arch-audit": 1, "malicious-packages": 1, "aur-status": 1 }
 
 // Care rows that are never part of Clean all: removing packages, or settings
@@ -1872,7 +2016,7 @@ function currentNote(refreshMinutes) {
   return "Read again from your settings and files whenever you open Vigil, after every fix, and " + every + "."
 }
 
-var GROUP_HEADINGS = { 0: CURRENT_HEADING, 1: "DAILY CHECK", 1.5: "DAILY AND WEEKLY CHECKS", 2: "WEEKLY CHECK",
+var GROUP_HEADINGS = { 0: CURRENT_HEADING, 1: "DAILY CHECK", 1.5: "DAILY AND WEEKLY CHECKS", 2: "WEEKLY CHECK", 3: "RUN ALL ONLY",
                        100: CARE_SEPARATE_HEADING }
 
 // The heading above a row, or "": at the start of each group, on tabs that
@@ -2061,7 +2205,7 @@ if (typeof module !== "undefined") {
     VERSION: VERSION, parseFixResult: parseFixResult, MAX_PICK: MAX_PICK, terminalScript: terminalScript,
     terminalAction: terminalAction, actionPlan: actionPlan, runMode: runMode, stripSudo: stripSudo, launcherPath: launcherPath, canRun: canRun, checksFor: checksFor, withSettings: withSettings,
     countBy: countBy, statusGlyph: statusGlyph, levelText: levelText,
-    tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
+    updateCaption: updateCaption, tooltip: tooltip, confirmation: confirmation, helperInfo: helperInfo, isHelperAction: isHelperAction,
     categoryLabel: categoryLabel, pillarCounts: pillarCounts, tabCaption: tabCaption, tabCounts: tabCounts,
     CARE_NOTE: CARE_NOTE, SIGNATURES_NOTICE: SIGNATURES_NOTICE, rowHeading: rowHeading, rowHeadingNote: rowHeadingNote, currentNote: currentNote, CURRENT_HEADING: CURRENT_HEADING, runCaptions: runCaptions,
     scheduleNotes: scheduleNotes, heroMeta: heroMeta, keyHints: keyHints, separateFromCleanAll: separateFromCleanAll,
@@ -2070,7 +2214,8 @@ if (typeof module !== "undefined") {
     shortDate: shortDate, VIGIL_MARK: VIGIL_MARK,
     relativeDay: relativeDay, sourceLine: sourceLine, sourceNote: sourceNote, MAX_MESSAGE: MAX_MESSAGE, countdown: countdown, 
     BUMBLEBEE_INSTALL: BUMBLEBEE_INSTALL, BUMBLEBEE_VERSION: BUMBLEBEE_VERSION,
-    SIGNATURES_SCRIPT: SIGNATURES_SCRIPT, NO_PASSWORD_STEP: NO_PASSWORD_STEP,
+    SIGNATURES_SCRIPT: SIGNATURES_SCRIPT, NO_PASSWORD_STEP: NO_PASSWORD_STEP, RKHUNTER_SCRIPT: RKHUNTER_SCRIPT,
+    
     SOURCE_IDS: SOURCE_IDS, DAILY_IDS: DAILY_IDS, WEEKLY_IDS: WEEKLY_IDS, cardShowsSignatures: cardShowsSignatures,
     parseProgress: parseProgress, parseRunning: parseRunning, detectionItem: detectionItem, leftoverItem: leftoverItem, leftoverIdList: leftoverIdList, leftoverTrashIds: leftoverTrashIds,
     PICK_SPECS: PICK_SPECS, MARK_LEVELS: MARK_LEVELS, pickSpec: pickSpec, itemPickable: itemPickable, itemRemovable: itemRemovable, pickableIds: pickableIds,
@@ -2078,6 +2223,6 @@ if (typeof module !== "undefined") {
     removePluginsScript: removePluginsScript, scriptCommandText: scriptCommandText, PACKAGE_NAME: PACKAGE_NAME, PLUGIN_NAME: PLUGIN_NAME, actionStage: actionStage, actionProgress: actionProgress,
     actionOutputText: actionOutputText, progressText: progressText, lastRunRows: lastRunRows, missingLabel: missingLabel,
     TERMINAL_ACTIONS: TERMINAL_ACTIONS, HELPER_ACTIONS: HELPER_ACTIONS, HELPER_INFO: HELPER_INFO,
-    SYSCTL_LINES: SYSCTL_LINES
+    SYSCTL_LINES: SYSCTL_LINES, TELEMETRY_HOSTS: TELEMETRY_HOSTS, CHROMIUM_POLICY_TEXT: CHROMIUM_POLICY_TEXT
   }
 }

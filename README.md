@@ -15,9 +15,9 @@ so under yours it takes on your theme's colors.
 | Pillar | The question it answers |
 |---|---|
 | **Harden** | Can someone get in? Firewall, SSH, kernel protections, disk encryption, screen lock, sudo, security keys, updates, open ports. |
-| **Detect** | Is something bad already here? Malware hiding places, files that changed, virus scanning through [ClamUI](https://github.com/linx-systems/clamui). |
-| **Supply** | Can I trust what I installed? Known-compromised packages through Perplexity's [Bumblebee](https://github.com/perplexityai/bumblebee), known vulnerabilities, AUR packages, your other Omarchy plugins. |
-| **Privacy** | What does this machine tell the networks it joins? DNS fallback, hardware address, connectivity pings, announcements, telemetry opt-outs. |
+| **Detect** | Is something bad already here? Malware hiding places, files that changed, virus scanning through [ClamUI](https://github.com/linx-systems/clamui), rootkits. |
+| **Supply** | Can I trust what I installed? Known-compromised packages through Perplexity's [Bumblebee](https://github.com/perplexityai/bumblebee), known vulnerabilities, AUR packages, your other Omarchy plugins, AI model files that run code. |
+| **Privacy** | What does this machine tell the networks it joins, and the apps on it tell their makers? DNS fallback, hardware address, connectivity pings, announcements, telemetry opt-outs, AI agent telemetry, blocked telemetry hosts, Chromium's privacy policy, the weather location. |
 | **Care** | Is the system tidy? Thumbnails, trash, caches, what removed apps left behind, old packages and logs. |
 
 Vigil keeps no threat lists of its own. Everything it checks against comes
@@ -36,7 +36,7 @@ needs root then asks for your password, and the panel shows the result.
 Vigil is written for people who are new to Linux security. If you are not,
 the [security model](docs/SECURITY-MODEL.md) explains how it is built.
 
-> **Status: 0.30.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
+> **Status: 0.31.0.** The [roadmap](docs/ROADMAP.md) lists what comes next, and
 > [docs/LANDSCAPE.md](docs/LANDSCAPE.md) compares Vigil with the other
 > security plugins for Omarchy.
 
@@ -52,7 +52,7 @@ the old panel keeps running against the new helper.
 
 The lighthouse appears on the right of the bar. Nothing else is needed: Vigil
 uses Python and commands Omarchy already ships. ClamUI, ClamAV, the
-scanners, fwupd and Bumblebee are optional. When any are missing, the Overview shows
+scanners, fwupd, gitleaks, rkhunter and Bumblebee are optional. When any are missing, the Overview shows
 a red **MISSING … INSTALL** button before the run buttons; it lists
 what it will install, asks once more, and then asks for your password.
 
@@ -120,8 +120,9 @@ current (see below).
 | Run | What it does, in order | When |
 |---|---|---|
 | **Daily check** | Looks up waiting system, Omarchy and Flatpak updates. Then: the **Arch security scan** (arch-audit downloads the Arch security team's list and compares your packages with it), the **OSV malware scan** (osv-scanner checks your AUR build folders and global npm, Bun, mise and pnpm installs against OSV.dev as it runs), the **AUR status lookup**, the **Bumblebee list** download followed by the **Bumblebee scan**, and the **Virus signatures** check followed by the **virus scan of what is new in Downloads** | once a day, in the background, at low priority |
-| **Weekly check** | The firmware lookup (fwupd fetches LVFS's list first), then the **Virus signatures** check followed by the **virus scan of your whole home folder** | once a week, in the background, at low priority |
-| Password scan (accounts without a password) | | only when you press **Run all**, since it needs your password |
+| **Weekly check** | The firmware lookup (fwupd fetches LVFS's list first), the **secrets scan of your git repositories** (gitleaks), the **AI model file scan**, then the **Virus signatures** check followed by the **virus scan of your whole home folder** | once a week, in the background, at low priority |
+| Omarchy update (`omarchy-update`) | | only when you press **Omarchy Update**, or **Update now** on the System updates row, in a terminal |
+| Password scan (accounts without a password) and rootkit scan (rkhunter) | | only when you press **Run all**, since they need your password |
 | Cleaning (Care) | | only when you ask; Vigil only measures sizes by itself |
 
 **Virus signatures.** ClamAV keeps its signatures in a system folder, so
@@ -153,16 +154,30 @@ asks first, on a card that lists exactly what it runs, in order:
 
 - **Daily check** runs the daily check now. Pressed, it also installs
   updates for your own Flatpak apps. No password.
-- **Weekly check** runs the weekly check now: the firmware lookup, then a
+- **Weekly check** runs the weekly check now: the firmware lookup, the
+  secrets scan of your git repositories, the AI model file scan, then a
   virus scan of your whole home folder (skipping caches, game libraries,
   Flatpak and container data, language toolchains, `node_modules` and
   `.git` folders, and other disks; at low priority). It can take a while;
   a notification says when it is done.
 - **Run all** (`R` or `S`) runs the daily check, then the weekly check, plus
-  the password scan, and updates the virus signatures first when they are
-  over two days old. Those are the only password prompts in any run, and
-  they come first, while you are at the screen. The virus scan of your home
-  folder includes Downloads, so Run all does not scan Downloads twice.
+  the password scan and the rootkit scan, and updates the virus signatures
+  first when they are over two days old. Those are the only password prompts
+  in any run, and they come first, while you are at the screen. The virus
+  scan of your home folder includes Downloads, so Run all does not scan
+  Downloads twice. Run all does not update the system; that is the
+  **Omarchy Update** button.
+- **Omarchy Update** (under the run buttons) opens a terminal and runs
+  Omarchy's own `omarchy-update`, so it does everything that command
+  normally does: system packages, your AUR packages, your mise tools and
+  the rest. It asks first, on the usual card with the exact script, then
+  sudo and Omarchy's own questions (including any restart) happen in the
+  terminal. Vigil does not follow or alter it. The line beside the button
+  says when the last full update was, from pacman's log, and the Last run
+  list shows the same under **Omarchy Update button**. It is separate from
+  **Update now** on the System updates row because that row looks only at
+  pacman's waiting updates (`checkupdates`), not at AUR packages or mise
+  tools; both start the same updater.
 
 Some rows also have a button of their own: **Scan now** on the Arch
 security and OSV rows runs just that scan, and **Look up now** on the AUR
@@ -244,10 +259,10 @@ something new turns up, the finding comes back.
 
 ### Lists you tick
 
-Five rows list what they found one item per line, each on two lines (what
-it is, then more about it), with a small box to tick: leftover app data and
-orphaned packages (Care), infected files (Detect), and foreign packages and
-other Omarchy plugins (Supply). Tick the items you want to act on (the box,
+Six rows list what they found one item per line (most on two lines: what
+it is, then more about it), with a small box to tick: leftover app data,
+orphaned packages and big cache folders (Care), infected files (Detect), and
+foreign packages and other Omarchy plugins (Supply). Tick the items you want to act on (the box,
 or the item's text), then use the buttons under the list, which say how many
 they act on.
 
@@ -257,6 +272,7 @@ they act on.
 | Orphaned packages | **Remove selected**, or **Remove all** with nothing ticked: `pacman -Rns`, behind your password | **Keep selected** / **Keep all** |
 | AUR and other foreign packages | **Remove selected** only: `pacman -Rns`, behind your password | **Keep selected** / **Keep all** |
 | Other Omarchy plugins | **Remove selected** only: Omarchy's own `omarchy-plugin-remove`, as you | **Keep selected** / **Keep all** |
+| Big cache folders (1 GB or more) | **Clear selected** only: deletes everything inside each ticked folder, for good | **Ignore selected** / **Ignore all** |
 | Infected files | **False positive selected** only: Vigil stops counting that exact file | (none) |
 
 Removing, trashing and marking a false positive always ask first, on a card
@@ -266,12 +282,13 @@ or plugins also shows the exact command it runs (see
 cannot easily get back (foreign packages, plugins) or must be sure of
 (false positives).
 
-**Keep** leaves an item as it is and stops counting it: settings you want
+**Keep** (called **Ignore** on the big cache folders, where it stops pointing the
+folder out) leaves an item as it is and stops counting it: settings you want
 back if you install an app again, an orphan you still use, an AUR package or
 plugin you have looked at and trust. Keeping only changes Vigil's own notes,
 so it does not ask. A kept item, and a file marked as a false positive,
 shows a lock in place of its box and moves to the bottom of the list;
-**click the lock** to count it again. A plugin you kept is counted again by
+**click the lock** to count it (or list it) again. A plugin you kept is counted again by
 itself if its code gains a new capability, and a false positive if the file
 changes.
 
@@ -285,7 +302,11 @@ and have no Undo button; [Removing](#removing) has the commands that
 reverse them. The undo asks for your password
 like the fix did, and it deletes the file only if its first line is still Vigil's
 marker; a file someone has edited since is left alone. For Avahi, undo puts
-back the original file Vigil saved before its first change.
+back the original file Vigil saved before its first change. The Chromium
+policy is removed only while its bytes are exactly what Vigil wrote, and the
+telemetry block in `/etc/hosts` is taken out by its markers, leaving every
+other line. The variables in `~/.config/uwsm/env.d` are removed from their
+own rows (no password); the rounded weather location cannot be undone.
 
 ### Settings
 
@@ -295,7 +316,7 @@ settings:
 | Key | Default | Meaning |
 |---|---|---|
 | `refreshMinutes` | `30` | How often to read your settings and files again in the background (5 to 1440). |
-| `notifyOnNew` | `true` | One desktop notification when a check that was fine starts failing. It only says how many. Also one a day, in fixed words, while ClamAV's virus signatures are over two days old. (A weekly check or Run all you start also says when it finishes, whatever this is set to.) |
+| `notifyOnNew` | `true` | One desktop notification when a check that was fine starts failing or warning (checks with no weight never notify). It only says how many. Also one a day, in fixed words, while ClamAV's virus signatures are over two days old. (A weekly check or Run all you start also says when it finishes, whatever this is set to.) |
 | `autoUpdate` | `true` | Run the daily check and the weekly check by themselves (see [When Vigil runs what](#when-vigil-runs-what) and [Where the data comes from](#where-the-data-comes-from)). Off means they run only when you press a Run, Scan now or Look up now button. |
 
 ## What Vigil checks
@@ -331,6 +352,7 @@ lower it. A finding you mark as reviewed stops counting.
 | Firmware updates | The weekly check asks fwupd, which gets firmware from LVFS where hardware makers publish it. A waiting update that fixes a known security hole (a CVE, or marked high or critical) is a warning; other firmware updates are information | `omarchy-update-firmware` (terminal) |
 | Open network ports | Programs listen on the network with no firewall in front | **Show listeners** runs `ss -tulpn` as root and shows the result in the panel (read-only) |
 | Exposed secrets | API keys and tokens in the formats their providers publish (AWS, GitHub, GitLab, Slack, Stripe, Anthropic, OpenAI, Google, private keys) in your shell histories, or credential files such as `~/.aws/credentials`, `~/.netrc` and `~/.git-credentials` readable by other accounts. Shows the file and line, never the secret. | Makes credential files private (no root); **Remove those lines** deletes the lines with keys from your shell history (no root); revoke leaked keys with their provider |
+| Secrets in your git repositories | gitleaks, in the weekly check, finds keys and tokens in the files of the git repositories below your home folder (the working tree, not the history; at most 100 repositories, four folders deep). Shown as repository, file, line and rule, never the secret (warning) | Revoke the key with its provider, then take it out of the file. A safe line, such as a test value, can carry a `gitleaks:allow` comment. A repository's own `.gitleaks.toml` is ignored on purpose, so a repository cannot switch its own findings off |
 
 ### Detect
 
@@ -338,6 +360,7 @@ lower it. A finding you mark as reviewed stops counting.
 |---|---|
 | Startup files | Reads shell startup files, autostart entries, user services and timers, uwsm and environment.d files, Hyprland config and your crontab, and flags lines that download and run code, decode hidden code, or open reverse shells. These are leads to read, not proof. |
 | System-wide preload | Fails if `/etc/ld.so.preload` loads anything; rootkits use it to hide. |
+| Rootkit scan (rkhunter) | Run all runs rkhunter as root (Omarchy asks for your password): known rootkits, hidden files, and system programs that changed. Warnings for a program that is byte for byte what an installed package shipped (checked against pacman's own records) are explained and do not count; the others are a warning to read, not proof. The first run records the current system programs as rkhunter's baseline. Its signatures are old, so it mainly finds old, well-known rootkits; the changed-program check is the useful part. Never in the background, and it makes no network call |
 | Changes to important files | Records a fingerprint of accounts, PAM, SSH settings, `~/.ssh/authorized_keys`, system and user services, autostart entries and your startup files, and lists anything changed, added or removed since. Changes that match exactly what a package update shipped (from pacman's own records) are not reported, nor are system users that packages add. Changes to who can log in or what runs at start are warnings; changes to your own shell files are information. **Accept these changes** records the current state as the new normal. |
 | Infected files (ClamAV) | ClamAV scans your home folder in each weekly check, and every day what is new in Downloads, as you, each time right after Vigil checks the virus signatures are there and how old they are. Infected files are listed one per line (the file, then what ClamAV found, in the theme's red for known malware and yellow for a guess by ClamAV's heuristic rules), with **Open ClamUI to quarantine them**. If ClamAV is wrong about a file you know is safe (a game's DLL, say), tick it and press **False positive selected**: Vigil records that exact file's SHA-256 and stops counting it, and reports it again if the file ever changes. Clicking its lock counts it again. ClamAV's heuristic detections (`Heuristics.…`) count too, shown in yellow. Its "potentially unwanted" rules stay off, as ClamAV ships them; if you turned them on in ClamUI, their `PUA.…` detections are yellow too. |
 | Duplicate scan schedules | Finds other apps that repeat what Vigil already runs: a scheduled scan in ClamUI whose folders are all inside your home folder, and the older Bumblebee plugin (once Vigil runs Bumblebee itself). **Let Vigil run them** turns those off the way you would in each app: ClamUI's timer and its own Scheduled scans setting, and `omarchy plugin disable` for the plugin. Undo turns back on exactly what it turned off. A ClamUI schedule that also covers folders outside your home folder (Arch or Flatpak ClamUI: they share one timer, so ClamUI is then left alone entirely), and the Security Scan plugin (it runs AUR-Malware, which Vigil does not), are listed but left on. Nothing is offered when Vigil's background checks are off. |
@@ -354,6 +377,7 @@ lower it. A finding you mark as reviewed stops counting.
 | AUR package status | Asks the AUR about your AUR packages: which have left the AUR, which are now in the official repositories, and which have no maintainer (most 2026 AUR attacks took over such orphans). Information only, since packages leave the AUR for ordinary reasons too. |
 | AUR and other foreign packages | Lists packages that did not come from the official repositories, each with its version, size, description and what the last AUR lookup said about it. Tick what you no longer use and press **Remove selected**; **Keep** what you trust (see [Lists you tick](#lists-you-tick)). |
 | Other Omarchy plugins | Lists your third-party plugins and what each one's code can do: network access, root through sudo or pkexec, shell commands, downloading and running code, compiled binaries. Vigil reads the files as text and never loads or runs them. Each capability is colored by how much it deserves a look, in the theme's own colors: red for root, downloading and running code, and compiled binaries; yellow for network access, shell commands, and a linked development install Vigil did not scan; green when none were found. Tick a plugin you no longer use and press **Remove selected**; **Keep** one you have looked at and trust. |
+| AI model files that run code | Model files in the pickle format (`.pt`, `.pth`, `.ckpt`, `.bin`, `.pkl`) run whatever code they carry when a program loads them. The weekly check reads their instructions with Python's own pickle disassembler (which never runs anything) and lists files that import something able to run programs: `os`, `subprocess`, `eval`, `socket`, and the like (warning). It looks in your home folder and in `~/.cache/huggingface` and `~/.cache/torch`, skipping `node_modules`, Python environments and links. Safetensors and GGUF files are plain data and are not read |
 
 ### Privacy
 
@@ -363,8 +387,21 @@ lower it. A finding you mark as reviewed stops counting.
 | Connectivity check | NetworkManager pings a server every few minutes (information) | `/etc/NetworkManager/conf.d/90-omarchy-vigil-connectivity.conf` (asks for your password) |
 | Hardware address on Wi-Fi | Networks see your real MAC address | `/etc/NetworkManager/conf.d/90-omarchy-vigil-mac.conf` (asks for your password) |
 | Network announcements | Avahi announces this machine's name | Sets `disable-publishing=yes` in `/etc/avahi/avahi-daemon.conf` (asks for your password). Refuses unless the setting appears exactly once under `[publish]`, keeps the first original as `avahi-daemon.conf.vigil-backup`, and restores the previous file if Avahi does not restart. |
-| Telemetry opt-out variables | `DO_NOT_TRACK` and similar are not set (information) | Writes `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` (no root) |
-| Black Ops | Shows whether [Black Ops](https://github.com/brightwalker25/omarchy-black-ops) is installed; it blocks app telemetry, which Vigil leaves to it | |
+| Telemetry opt-out variables | `DO_NOT_TRACK` and similar are not set (information), or Vigil's list has grown since you set it | Writes `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` (no root): `DO_NOT_TRACK`, and the switches of .NET, Next.js, Deno, Terraform, vcpkg, onnxruntime, gh (`GH_TELEMETRY`), mise and others. Applies from your next login |
+| AI agent telemetry | Claude Code, Codex, Gemini CLI, opencode or pi is on this computer (Omarchy installs them) and `DISABLE_TELEMETRY` is not set for Claude Code (warning), or for the others only (information) | Writes `~/.config/uwsm/env.d/90-omarchy-vigil-agents` (no root): `DISABLE_TELEMETRY` and `DISABLE_ERROR_REPORTING` for Claude Code, `PI_TELEMETRY=0` for pi, `GEMINI_TELEMETRY_ENABLED=false` for Gemini CLI. Settings you made in `~/.claude/settings.json` count. Codex has no variable; its crash-report address is in the hosts block below |
+| Telemetry hosts | Some of fourteen telemetry, analytics and crash-report addresses (Claude Code's Datadog and Sentry, Codex's Sentry, 1Password's telemetry and Sentry, Brave's usage ping and P3A, Mozilla's telemetry, Google Analytics) can still be reached (warning) | Adds one marked block to `/etc/hosts` that sends each to `0.0.0.0` and `::`, keeping every other line (asks for your password). Pages that use Google Analytics stop reporting your visits to it. Undo takes the block out; addresses you or another tool blocked by hand count as blocked |
+| Chromium privacy policy | Chromium is installed and these are not set in a policy file: search suggestions, page preloading, Google error pages and spelling service, usage reports, the Privacy Sandbox ad features, password leak lookups, background running, and the Cast device search (warning) | Writes `/etc/chromium/policies/managed/90-omarchy-vigil.json` (asks for your password). Casting from Chromium stops working; Safe Browsing, updates and cookies are left as they are. Undo removes the file while it is unchanged |
+| Weather location | Omarchy's weather panel stores the place you chose to about a metre and sends it to wttr.in and open-meteo.com with every refresh (warning; shown only when a place is stored) | **Round it**: moves the stored point to the centre of a square 1.5 miles (2.4 km) across, which is all a forecast needs (no root). It cannot be undone: the precise figures are not kept |
+
+Vigil does all of this itself, once, when you press a button: no watchdog, no
+listener, no service. If a later update puts a setting back, the row turns to
+a warning the next time Vigil reads your files, and the same button sets it
+again. Earlier versions only detected the separate
+[Black Ops](https://github.com/brightwalker25/omarchy-black-ops) plugin and
+left telemetry blocking to it. If you still run it, Vigil recognises what it
+set (an address blocked in `/etc/hosts` or a variable in `~/.config/uwsm/env.d`
+counts, whichever tool wrote it), and the two do not fight over files: use one
+of them, and switch Black Ops off before you rely on Vigil's rows.
 
 ### Care
 
@@ -380,7 +417,7 @@ groups:
 |---|---|---|
 | Thumbnail cache | Previews the file manager made of your pictures and videos | Cleared without root |
 | Trash | Files you deleted in the file manager | Emptied without root, directly in its standard folders |
-| Application caches | Files apps keep in `~/.cache` to start faster | **Clear unused** (no root), see below |
+| Application caches | Files apps keep in `~/.cache` to start faster | **Clear unused** (no root); and for folders of 1 GB or more, tick them and **Clear selected**, or **Ignore** them; see below |
 | Package cache | Packages pacman downloaded | `paccache -rk2` and `paccache -ruk0` (asks for your password), see below |
 | System logs | The system journal; under 500 MB it counts as tidy | Over 500 MB: `journalctl --vacuum-time=2weeks` (asks for your password) |
 
@@ -399,8 +436,25 @@ Apps you use every day touch their caches each time they start, so on a
 busy computer most of `~/.cache` stays "in use", and closing your apps does
 not change that. **Clear unused** appears once more than 1 MB has gone a
 week untouched, such as the cache of an app you stopped using. Caches in use
-are never deleted, since apps would only rebuild them. To see what takes the
-space: `du -sh ~/.cache/* | sort -h`.
+are never deleted by Clear unused or Clean all, since apps would only rebuild them.
+
+**Big cache folders.** To show which caches are getting big, a folder directly
+in `~/.cache` that holds **1 GB or more** is also listed on this row as a
+checklist, each as its place and total size (`~/.cache/chromium · 1.7 GB`),
+biggest first. This list changes nothing about Clear unused or Clean all: they
+clear files nothing has used for a week in every cache folder, big or not, as
+before, and need no ticking. What the list adds is your own choice: tick the
+folders you want and press **Clear selected** (there is no "all"). That deletes
+**everything inside** each ticked folder, in use or not, for good (the folder
+itself stays), so close the app first; the card lists each folder and says so.
+Each folder is walked for up to 100 seconds, two million entries and 128
+folders deep, and anything of a megabyte or more left after that is named in
+the answer.
+**Ignore** a folder you want to keep: it stays listed, locked at the bottom,
+and stops being pointed out in the row's summary (click the lock to list it
+again). Links are removed, never followed, and the helper checks again that
+each ticked folder is still listed, 1 GB or more, and not ignored. To see what
+takes the space: `du -sh ~/.cache/* | sort -h`.
 
 **Leftover app data.** When you remove an app, its settings and data stay
 in your home folder. A file's age says little here (you set an app up once
@@ -480,9 +534,13 @@ The panel always says which kind an action is:
 2. **Helper actions** run `bin/vigil fix <action>` as you, never as root:
    making `~/.ssh`, `~/.gnupg` and credential files private, the opt-out
    file, accepting file changes, removing leaked keys from shell history,
-   the thumbnail cache, the trash, unused application caches, and the Scan
-   now / Look up now buttons. Each is a fixed action name; nothing from a
-   file or from the report reaches it. Keeping an item of any list, moving
+   the thumbnail cache, the trash, unused application caches, big cache
+   folders you tick, and the Scan now and Look up now buttons. (The one
+   exception is **Scan now** on Infected files, which the panel runs like a
+   weekly scan, with progress, because a scan of the whole home folder takes
+   a long time; the same action is still `vigil fix virus-scan-now`.) Each
+   is a fixed action name; nothing from a file or from the report reaches
+   it. Keeping an item of any list, moving
    leftover app data to the trash and marking false positives work the same
    way, named only by ids the helper made (`vigil keep|unkeep <id>...`,
    `vigil trash <id>...`, `vigil ignore|unignore <id>...`); Mark as
@@ -494,7 +552,7 @@ The panel always says which kind an action is:
    **Run**. Scripts that need root run through `pkexec`, so Omarchy's own
    password dialog asks; cancelling it changes nothing. The panel then shows
    what the script printed. Only tools that ask you questions as they go
-   still open a terminal: Omarchy's updater, its FIDO2 key
+   still open a terminal: Omarchy's updater (also behind the Omarchy Update button), its FIDO2 key
    and fingerprint setup, passwordless sudo, the docker group, and
    choosing an SSH passphrase. Packages Vigil installs come straight from
    the Arch repositories with `pacman --needed --noconfirm`; Bumblebee, the
@@ -514,7 +572,7 @@ The panel always says which kind an action is:
 5. **Open an app or a guide**: **Open ClamUI** starts ClamUI directly, and
    **Learn more** opens a page with `xdg-open`, each with a fixed command and
    no shell. Pages come only from a fixed list in `Model.js` (Arch Wiki,
-   MITRE ATT&CK, Perplexity's Bumblebee, Black Ops); nothing in the report becomes a URL.
+   MITRE ATT&CK, Perplexity's Bumblebee, gitleaks, rkhunter, safetensors); nothing in the report becomes a URL.
    They change nothing, so they do not ask first.
 6. **Mark as reviewed**, **Show again**, **Keep** and the lock (which
    counts a kept item or a false positive again) only change Vigil's own
@@ -547,7 +605,9 @@ Vigil runs no service, timer or daemon of its own. While you are logged in:
   restart in a loop.
 - **One run at a time**, across monitors and shell restarts.
 - **Every step has a deadline**: the virus scan of your home folder 3 hours,
-  the Downloads scan and Flatpak updates 30 minutes, the other steps
+  the Downloads scan, Flatpak updates and the rootkit scan 30 minutes, the
+  secrets scan of your git repositories 30 minutes in all (5 per repository),
+  the AI model file scan 20 minutes, the other steps
   between 15 seconds and 10 minutes, and the panel stops anything that runs
   past its own backstop. A step that fails is retried the next day; a virus
   scan that runs out of time waits a week instead of repeating hours of
@@ -569,6 +629,9 @@ Vigil keeps no threat lists of its own.
 | Waiting system and Omarchy updates | Arch Linux and Omarchy package repositories | `checkupdates`, once a day (and **Daily check**) |
 | Waiting Flatpak updates | Flathub, or whichever Flatpak remotes you added | `flatpak remote-ls --updates`, once a day (and **Daily check**) |
 | Firmware updates | LVFS (hardware makers publish there) | fwupd, once a week (and **Weekly check**) |
+| Keys and tokens in git repositories | gitleaks's default rules, which follow the providers' published key formats | gitleaks (from the Arch repositories, so the Omarchy update keeps it current), once a week; no network |
+| Rootkits and changed system programs | rkhunter's own data (old) and pacman's records of what each package shipped | rkhunter (Arch repositories), in **Run all** only; no network |
+| Pickle model files that run code | Python's own pickle disassembler and a short list of dangerous imports in Vigil's code | read locally, once a week; no network |
 
 There is no maintained feed of malicious AUR packages; Arch's own list for
 the 2026 attacks was a one-off document. Vigil covers the AUR through what
@@ -594,13 +657,16 @@ hand:
   paru do on every update; and it downloads Bumblebee's lists from
   Perplexity's repository on GitHub (a few MB).
 - **Weekly**: `fwupdmgr refresh` downloads firmware information from LVFS
-  (fwupd.org).
+  (fwupd.org). The secrets scan of your git repositories (gitleaks) and the
+  AI model file scan read local files and make no network calls.
 
 Each happens only once the tool is installed, and turning `autoUpdate` off
 limits it to when you press a Run, Scan now or Look up now button. Actions you start yourself also use
 the network and say so first: installing a tool (Arch mirrors; Bumblebee
 from Perplexity's release on GitHub), ClamAV's signatures (ClamAV's
-servers), Flatpak and firmware updates, and `omarchy-update`.
+servers), Flatpak and firmware updates, and `omarchy-update` (also behind the Omarchy Update button, which says
+so on its card). The rootkit scan in Run all
+reads local files and makes no network call.
 
 ## Files Vigil writes
 
@@ -624,6 +690,9 @@ servers), Flatpak and firmware updates, and `omarchy-update`.
 | `~/.config/clamui/settings.json` (or ClamUI's Flatpak copy) | the Let Vigil run them action, and its Undo | only `scheduled_scans_enabled`, with everything else in the file kept |
 | `~/.local/state/omarchy-vigil/pending-updates.json` | the helper, mode 0600 | each daily check: how many updates are waiting, and the Omarchy version if one is |
 | `~/.local/state/omarchy-vigil/firmware.json` | the helper, mode 0600 | each weekly check: device names and firmware versions with an update waiting |
+| `~/.local/state/omarchy-vigil/gitleaks.json` | the helper, mode 0600 | each weekly check: the repository, file, line and rule of each possible secret, never the secret (gitleaks is asked to redact it). `gitleaks-report.json` is gitleaks's own report, written there while one repository is scanned and deleted right after |
+| `~/.local/state/omarchy-vigil/model-scan.json` | the helper, mode 0600 | each weekly check: how many model files were read, and the paths and dangerous imports of those that can run code |
+| `~/.local/state/omarchy-vigil/rkhunter.json` | the helper, mode 0600 | each Run all: rkhunter's warnings (text capped), and whether each matches what a package shipped |
 | `~/.local/state/omarchy-vigil/downloads-scan.json`, `downloads-scan.list` | the helper, mode 0600 | each daily check: the new files in Downloads it scanned, and any it found infected |
 | `~/.local/state/omarchy-vigil/confirm-scan.list` | the helper, mode 0600 | only while a scan double-checks what it found: the paths of those files, deleted when it is done |
 | `~/.local/state/omarchy-vigil/flatpak.json` | the helper, mode 0600 | each daily check: Flatpak apps with updates waiting |
@@ -637,6 +706,11 @@ servers), Flatpak and firmware updates, and `omarchy-update`.
 | `~/.local/state/omarchy-vigil/busy/` | the helper, mode 0700, empty | once: the folder Vigil locks so only one run goes at a time |
 | `/usr/local/bin/bumblebee` | the Install or Install Bumblebee button, as root | only when you press one: Perplexity's program, version 0.1.2, checked against the SHA-256 in Vigil's code |
 | `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` | the helper | only when you set the opt-out variables |
+| `~/.config/uwsm/env.d/90-omarchy-vigil-agents` | the helper | only when you switch off AI agent telemetry |
+| `~/.local/state/omarchy/settings/weather.json` | the helper | only when you press Round it: `latitude` and `longitude` only, everything else kept |
+| `/etc/hosts` | a script action, as root | only when you block the telemetry addresses: one block between `# BEGIN omarchy-vigil telemetry` and `# END omarchy-vigil telemetry`; Undo takes out exactly that block |
+| `/etc/chromium/policies/managed/90-omarchy-vigil.json` | a script action, as root | only when you set Chromium's privacy policy |
+| `/var/lib/rkhunter/db/rkhunter.dat` | rkhunter, as root | the first Run all with rkhunter installed: its baseline of your system programs (`rkhunter --propupd`); rkhunter's own log is switched off |
 | `/etc/sysctl.d/90-omarchy-vigil.conf` | a script action, as root | only when you apply the kernel settings |
 | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-llmnr.conf` | a script action, as root | only when you turn LLMNR off |
 | `/etc/systemd/resolved.conf.d/90-omarchy-vigil-fallback.conf` | a script action, as root | only when you remove the DNS fallback |
@@ -680,19 +754,24 @@ remove them:
   used **Let Vigil run them** and want ClamUI's schedule back, press its
   Undo first, and likewise **Undo** on **Stop auto-joining** if you want
   those Wi-Fi networks to join by themselves again.
-- The opt-out file, if you set it. Remove it from the Privacy tab before
-  uninstalling, or delete `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out`.
+- The opt-out files, if you set them. Remove them from the Privacy tab before
+  uninstalling, or delete `~/.config/uwsm/env.d/90-omarchy-vigil-opt-out` and
+  `~/.config/uwsm/env.d/90-omarchy-vigil-agents`. The rounded weather
+  location stays rounded.
 - Settings you applied in `/etc`. They are your system settings now and keep
   protecting you after Vigil is gone. To undo one, delete its file from the
   table above with `sudo rm <file>`, then reboot (or restart the service
-  named in the table). For Avahi, restore the original with
+  named in the table). For the telemetry block in `/etc/hosts`, use **Undo**
+  on the Telemetry hosts finding, or delete the lines between Vigil's two
+  markers, markers included. For Avahi, restore the original with
   `sudo mv /etc/avahi/avahi-daemon.conf.vigil-backup /etc/avahi/avahi-daemon.conf`.
   Easier: use **Undo** on each finding before you remove Vigil.
 - Apps and scanners you installed through Vigil. Remove ClamUI with
   `omarchy pkg drop clamui` (or `flatpak uninstall --user io.github.linx_systems.ClamUI`
   if you installed it from Flathub), and `clamav`,
-  `arch-audit`, `osv-scanner` or `fwupd` with `omarchy pkg drop <name>` (and `lynis`
-  or `rkhunter`, if an earlier Vigil installed them). Remove Bumblebee with
+  `arch-audit`, `osv-scanner`, `fwupd`, `gitleaks` or `rkhunter` with
+  `omarchy pkg drop <name>` (and `lynis`, if an earlier Vigil installed it).
+  rkhunter keeps its baseline in `/var/lib/rkhunter` after it is removed. Remove Bumblebee with
   `sudo rm /usr/local/bin/bumblebee`.
 - Services Vigil switched on for you. They belong to their packages and keep
   protecting you without Vigil: ClamAV's update service stops with
@@ -709,11 +788,15 @@ remove them:
 ```sh
 python3 -m pytest tests -q          # helper checks, fixes, and marketplace rules
 node --test tests/*.test.mjs        # Model.js validation and terminal scripts
+tests/lint.sh                       # syntax: the helper, Model.js, and Panel.qml where qmllint is
 omarchy plugin validate .
 ```
 
-The QML cannot be checked outside Omarchy: it imports `qs.Commons` and
-`qs.Ui`, which come from the running shell.
+The QML cannot be run outside Omarchy: it imports `qs.Commons` and `qs.Ui`,
+which come from the running shell. Qt 6's `qmllint` (`/usr/lib/qt6/bin/qmllint`
+on Omarchy, which `tests/lint.sh` finds; the Qt 5 one in `/usr/bin` cannot read
+Qt 6 QML) still checks `Panel.qml` for syntax errors, and reports the shell's
+own types as unresolved, which is expected.
 
 The same tests run on every push to `master` and every pull request, in a
 locked-down GitHub Actions job (no token permissions, no third-party
@@ -726,7 +809,12 @@ owner as reviewer of every file. Found a security problem? See
 Vigil is new code, but it stands on the work of the projects it brings
 together, all MIT licensed:
 [Black Ops](https://github.com/brightwalker25/omarchy-black-ops) (privacy
-protections and its research on Omarchy's defaults),
+protections and its research on Omarchy's defaults: Vigil's telemetry
+blocking, Chromium policy, weather rounding and opt-out lists are the same
+ideas written again as one-time buttons, with no watchdog or listener),
+[omarchy-security-scan](https://github.com/brightwalker25/omarchy-security-scan)
+(the gitleaks and rkhunter scans, and the idea of checking a model file's
+pickle for code),
 [Security Scan](https://github.com/Percius04/security-scan) (scheduled
 scanners and the startup-file heuristics),
 [omarchy-bumblebee](https://github.com/duketopceo/omarchy-bumblebee) (the

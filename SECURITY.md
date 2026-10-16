@@ -12,7 +12,7 @@ Please report privately, not in a public issue or pull request:
   of this repository (private vulnerability reporting).
 
 Include what you found, how to reproduce it, and which version (shown at the
-end of the panel's key hints, such as "Vigil 0.30.0", or the commit) you
+end of the panel's key hints, such as "Vigil 0.31.0", or the commit) you
 tested. A proof of concept helps; please do not test against anyone's
 machine but your own.
 

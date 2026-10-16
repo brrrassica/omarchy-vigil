@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "keasbeexd.vigil",
   "name": "Vigil",
-  "version": "0.30.0",
+  "version": "0.31.0",
   "author": "Marc Ferro @keasbeexd",
   "license": "MIT",
   "description": "A security suite for Omarchy in five pillars: hardening, malware detection (with ClamUI), supply-chain checks (with Bumblebee), privacy and system care. Plain-language findings and fixes you approve before they run; root changes ask for your password. No telemetry: it only contacts the sources it checks against.",
@@ -51,14 +51,14 @@
         "type": "boolean",
         "label": "Notify about new findings",
         "defaultValue": true,
-        "description": "Send one desktop notification when a check that was fine starts failing. The notification only says how many; details stay in the panel. Also one a day, in fixed words, while ClamAV's virus signatures are over two days old, pointing to Run all. A weekly check or Run all you start also says when it finishes."
+        "description": "Send one desktop notification when a check that was fine starts failing or warning (checks with no weight never notify). The notification only says how many; details stay in the panel. Also one a day, in fixed words, while ClamAV's virus signatures are over two days old, pointing to Run all. A weekly check or Run all you start also says when it finishes."
       },
       {
         "key": "autoUpdate",
         "type": "boolean",
         "label": "Background checks",
         "defaultValue": true,
-        "description": "Runs the daily and weekly checks by themselves. Each scan gets its list right before it runs; ClamAV's own update service keeps the virus signatures current. Daily: waiting system updates (checkupdates, from your Arch mirrors) and Flatpak updates (your Flatpak remotes); known vulnerabilities (arch-audit downloads the tracker from security.archlinux.org); known-malicious npm and Bun packages (osv-scanner sends package names and versions to OSV.dev, never files); your AUR packages (aur.archlinux.org); Perplexity's Bumblebee list from GitHub, then a Bumblebee scan; and a ClamAV scan of what is new in Downloads. Weekly: firmware (LVFS) and a ClamAV scan of your home folder. Each step runs only once its tool is installed; scans run as you, and the daily and weekly checks never ask for a password. Turn off to run them only with the Run now buttons."
+        "description": "Runs the daily and weekly checks by themselves. Each scan gets its list right before it runs; ClamAV's own update service keeps the virus signatures current. Daily: waiting system updates (checkupdates, from your Arch mirrors) and Flatpak updates (your Flatpak remotes); known vulnerabilities (arch-audit downloads the tracker from security.archlinux.org); known-malicious npm and Bun packages (osv-scanner sends package names and versions to OSV.dev, never files); your AUR packages (aur.archlinux.org); Perplexity's Bumblebee list from GitHub, then a Bumblebee scan; and a ClamAV scan of what is new in Downloads. Weekly: firmware (LVFS), keys and tokens in your git repositories (gitleaks, local), AI model files that run code (read locally) and a ClamAV scan of your home folder. Each step runs only once its tool is installed; scans run as you, and the daily and weekly checks never ask for a password. Run all, which you press, also runs the rootkit scan (rkhunter, with your password). The Omarchy Update button, also yours to press, runs Omarchy's own updater in a terminal. Turn off to run the daily and weekly checks only with the Run now buttons."
       }
     ]
   }

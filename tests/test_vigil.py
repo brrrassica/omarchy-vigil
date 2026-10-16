@@ -474,6 +474,475 @@ def test_optout_on_does_not_write_through_symlink(v, tmp_path):
     assert not (d / v.OPT_OUT_NAME).is_symlink()
 
 
+def test_optout_recognises_and_updates_an_earlier_list(v):
+    path = homefile(v, ".config/uwsm/env.d/" + v.OPT_OUT_NAME, v.OPT_OUT_OLD_TEXTS[0])
+    c = v.check_opt_out()
+    assert c["status"] == "info" and c["fix"]["action"] == "optout-on"
+    assert v.run_fix("optout-on")["ok"] and path.read_text() == v.OPT_OUT_TEXT
+    path.write_text(v.OPT_OUT_OLD_TEXTS[0])
+    assert v.run_fix("optout-off")["ok"] and not path.exists()
+
+
+def test_optout_never_replaces_a_file_that_is_not_vigils(v):
+    path = homefile(v, ".config/uwsm/env.d/" + v.OPT_OUT_NAME, "export MINE=1\n")
+    res = v.run_fix("optout-on")
+    assert not res["ok"] and path.read_text() == "export MINE=1\n"
+
+
+def test_agent_telemetry(v):
+    assert v.check_agent_telemetry()["status"] == "na"             # no agent on this machine
+    (Path(v.HOME) / ".claude").mkdir()
+    c = v.check_agent_telemetry()
+    assert c["status"] == "warn" and c["fix"] == {"kind": "helper", "action": "agents-on", "label": "Switch it off"}
+    assert "Claude Code" in c["detail"]
+    assert v.run_fix("agents-on")["ok"]
+    path = Path(v.HOME, ".config/uwsm/env.d", v.AGENTS_NAME)
+    text = path.read_text()
+    assert text == v.AGENTS_TEXT
+    for line in ("export DISABLE_TELEMETRY=1", "export DISABLE_ERROR_REPORTING=1", "export PI_TELEMETRY=0",
+                 "export GEMINI_TELEMETRY_ENABLED=false"):
+        assert line in text
+    c = v.check_agent_telemetry()
+    assert c["status"] == "pass" and c["fix"]["action"] == "agents-off"
+    assert v.run_fix("agents-off")["ok"] and not path.exists()
+    assert v.check_agent_telemetry()["status"] == "warn"
+
+
+def test_agent_telemetry_counts_claudes_own_settings_and_leaves_edits_alone(v):
+    (Path(v.HOME) / ".claude").mkdir()
+    homefile(v, ".claude/settings.json", json.dumps({"env": {"DISABLE_TELEMETRY": "1"}}))
+    c = v.check_agent_telemetry()
+    assert c["status"] == "pass" and c["fix"]["kind"] == "none"
+    (Path(v.HOME) / ".claude/settings.json").unlink()
+    v.run_fix("agents-on")
+    path = Path(v.HOME, ".config/uwsm/env.d", v.AGENTS_NAME)
+    path.write_text(v.AGENTS_TEXT + "export MINE=1\n")
+    assert not v.run_fix("agents-off")["ok"] and path.exists()
+
+
+def node_json(expr):
+    import subprocess as sp
+    return json.loads(sp.run(["node", "-e", "const M = require(process.argv[1]); process.stdout.write(JSON.stringify(%s))" % expr,
+                              str(REPO / "Model.js")], capture_output=True, text=True, check=True).stdout)
+
+
+def test_the_hosts_and_policy_lists_agree_between_helper_and_panel(v):
+    assert node_json("M.TELEMETRY_HOSTS") == list(v.TELEMETRY_HOSTS)
+    assert node_json("M.CHROMIUM_POLICY_TEXT") == v.CHROMIUM_POLICY_TEXT
+    assert json.loads(v.CHROMIUM_POLICY_TEXT) == dict(v.CHROMIUM_POLICY)
+
+
+def hosts_file(v, text):
+    return sysfile(v, "/etc/hosts", text)
+
+
+def test_telemetry_hosts(v):
+    assert v.check_telemetry_hosts()["status"] == "unknown"                  # no /etc/hosts at all
+    hosts_file(v, "127.0.0.1 localhost\n")
+    c = v.check_telemetry_hosts()
+    assert c["status"] == "warn" and c["fix"]["action"] == "hosts-block" and "_undo" not in c
+    assert "14 of 14" in c["summary"]
+    # one host blocked by hand, and a name that only looks alike
+    hosts_file(v, "127.0.0.1 localhost\n0.0.0.0 usage-ping.brave.com # mine\n10.0.0.1 analytics.google.com\n")
+    c = v.check_telemetry_hosts()
+    assert "13 of 14" in c["summary"] and "usage-ping.brave.com" not in c["detail"]
+    assert "analytics.google.com" in c["detail"]                              # pointing elsewhere is not a block
+    lines = ["# BEGIN omarchy-vigil telemetry"] + ["0.0.0.0 " + h for h in v.TELEMETRY_HOSTS] + ["# END omarchy-vigil telemetry"]
+    hosts_file(v, "127.0.0.1 localhost\n" + "\n".join(lines) + "\n")
+    c = v.check_telemetry_hosts()
+    assert c["status"] == "pass" and c["_undo"]["action"] == "undo-hosts"
+    # Black Ops' or a hand-made list counts too, but offers no undo of Vigil's
+    hosts_file(v, "\n".join("%s %s" % (a, h) for h in v.TELEMETRY_HOSTS for a in ("0.0.0.0", "::")) + "\n")
+    c = v.check_telemetry_hosts()
+    assert c["status"] == "pass" and "_undo" not in c
+    # a damaged block (begin without end) is not offered for undo
+    hosts_file(v, "# BEGIN omarchy-vigil telemetry\n0.0.0.0 usage-ping.brave.com\n")
+    assert "_undo" not in v.check_telemetry_hosts()
+
+
+def test_chromium_privacy(v):
+    assert v.check_chromium_privacy()["status"] == "na"
+    sysfile(v, "/usr/bin/chromium", "")
+    c = v.check_chromium_privacy()
+    assert c["status"] == "warn" and c["fix"]["action"] == "chromium-privacy" and "13 of 13" in c["summary"]
+    # Omarchy's own color.json beside it does not count as privacy
+    sysfile(v, "/etc/chromium/policies/managed/color.json", '{"BrowserThemeColor": "#000000"}')
+    assert v.check_chromium_privacy()["status"] == "warn"
+    sysfile(v, "/etc/chromium/policies/managed/" + v.CHROMIUM_POLICY_NAME, v.CHROMIUM_POLICY_TEXT)
+    c = v.check_chromium_privacy()
+    assert c["status"] == "pass" and c["_undo"]["action"] == "undo-chromium"
+    # the right keys with the wrong type do not count (0 is not False)
+    bad = dict(v.CHROMIUM_POLICY)
+    bad["EnableMediaRouter"] = 0
+    sysfile(v, "/etc/chromium/policies/managed/" + v.CHROMIUM_POLICY_NAME, json.dumps(bad))
+    c = v.check_chromium_privacy()
+    assert c["status"] == "warn" and "EnableMediaRouter" in c["detail"] and "_undo" not in c
+
+
+def test_weather_location(v):
+    assert v.check_weather_location()["status"] == "na"
+    path = homefile(v, ".local/state/omarchy/settings/weather.json",
+                    json.dumps({"name": "Home", "latitude": 40.71278, "longitude": -74.00594, "unit": "f"}))
+    c = v.check_weather_location()
+    assert c["status"] == "warn" and c["fix"]["action"] == "weather-round"
+    assert v.run_fix("weather-round")["ok"]
+    data = json.loads(path.read_text())
+    assert data["name"] == "Home" and data["unit"] == "f"
+    assert data["latitude"] != 40.71278 and abs(data["latitude"] - 40.71278) < 0.02
+    assert abs(data["longitude"] + 74.00594) < 0.03
+    assert (data["latitude"], data["longitude"]) == v.snap_location(data["latitude"], data["longitude"])   # idempotent
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+    assert v.check_weather_location()["status"] == "pass"
+    before = path.read_text()
+    v.run_fix("weather-round")
+    assert path.read_text() == before
+
+
+def test_weather_location_edge_cases(v):
+    assert v.snap_location(90.0, 180.0)[0] <= 90 and abs(v.snap_location(0.0, 179.99)[1]) <= 180
+    path = homefile(v, ".local/state/omarchy/settings/weather.json", json.dumps({"name": "x"}))
+    assert v.check_weather_location()["status"] == "na"
+    assert v.run_fix("weather-round")["ok"] and json.loads(path.read_text()) == {"name": "x"}
+    path.write_text("{ not json")
+    assert v.check_weather_location()["status"] == "unknown"
+    assert not v.run_fix("weather-round")["ok"] and path.read_text() == "{ not json"
+    path.write_text(json.dumps({"latitude": True, "longitude": float("nan")}))
+    assert v.check_weather_location()["status"] in ("na", "unknown")
+
+
+def test_weather_round_does_not_write_through_a_link(v, tmp_path):
+    victim = put(tmp_path / "victim.json", json.dumps({"latitude": 1.23456, "longitude": 2.34567}))
+    d = Path(v.HOME, ".local/state/omarchy/settings")
+    d.mkdir(parents=True)
+    os.symlink(victim, d / "weather.json")
+    assert not v.run_fix("weather-round")["ok"]
+    assert json.loads(victim.read_text())["latitude"] == 1.23456
+
+
+def test_rootkit_step_is_the_one_the_card_shows(v):
+    assert node_json("M.RKHUNTER_SCRIPT") == v.RKHUNTER_SCRIPT
+    assert v.RKHUNTER_ARGV == [v.PKEXEC, "/usr/bin/bash", "-c", v.RKHUNTER_SCRIPT]
+    assert "--update" not in v.RKHUNTER_SCRIPT and "--versioncheck" not in v.RKHUNTER_SCRIPT
+
+
+def pkexec_ok(v):
+    v.TRUSTED |= {v.ROOT + "/usr/bin/pkexec", v.ROOT + "/usr/bin/bash", v.ROOT + "/usr/bin/rkhunter"}
+    v.COMMANDS[tuple(v.NO_PASSWORD_ARGV)] = (0, "")
+
+
+RK_OUT = """Warning: The command '/usr/bin/egrep' has been replaced by a script: /usr/bin/egrep: a /usr/bin/bash script, ASCII text executable
+Warning: Hidden file found: /etc/.updated: ASCII text
+Warning: The file properties have changed:
+         File: /usr/bin/lsattr
+         Current hash: abc
+Warning: Possible rootkit: Suckit Rootkit
+random noise line
+"""
+
+
+def test_parse_rkhunter_keeps_warnings_with_their_details(v):
+    got = v.parse_rkhunter(RK_OUT)
+    assert len(got) == 4
+    assert got[0]["path"] == "/usr/bin/egrep" and got[1]["path"] == "" and got[2]["path"] == "/usr/bin/lsattr"
+    assert "Current hash: abc" in got[2]["text"] and got[3]["path"] == ""
+    # a path outside the system folders is never checked against a package
+    assert v.parse_rkhunter("Warning: The command '/home/me/bin/x' has been replaced by a script: y")[0]["path"] == ""
+    assert v.parse_rkhunter("") == [] and v.parse_rkhunter("nothing\nto see\n") == []
+    assert len(v.parse_rkhunter("Warning: x\n" * 9000)) <= 400
+
+
+def test_rkhunter_run_explains_only_files_a_package_shipped(v):
+    pkexec_ok(v)
+    script = "#!/bin/sh\nexec grep -E \"$@\"\n"
+    sysfile(v, "/usr/bin/egrep", script)
+    sysfile(v, "/usr/bin/lsattr", "tampered")
+    mtree(v, "grep-3.11-1", {"/usr/bin/egrep": script, "/usr/bin/lsattr": "what the package shipped"})
+    v.COMMANDS[tuple(v.RKHUNTER_ARGV)] = (0, RK_OUT)                     # the script turns rkhunter's exit 1 (warnings) into 0
+    res = v.refresh_due_feeds(full=True)
+    assert "scanned for rootkits" in res["message"].lower()
+    cache = v.feed_cache("rkhunter")
+    assert [w["explained"] for w in cache["warnings"]] == [True, False, False, False]
+    c = v.check_rootkits()
+    assert c["status"] == "warn" and c["weight"] == 2 and "3 warnings" in c["summary"]
+    assert "1 more match" in c["summary"] and "egrep" not in c["detail"]
+
+
+def test_rkhunter_clean_cancelled_and_failed_runs(v):
+    pkexec_ok(v)
+    assert v.check_rootkits()["status"] == "info"
+    v.COMMANDS[tuple(v.RKHUNTER_ARGV)] = (0, "")
+    assert v.refresh_due_feeds(full=True)["ok"]
+    c = v.check_rootkits()
+    assert c["status"] == "pass" and "found nothing" in c["summary"]
+    v.COMMANDS[tuple(v.RKHUNTER_ARGV)] = (126, "")                       # the dialog was cancelled
+    res = v.refresh_due_feeds(full=True)
+    assert "The rootkit scan was skipped: no password was given." in res["message"]
+    assert v.check_rootkits()["status"] == "pass"                        # the last good result is kept
+    v.COMMANDS[tuple(v.RKHUNTER_ARGV)] = (2, "boom")
+    assert "The rootkit scan was skipped: it did not finish." in v.refresh_due_feeds(full=True)["message"]
+
+
+def test_rootkit_scan_runs_only_in_run_all_and_never_in_the_background(v):
+    pkexec_ok(v)
+    calls = []
+    orig = v.run
+    v.run = lambda argv, *a, **k: (calls.append(tuple(argv)) or orig(argv, *a, **k))
+    for kw in ({}, {"daily_only": True}, {"weekly_only": True}, {"scan_only": True}):
+        v.refresh_due_feeds(**kw)
+    assert tuple(v.RKHUNTER_ARGV) not in calls
+    v.refresh_due_feeds(full=True)
+    assert tuple(v.RKHUNTER_ARGV) in calls
+    # root steps come first, the password scan before the rootkit scan
+    v.PROGRESS["on"] = False
+    assert v.run_plan(full=True)[:2] == ["password-check", "rkhunter"]
+    assert "rkhunter" not in v.run_plan(weekly_only=True) and "rkhunter" not in v.run_plan()
+
+
+def test_rootkit_scan_without_rkhunter_offers_the_install(v):
+    c = v.check_rootkits()
+    assert c["status"] == "info" and c["fix"]["action"] == "install-helpers"
+    assert not v.feed_available("rkhunter")
+    assert "rkhunter" in v.missing_helpers()
+
+
+GL_FINDING = {"RuleID": "github-pat", "Description": "x", "StartLine": 7, "File": "{repo}/src/a.txt", "Match": "REDACTED",
+              "Secret": "REDACTED", "Fingerprint": "f"}
+
+
+def gitleaks_fake(v, reports):
+    """A run() that behaves like gitleaks: writes the report it was asked for."""
+    calls = []
+
+    def fake(argv, timeout=8, limit=0, on_line=None, raw=False, env=None, cwd=None):
+        if argv[0] != v.GITLEAKS:
+            return None, ""
+        calls.append((argv, env, cwd))
+        repo = cwd
+        out = argv[argv.index("--report-path") + 1]
+        body = reports(repo)
+        if body is None:
+            return 1, ""
+        Path(out).write_text(body)
+        return 0, ""
+    v.run = fake
+    return calls
+
+
+def test_git_repositories_are_found_without_following_links_or_digging_into_skipped_folders(v, tmp_path):
+    h = Path(v.HOME)
+    for rel in ("code/app/.git", "code/app/node_modules/dep/.git", "work/a/b/lib/.git", ".dotfiles/.git",
+                ".cache/x/.git", ".config/y/.git", "deep/1/2/3/4/5/.git", ".git"):
+        (h / rel).mkdir(parents=True)
+    (h / "elsewhere").mkdir()
+    os.symlink(h / "elsewhere", h / "code" / "link")
+    (tmp_path / "outside" / ".git").mkdir(parents=True)
+    os.symlink(tmp_path / "outside", h / "code" / "outside-link")
+    repos, partial = v.find_git_repos()
+    shown = sorted(r[len(v.HOME) + 1:] for r in repos)
+    assert shown == [".dotfiles", "code/app", "work/a/b/lib"] and partial is False
+    # a repository is not searched further, so its nested repositories are not listed
+    (h / "code/app/sub/.git").mkdir(parents=True)
+    assert "code/app/sub" not in [r[len(v.HOME) + 1:] for r in v.find_git_repos()[0]]
+
+
+def test_gitleaks_scan_reports_where_never_what(v):
+    h = Path(v.HOME)
+    (h / "code/app/.git").mkdir(parents=True)
+    (h / "code/ok/.git").mkdir(parents=True)
+    v.TRUSTED.add(v.ROOT + v.GITLEAKS)
+    assert v.check_git_secrets()["status"] == "info"
+    secret = "ghp_" + "a" * 36
+
+    def reports(repo):
+        if repo.endswith("/app"):
+            f = dict(GL_FINDING, File="src/a.txt", Match=secret, Secret=secret)
+            return json.dumps([f, {"RuleID": "bad rule\n", "StartLine": -4, "File": "../../etc/x\u202e"}, "junk"])
+        return "[]"
+    calls = gitleaks_fake(v, reports)
+    res = v.refresh_due_feeds(weekly_only=True)
+    assert "Scanned your git repositories for secrets" in res["message"]
+    argv, env, cwd = calls[0]
+    # the repository is where gitleaks starts, never an argument (arguments are readable by every account)
+    assert argv[:3] == [v.GITLEAKS, "dir", "."] and cwd.startswith(v.HOME + "/code/")
+    assert not any(a.startswith(v.HOME) and "omarchy-vigil" not in a for a in argv)
+    assert "--redact" in argv and "--exit-code" in argv and argv[argv.index("--max-target-megabytes") + 1] == "5"
+    # the repository's own .gitleaks.toml cannot switch findings off: the config is ours
+    assert env == {"GITLEAKS_CONFIG_TOML": "[extend]\nuseDefault = true\n"} and "-c" not in argv and "--config" not in argv
+    c = v.check_git_secrets()
+    assert c["status"] == "warn" and c["weight"] == 2 and "2 possible secrets" in c["summary"]
+    assert "~/code/app: src/a.txt:7 (github-pat)" in c["detail"]
+    assert secret not in json.dumps(c) and secret not in (Path(v.HOME) / ".local/state/omarchy-vigil/gitleaks.json").read_text()
+    assert "\u202e" not in json.dumps(c, ensure_ascii=False) and "\n(" not in c["detail"]
+    assert not (Path(v.HOME) / ".local/state/omarchy-vigil" / v.GITLEAKS_REPORT).exists()     # the report file is deleted
+    gitleaks_fake(v, lambda repo: "[]")
+    v.refresh_due_feeds(weekly_only=True, )
+    assert v.check_git_secrets()["status"] == "pass"
+
+
+def test_gitleaks_failures_keep_the_last_result_and_never_claim_clean(v):
+    (Path(v.HOME) / "code/app/.git").mkdir(parents=True)
+    v.TRUSTED.add(v.ROOT + v.GITLEAKS)
+    gitleaks_fake(v, lambda repo: None)                                   # gitleaks exits 1
+    res = v.refresh_due_feeds(weekly_only=True)
+    assert "Could not finish the secrets scan of your git repositories" in res["message"]
+    assert v.feed_cache("gitleaks") is None and v.check_git_secrets()["status"] == "info"
+    gitleaks_fake(v, lambda repo: "{ not a report")
+    v.refresh_due_feeds(weekly_only=True)
+    assert v.feed_cache("gitleaks") is None
+
+
+def test_gitleaks_with_no_repositories_is_a_pass_that_says_so(v):
+    v.TRUSTED.add(v.ROOT + v.GITLEAKS)
+    gitleaks_fake(v, lambda repo: "[]")
+    assert v.refresh_due_feeds(weekly_only=True)["ok"]
+    c = v.check_git_secrets()
+    assert c["status"] == "pass" and "No git repositories" in c["summary"]
+
+
+def evil():
+    import pickle
+
+    class Boom(object):
+        def __reduce__(self):
+            return (os.system, ("echo pwned",))
+    return Boom()
+
+
+def torch_zip(path, data_pkl):
+    import zipfile
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("archive/data.pkl", data_pkl)
+        z.writestr("archive/data/0", b"\0" * 64)
+
+
+def test_pickle_scan_finds_imports_without_running_anything(v, tmp_path):
+    import pickle
+    marker = tmp_path / "pwned"
+
+    class Boom(object):
+        def __reduce__(self):
+            return (os.system, ("touch %s" % marker,))
+    for proto in (2, 4, 5):
+        bad = pickle.dumps(Boom(), protocol=proto)
+        assert ("posix", "system") in v.pickle_imports(io_bytes(bad)) or ("os", "system") in v.pickle_imports(io_bytes(bad))
+        dangerous, odd = v.classify_imports(v.pickle_imports(io_bytes(bad)))
+        assert dangerous and not marker.exists()
+    safe = pickle.dumps({"w": [1.0, 2.0], "n": __import__("collections").OrderedDict(a=1)}, protocol=4)
+    assert v.classify_imports(v.pickle_imports(io_bytes(safe))) == ([], [])
+    # a callable named with a memoised string (protocol 4 reuses module names)
+    chained = pickle.dumps([Boom(), Boom()], protocol=4)
+    assert v.classify_imports(v.pickle_imports(io_bytes(chained)))[0]
+    assert v.classify_imports([("builtins", "eval")])[0] and not v.classify_imports([("builtins", "set")])[0]
+    assert v.classify_imports([("?", "?")])[0] and v.classify_imports([("my_lib.models", "Net")]) == ([], ["my_lib.models.Net"])
+
+
+def io_bytes(b):
+    import io
+    return io.BytesIO(b)
+
+
+def test_pickle_scan_is_bounded(v):
+    import io
+    import pickle
+    big = pickle.dumps("x" * 1000, protocol=4)
+    v.MODEL_PICKLE_BYTES = 50
+    with pytest.raises(ValueError):
+        v.pickle_imports(v._CappedReader(io.BytesIO(big), v.MODEL_PICKLE_BYTES))
+    # a claim of a 4 GiB string in a tiny file is refused, not allocated
+    claim = b"\x80\x04\x8d" + (2 ** 33).to_bytes(8, "little") + b"x"
+    with pytest.raises(ValueError):
+        v.pickle_imports(v._CappedReader(io.BytesIO(claim), 1 << 20))
+    with pytest.raises(ValueError):
+        v.pickle_imports(io.BytesIO(b"\x80\x04not really a pickle"))
+
+
+def test_model_scan_walks_home_and_reports_only_dangerous_files(v, tmp_path):
+    import pickle
+    h = Path(v.HOME)
+
+    class Boom(object):
+        def __reduce__(self):
+            return (os.system, ("true",))
+    (h / "models").mkdir()
+    torch_zip(h / "models/evil.pt", pickle.dumps(Boom(), protocol=2))
+    torch_zip(h / "models/fine.pth", pickle.dumps({"a": 1}, protocol=2))
+    (h / "models/raw.pkl").write_bytes(pickle.dumps(Boom(), protocol=4))
+    (h / "models/weights.bin").write_bytes(b"GGUF" + b"\0" * 100)                 # not a pickle
+    (h / "models/data.safetensors").write_bytes(b"{}" + b"\0" * 100)               # never looked at
+    (h / "models/trap.pt").write_bytes(b"PK\x03\x04 not a zip at all")
+    (h / "models/node_modules/x").mkdir(parents=True)
+    torch_zip(h / "models/node_modules/x/skipped.pt", pickle.dumps(Boom(), protocol=2))
+    (h / ".cache/huggingface/hub").mkdir(parents=True)
+    torch_zip(h / ".cache/huggingface/hub/pytorch_model.bin", pickle.dumps(Boom(), protocol=2))
+    (h / ".cache/other").mkdir(parents=True)
+    torch_zip(h / ".cache/other/hidden.pt", pickle.dumps(Boom(), protocol=2))
+    torch_zip(h / "loose.pt", pickle.dumps(Boom(), protocol=2))                      # loose files in ~ are not models
+    os.symlink(h / "models/evil.pt", h / "models/link.pt")
+    assert v.check_model_files()["status"] == "info"
+    assert v.refresh_due_feeds(weekly_only=True)["ok"]
+    c = v.check_model_files()
+    assert c["status"] == "warn" and c["weight"] == 2 and "3 model files" in c["summary"]
+    assert "~/models/evil.pt:" in c["detail"] and "~/models/raw.pkl:" in c["detail"]
+    assert "~/.cache/huggingface/hub/pytorch_model.bin:" in c["detail"]
+    for gone in ("fine.pth", "weights.bin", "skipped.pt", "hidden.pt", "loose.pt", "link.pt", "trap.pt"):
+        assert gone not in c["detail"], gone
+
+
+def test_model_scan_clean_and_odd_classes(v):
+    import pickle
+    h = Path(v.HOME)
+    (h / "m").mkdir()
+    torch_zip(h / "m/a.pt", pickle.dumps({"k": 1}, protocol=2))
+    assert v.refresh_due_feeds(weekly_only=True)["ok"]
+    c = v.check_model_files()
+    assert c["status"] == "pass" and "1 checked" in c["summary"]
+
+
+def test_weekly_check_runs_the_new_scans_in_order_before_the_virus_scan(v, monkeypatch):
+    monkeypatch.setattr(v, "feed_available", lambda n: n in ("firmware", "gitleaks", "model-scan", "virus-scan", "full-scan",
+                                                            "arch-audit", "downloads-scan"))
+    assert v.run_plan(weekly_only=True) == ["firmware", "gitleaks", "model-scan", "signatures", "virus-scan"]
+    assert v.run_plan(full=True)[-5:] == ["firmware", "gitleaks", "model-scan", "signatures", "virus-scan"]
+    assert v.WEEKLY_FEEDS == ("firmware", "gitleaks", "model-scan", "virus-scan")
+
+
+def test_run_card_lines_use_the_names_of_the_last_run_list(v):
+    """What will run, what ran and what is running now read the same: the card's name for each step is
+    ITEM_NAME, the Last run list's."""
+    import subprocess as sp
+    src = [{"id": i, "label": "x", "run": "daily", "date": "", "time": "", "state": "never", "tried": ""}
+           for i in ("pending-updates", "flatpak", "arch-audit", "osv", "aur", "bumblebee", "downloads-scan", "firmware",
+                     "gitleaks", "model-scan", "virus-scan", "password-check", "rkhunter")]
+    out = sp.run(["node", "-e", """
+const M = require(process.argv[1])
+const r = { sources: JSON.parse(process.argv[2]), tools: { pkexec: "/usr/bin" }, signaturesDue: true }
+const ids = ["signatures-update", "password-check", "rkhunter"].concat(M.DAILY_IDS, M.WEEKLY_IDS)
+process.stdout.write(JSON.stringify(M.confirmation("full-scan", "all", r, "/home/a").lines))
+""", str(REPO / "Model.js"), json.dumps(src)], capture_output=True, text=True, check=True).stdout
+    names = [m.group(1) for m in (re.match(r"\d+\. ([^:.]+):", l) for l in json.loads(out)) if m]
+    known = set(v.ITEM_NAME.values()) | {"Virus signatures update"}
+    assert names and all(n in known for n in names), [n for n in names if n not in known]
+    for want in ("Secrets scan of your git repositories", "AI model file scan", "Rootkit scan", "Password scan"):
+        assert want in names
+
+
+def test_omarchy_update_last_run_comes_from_pacmans_log(v):
+    assert v.last_full_update() == ("", "")
+    src = {s["id"]: s for s in v.source_status()}["omarchy-update"]
+    assert src["run"] == "update" and src["state"] == "never" and src["label"] == "Omarchy update"
+    sysfile(v, "/var/log/pacman.log", "[2026-09-01T10:00:00+0000] [PACMAN] starting full system upgrade\n"
+                                      "[2026-10-12T09:41:07+0000] [PACMAN] starting full system upgrade\n"
+                                      "[2026-10-13T18:00:00+0000] [ALPM] installed foo (1-1)\n")
+    assert v.last_full_update() == ("2026-10-12", "09:41")
+    src = {s["id"]: s for s in v.source_status()}["omarchy-update"]
+    assert (src["date"], src["time"]) == ("2026-10-12", "09:41") and src["state"] in ("ok", "stale")
+    assert all(len(s["label"]) <= 40 for s in v.source_status())
+
+
+def test_black_ops_is_gone(v):
+    assert not hasattr(v, "check_black_ops") and "black-ops" not in v.CHECK_HELP
+
+
 # --------------------------------------------------------------------------
 # Clean
 
@@ -538,6 +1007,221 @@ def test_clean_app_cache_keeps_what_is_in_use(v, tmp_path):
     assert not os.path.lexists(link) and outside.read_text() == "keep me"
     assert (cache / "app").exists()                                  # still holds new.bin
     assert v.check_user_cache()["status"] == "pass"
+
+
+def big_caches(v):
+    """A ~/.cache with one folder over the (shrunk) 1 GB line, one under it, and some old files."""
+    v.CACHE_BIG_BYTES = 3_000_000
+    cache = Path(v.HOME, ".cache")
+    big = cache / "huge"
+    put(big / "recent.bin", "x" * 2_000_000)
+    aged(put(big / "sub" / "old.bin", "x" * 2_000_000), 10)
+    put(big / ".hidden", "x" * 10)
+    small = aged(put(cache / "small" / "old.bin", "x" * 2_000_000), 10)
+    return cache, big, small
+
+
+def test_the_line_for_a_big_cache_folder_is_1_gigabyte(v):
+    assert v.CACHE_BIG_BYTES == 1024 ** 3
+
+
+def test_clean_all_and_clear_unused_are_exactly_what_they_were_with_big_folders_present(v):
+    cache, big, small = big_caches(v)
+    c = v.check_user_cache()
+    # the row's numbers count every folder, big ones included, as before
+    assert c["fix"]["action"] == "clean-app-cache" and "not used in the past week" in c["summary"]
+    res = v.run_fix("clean-app-cache")
+    assert res["ok"] and not small.exists()
+    assert (big / "recent.bin").exists() and not (big / "sub" / "old.bin").exists(), "the week-old rule applies to big folders too"
+    assert v.run_fix("clean-user")["ok"]
+
+
+def test_big_cache_folders_are_listed_with_size_and_place_only(v):
+    cache, big, small = big_caches(v)
+    c = v.check_user_cache()
+    assert c["items"] == [{"id": v.item_id("cache", "huge"), "kind": "cache", "kept": False, "ignored": False,
+                           "text": c["items"][0]["text"]}]
+    text = c["items"][0]["text"]
+    assert text.startswith("~/.cache/huge \u00b7 ") and "\n" not in text and "past week" not in text
+    assert "1 folder of" in c["summary"] and "listed below" in c["summary"]
+
+
+def test_a_cache_folder_under_the_line_is_not_listed_and_the_row_is_as_before(v):
+    v.CACHE_BIG_BYTES = 10_000_000
+    cache = Path(v.HOME, ".cache")
+    aged(put(cache / "app" / "old.bin", "x" * 2_000_000), 10)
+    c = v.check_user_cache()
+    assert "items" not in c and "listed below" not in c["summary"] and c["fix"]["action"] == "clean-app-cache"
+
+
+def test_a_row_with_only_in_use_caches_and_a_big_folder_is_information_with_the_list(v):
+    v.CACHE_BIG_BYTES = 1_000_000
+    put(Path(v.HOME, ".cache", "busy", "f"), "x" * 2_000_000)
+    c = v.check_user_cache()
+    assert c["status"] == "info" and len(c["items"]) == 1 and "all of it in use" in c["summary"]
+
+
+def test_ignoring_a_big_folder_works_like_keep(v):
+    cache, big, small = big_caches(v)
+    huge = v.item_id("cache", "huge")
+    res = v.set_kept([huge], True)
+    assert res["ok"] and res["message"] == "Ignoring it. It stays listed, locked at the bottom."
+    c = v.check_user_cache()
+    assert c["items"][0]["kept"] is True and "listed below" not in c["summary"]
+    # an ignored folder cannot be cleared until its lock is clicked
+    res = v.clear_caches([huge])
+    assert not res["ok"] and "is ignored (click its lock first)" in res["message"] and (big / "recent.bin").exists()
+    assert v.set_kept([huge], False)["message"] == "Listing it again."
+    assert v.check_user_cache()["items"][0]["kept"] is False
+    assert v.clear_caches([huge])["ok"] and list(big.iterdir()) == []
+
+
+def test_ignored_folders_go_to_the_bottom_and_ignoring_needs_a_listed_folder(v):
+    v.CACHE_BIG_BYTES = 1_000_000
+    for n, size in (("aa", 3_000_000), ("bb", 2_000_000)):
+        put(Path(v.HOME, ".cache", n, "f"), "x" * size)
+    assert [i["text"][:12] for i in v.check_user_cache()["items"]] == ["~/.cache/aa ", "~/.cache/bb "]
+    v.set_kept([v.item_id("cache", "aa")], True)
+    assert [i["text"][:12] for i in v.check_user_cache()["items"]] == ["~/.cache/bb ", "~/.cache/aa "]
+    res = v.set_kept([v.item_id("cache", "nope")], True)
+    assert not res["ok"]
+    assert v.set_kept([v.item_id("cache", "aa"), v.item_id("cache", "bb")], True)["message"].startswith("Ignoring 2 folders.")
+
+
+def test_ticked_cache_folders_are_emptied_whole_and_the_folder_stays(v, tmp_path):
+    cache, big, small = big_caches(v)
+    outside = put(tmp_path / "outside.bin", "keep me")
+    os.symlink(outside, big / "link")
+    os.symlink(tmp_path, big / "dirlink")
+    other = put(cache / "other" / "f", "x" * 2_000_000)
+    res = v.clear_caches([v.item_id("cache", "huge")])
+    assert res["ok"] and res["message"].startswith("Cleared huge, freed about ")
+    assert big.is_dir() and list(big.iterdir()) == []
+    assert outside.read_text() == "keep me" and tmp_path.exists(), "links are removed, never followed"
+    assert small.exists() and other.exists(), "only the ticked folder"
+    assert "items" not in v.check_user_cache() or v.check_user_cache()["items"] == []
+
+
+def test_clear_caches_refuses_what_is_not_listed_right_now(v):
+    cache, big, small = big_caches(v)
+    res = v.clear_caches([v.item_id("cache", "small"), v.item_id("cache", "nope")])
+    assert res["ok"] is False and res["message"].startswith("Nothing was cleared.") and small.exists()
+    assert (big / "recent.bin").exists()
+    res = v.clear_caches([v.item_id("cache", "huge"), v.item_id("cache", "small")])
+    assert res["ok"] and "Left alone: one folder is no longer on the list" in res["message"] and small.exists()
+    assert list(big.iterdir()) == []
+
+
+def test_clear_caches_will_not_walk_through_a_linked_cache_folder(v, tmp_path):
+    v.CACHE_BIG_BYTES = 3_000_000
+    elsewhere = tmp_path / "elsewhere"
+    put(elsewhere / "a", "x" * 4_000_000)
+    cache = Path(v.HOME, ".cache")
+    cache.mkdir(parents=True)
+    os.symlink(elsewhere, cache / "linked")
+    assert v.check_user_cache().get("items", []) == []              # a link is not a cache folder
+    res = v.clear_caches([v.item_id("cache", "linked")])
+    assert not res["ok"] and (elsewhere / "a").exists()
+
+
+def test_a_linked_cache_folder_is_reported_not_shown_empty(v, tmp_path):
+    """A ~/.cache that is a link: the row says so (na, dimmed, no button) instead of reporting a size
+    no Clear button could ever empty, and the Clear verb refuses in plain words, not a traceback."""
+    elsewhere = tmp_path / "elsewhere"
+    put(elsewhere / "huge" / "f", "x" * 4_000_000)
+    os.symlink(elsewhere, Path(v.HOME, ".cache"))
+    c = v.check_user_cache()
+    assert c["status"] == "na" and c["summary"].startswith("Not measured: ~/.cache is a link"), c
+    assert c["fix"]["kind"] == "none" and not c.get("items")
+    assert v.check_thumbnails()["status"] == "na"
+    res = v.clear_caches([v.item_id("cache", "huge")])
+    assert not res["ok"] and "Left alone" in res["message"] and (elsewhere / "huge" / "f").exists()
+
+
+def test_a_cache_nested_deeper_than_the_stack_still_scans_and_clears(v):
+    """1,200 folders deep: the walk is iterative now, so the check and the Clear button work instead of
+    dying with a RecursionError. Below CACHE_WALK_DEPTH the walk stops, and the row says "at least"."""
+    v.CACHE_BIG_BYTES = 3_000_000
+    big = Path(v.HOME, ".cache", "huge")
+    put(big / "top.bin", "x" * 4_000_000)
+    deep = big
+    for _ in range(1200):
+        deep = deep / "d"                    # short names: the path has to fit in PATH_MAX
+        os.mkdir(deep)                       # os.makedirs is recursive itself
+    put(deep / "bottom.bin", "x")
+    c = v.check_user_cache()
+    assert c["status"] == "info" and c["summary"].startswith("at least ") and len(c["items"]) == 1, c
+    res = v.clear_caches([v.item_id("cache", "huge")])
+    assert res["ok"] and res["message"].startswith("Cleared huge") and not (big / "top.bin").exists()
+    assert (big / "d").is_dir(), "past the walk's depth the folders are left as they are"
+    # Leave nothing behind for pytest's own, recursive cleanup to trip over.
+    os.unlink(deep / "bottom.bin")
+    while deep != big:
+        os.rmdir(deep)
+        deep = deep.parent
+
+
+def test_clear_caches_never_dies_on_a_folder_it_cannot_make_writable(v, monkeypatch):
+    """A folder the helper cannot chmod (a read-only filesystem, say) is named and skipped: the run
+    still answers the panel with JSON, and nothing outside the triggered work is touched."""
+    cache, big, small = big_caches(v)
+
+    def boom(dfd):
+        raise OSError(30, "Read-only file system")
+    monkeypatch.setattr(v, "_own_writable_dir", boom)
+    res = v.clear_caches([v.item_id("cache", "huge")])
+    assert not res["ok"] and "Read-only file system" in res["message"] and (big / "recent.bin").exists()
+
+
+def test_a_subfolder_that_is_not_yours_is_named_and_the_rest_clears(v, monkeypatch):
+    v.CACHE_BIG_BYTES = 3_000_000
+    big = Path(v.HOME, ".cache", "huge")
+    put(big / "top.bin", "x" * 4_000_000)
+    theirs = put(big / "theirs" / "f", "x" * 2_000_000)
+    real, calls = v._own_writable_dir, []
+
+    def first_only(dfd):                     # the folder itself is ours, the subfolder is not
+        calls.append(dfd)
+        return real(dfd) if len(calls) == 1 else False
+    monkeypatch.setattr(v, "_own_writable_dir", first_only)
+    res = v.clear_caches([v.item_id("cache", "huge")])
+    assert res["ok"] and "huge: " in res["message"] and "still there" in res["message"], res
+    assert theirs.exists() and not (big / "top.bin").exists()
+
+
+def test_the_cache_walk_stops_at_its_budget(v):
+    """The Clear walk takes a budget, not the whole folder it was pointed at."""
+    big = Path(v.HOME, ".cache", "huge")
+    for i in range(20):
+        put(big / ("f%02d" % i), "x")
+    dfd = v._open_home_dir([".cache", "huge"])
+    try:
+        n = v._clear_dir_contents(dfd, [5, time.monotonic() + 100])
+    finally:
+        os.close(dfd)
+    assert n == 5 and len(list(big.iterdir())) == 15
+
+
+def test_a_cache_folder_with_thousands_of_entries_clears_in_one_go(v):
+    v.CACHE_BIG_BYTES = 3_000_000
+    big = Path(v.HOME, ".cache", "huge")
+    put(big / "top.bin", "x" * 4_000_000)
+    many = big / "many"
+    many.mkdir()
+    for i in range(5000):
+        (many / ("f%05d" % i)).write_text("x")
+    res = v.clear_caches([v.item_id("cache", "huge")])
+    assert res["ok"] and not many.exists() and not (big / "top.bin").exists()
+
+
+def test_clear_caches_verb_takes_only_distinct_keyed_ids(v, capsys):
+    cache, big, small = big_caches(v)
+    good = v.item_id("cache", "huge")
+    assert v.main(["vigil", "clear-caches", good]) == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True and list(big.iterdir()) == []
+    for bad in (["clear-caches"], ["clear-caches", "huge"], ["clear-caches", good, good], ["clear-caches", "../" + good[:13]],
+                ["clear-caches", good.upper()]):
+        assert v.main(["vigil"] + bad) == 2, bad
 
 
 def test_clean_user_runs_every_no_root_cleanup(v):
@@ -1451,7 +2135,8 @@ def test_due_to_the_minute(v):
 
 def test_full_scan_with_nothing_installed_still_checks(v):
     res = v.refresh_due_feeds(full=True)
-    assert res["ok"] and res["message"].startswith("Nothing to run yet")
+    # No tool is installed, but Vigil reads AI model files itself.
+    assert res["ok"] and res["message"].startswith("Checked your AI model files.")
 
 
 def test_full_scan_message_separates_what_ran_from_findings(v):
@@ -1460,7 +2145,8 @@ def test_full_scan_message_separates_what_ran_from_findings(v):
     v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (1, ARCH_AUDIT_JSON)
     clamscan_ok(v, os.path.join(v.HOME, "x.exe") + ": Win.Test.EICAR_HDB-1 FOUND\n", 1)
     msg = v.refresh_due_feeds(full=True)["message"]
-    assert msg.startswith("Checked your packages against the Arch security list and scanned your home folder.")
+    assert msg.startswith("Checked your packages against the Arch security list, checked your AI model files and "
+                          "scanned your home folder.")
     assert "On this machine: updating would fix 2 known vulnerabilities; 1 infected file in your home folder." in msg
     assert v.run_fix("arch-audit-refresh")["message"] == (
         "Checked your packages against the newest Arch security list. Updating would fix 2 known "
@@ -1482,15 +2168,17 @@ def test_cli_refresh_feeds_arguments():
 # When each scan last ran and each source last updated, shown on the Overview
 
 def test_last_run_list_by_run_with_times(v):
-    assert [s["id"] for s in v.source_status()] == ["password-check"]       # always offered
+    assert [s["id"] for s in v.source_status()] == ["model-scan", "password-check", "omarchy-update"]   # always offered
     v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan", v.ROOT + "/usr/bin/arch-audit"}
     got = [(s["id"], s["label"], s["run"], s["state"]) for s in v.source_status()]
     # Each scan and lookup, in the order its run does it: no rows for the lists
     # themselves, since every scan gets its list right before it runs.
     assert got == [("arch-audit", "Arch security scan", "daily", "never"),
                    ("downloads-scan", "Virus scan of ~/Downloads", "daily", "never"),
+                   ("model-scan", "AI model file scan", "weekly", "never"),
                    ("virus-scan", "Virus scan of ~", "weekly", "never"),
-                   ("password-check", "Password scan", "all", "never")]
+                   ("password-check", "Password scan", "all", "never"),
+                   ("omarchy-update", "Omarchy update", "update", "never")]
     assert all(len(s["label"]) <= 40 and s["note"] == "" for s in v.source_status())   # the panel's limit
     v.COMMANDS[("/usr/bin/arch-audit", "--json", "--upgradable")] = (0, '{"avgs": []}')
     v.run_fix("arch-audit-refresh")
@@ -1665,7 +2353,7 @@ def test_password_check_uses_omarchys_password_dialog(v):
     assert v.NO_PASSWORD_ARGV[3] == "/usr/bin/awk -F: '$2 == \"\" { print $1 }' /etc/shadow"
     v.COMMANDS[tuple(v.NO_PASSWORD_ARGV)] = (0, "ghost\n../evil\n")
     res = v.refresh_due_feeds(full=True)
-    assert res["message"].startswith("Checked for accounts without a password.")
+    assert res["message"].startswith("Checked for accounts without a password and checked your AI model files.")
     assert v.no_password_scan()[1] == ["ghost"]
     c = v.check_accounts()
     assert c["status"] == "fail" and "No password: ghost" in c["detail"]
@@ -1684,7 +2372,7 @@ def test_weekly_run_never_asks_for_a_password(v):
 
 def test_full_scan_says_when_the_password_check_cannot_run(v):
     res = v.refresh_due_feeds(full=True)                                  # no pkexec here
-    assert res["message"].endswith("The password scan could not run: pkexec is missing.")
+    assert "The password scan could not run: pkexec is missing." in res["message"]
 
 
 def test_remove_secret_lines(v):
@@ -1776,11 +2464,11 @@ def test_signature_update_wakes_clamavs_service_and_explains_failures(v):
 
 
 def test_missing_helpers_listed_in_order(v):
-    assert v.missing_helpers() == ["clamav", "arch-audit", "osv-scanner", "fwupd", "clamui", "bumblebee"]
+    assert v.missing_helpers() == ["clamav", "arch-audit", "osv-scanner", "fwupd", "clamui", "bumblebee", "gitleaks", "rkhunter"]
     v.TRUSTED |= {v.ROOT + "/usr/bin/clamscan", v.ROOT + "/usr/bin/freshclam", v.ROOT + "/usr/bin/arch-audit",
                   v.ROOT + "/usr/bin/fwupdmgr"}
-    assert v.missing_helpers() == ["osv-scanner", "clamui", "bumblebee"]
-    assert v.audit(peek=True)["missing"] == ["osv-scanner", "clamui", "bumblebee"]
+    assert v.missing_helpers() == ["osv-scanner", "clamui", "bumblebee", "gitleaks", "rkhunter"]
+    assert v.audit(peek=True)["missing"] == ["osv-scanner", "clamui", "bumblebee", "gitleaks", "rkhunter"]
 
 
 # --------------------------------------------------------------------------

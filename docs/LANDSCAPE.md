@@ -15,7 +15,8 @@ the specialised plugins where they go deeper.
 
 | Plugin | What it does | How Vigil relates |
 |---|---|---|
-| [Black Ops](https://github.com/brightwalker25/omarchy-black-ops) (`brightwalker25.black-ops`) | One switch for ~24 privacy protections in Omarchy and common apps: telemetry hosts in `/etc/hosts`, DNS fallback, MAC address and hostname, Chromium policy, connectivity check, Avahi, Bluetooth pairing, opt-out variables, a watchdog that re-checks every 10 minutes, and a root helper with fixed verbs. Very thorough, well tested. | Vigil covers the overlapping basics (DNS fallback, MAC, connectivity, Avahi, opt-out variables) so a newcomer gets them from one place, detects Black Ops, and leaves telemetry blocking to it. Phase 5 considers either porting more of its protections (MIT) or reading its status through its `rows.d` contract. |
+| [Black Ops](https://github.com/brightwalker25/omarchy-black-ops) (`brightwalker25.black-ops`) | One switch for ~24 privacy protections in Omarchy and common apps: telemetry hosts in `/etc/hosts`, DNS fallback, MAC address and hostname, Chromium policy, connectivity check, Avahi, Bluetooth pairing, opt-out variables, a watchdog that re-checks every 10 minutes, optional listen and watch modes, and a root helper with fixed verbs. Very thorough, well tested. | Since 0.31 Vigil no longer detects it or leaves telemetry to it. It carries the settings over as buttons you press once (telemetry hosts, Chromium policy, agent and developer-tool opt-out variables, the weather location, plus the DNS, MAC, connectivity and Avahi rows it already had), with Undo and no watchdog, listener or service. Left out because they need something running or edit another program's files: the Bluetooth pairing guard, web app profiles, the Agents panel rows, Neovim and Proton VPN settings, the LAN route, listen and watch modes. Vigil recognises what Black Ops set by reading the files, so the two can coexist; use one. |
+| [omarchy-security-scan](https://github.com/brightwalker25/omarchy-security-scan) (`brightwalker25.security-scan`) | Six scans on systemd timers (arch-audit, AIDE, picklescan for AI models, gitleaks, rkhunter, Lynis), a risk register and a weekly HTML report; installed by a root installer. | Vigil took the ideas that fit its rules and wrote them again: gitleaks weekly (a repository cannot switch its own findings off), rkhunter in Run all only (with the pacman check that explains the usual false alarms), and a pickle reader of its own for AI model files, with no PyPI dependency. It runs no timers and installs no root units; AIDE, Lynis, the risk register and the HTML report were left out (see the roadmap). |
 | [Bumblebee](https://github.com/duketopceo/omarchy-bumblebee) (`io.github.duketopceo.bumblebee`) | Supply-chain radar: wraps Perplexity's `bumblebee` binary to match lockfiles, packages, extensions and MCP configs against a catalog of known-compromised versions. | Vigil now runs Perplexity's [Bumblebee](https://github.com/perplexityai/bumblebee) directly: it installs Bumblebee 0.1.2, the version it was reviewed with, only if it matches the SHA-256 written in Vigil's code, and downloads Perplexity's newest list right before each daily scan, so this wrapper is no longer needed. |
 | [Security Scan](https://github.com/Percius04/security-scan) (`io.github.elynch303.security-scan`) | Badge for scheduled AUR-Malware and bumblebee scans, a persistence heuristic for autostart/units/crontab, dismissals and history. | Vigil's Startup files check generalises its persistence heuristic (more locations, more patterns) and needs no install step or timer. AUR-Malware integration is deferred: it is a third-party script cloned from a fork, which the marketplace treats as unpinned remote code. |
 | [SysCare](https://github.com/cytracon/omarchy-syscare) (`io.github.cytracon.syscare`) | Bar front-end for the SysCare GTK app: CPU, memory, disk, updates, and a safe user-cache clean. | Vigil's Care tab covers the security-relevant part (thumbnails, trash, unused application caches, package cache, logs, and, ticked item by item, orphaned packages to remove or keep and data left behind by removed apps to trash or keep) without needing a separate app. System monitoring stays out of scope. |
@@ -60,15 +61,18 @@ rather than rebuilding them:
   for Vigil too: read what a change does before you apply it, which is why
   every Vigil fix shows its commands first.
 - General Linux tools Vigil drives rather than reimplements: ClamAV,
-  arch-audit and osv-scanner, all in the Arch repositories. Rootkit Hunter
-  was dropped in 0.12 (last release 2018, many false alarms on Arch) and
-  Lynis in 0.13: the few of its checks that help a newcomer are simple
+  arch-audit, osv-scanner and gitleaks, all in the Arch repositories. Rootkit
+  Hunter was dropped in 0.12 and came back in 0.31, for Run all only, with
+  warnings about package-owned programs explained away by pacman's own
+  records. Lynis was dropped in 0.13: the few of its checks that help a newcomer are simple
   enough for Vigil to do itself, better suited to Arch.
 
 ## What Omarchy already ships
 
 Recent Omarchy has its own security commands, which Vigil surfaces rather
-than duplicates: `omarchy-setup-security-fido2`, `-fingerprint`, `-sshd`,
-`-ssh-agent`, `omarchy-sudo-passwordless` and
-`omarchy-remove-security-sudoless-docker`. Omarchy also configures ufw
-(deny incoming, LocalSend allowed) and a 10-attempt login lockout at install.
+than duplicates: `omarchy-setup-security-fido2` and
+`omarchy-setup-security-fingerprint` (and their remove variants),
+`omarchy-sudo-passwordless` and `omarchy-remove-security-sudoless-docker`.
+Vigil hardens sshd itself, with its own drop-in (`sshd-harden`). Omarchy also
+configures ufw (deny incoming, LocalSend allowed) and a 10-attempt login
+lockout at install.

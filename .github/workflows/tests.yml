@@ -11,7 +11,9 @@
 #   runs with this repository's secrets (it has none) or a write token.
 # - The only installs are pytest and its three dependencies, pinned by version
 #   and SHA-256 in .github/ci-requirements.txt (pip --require-hashes), wheels
-#   only, so nothing is built or run from a source package.
+#   only, so nothing is built or run from a source package. The syntax step
+#   before it uses only the runner's own python3 and node; qmllint is skipped
+#   there and used when a developer has it (tests/lint.sh).
 # - Values from the event reach the shell only through environment
 #   variables, never pasted into a script.
 name: Tests
@@ -42,6 +44,9 @@ jobs:
           git fetch -q --depth=1 --no-tags "https://github.com/$REPO" "$SHA"
           git checkout -q FETCH_HEAD
           git log -1 --format='Testing %H'
+
+      - name: Syntax (helper, model, panel) without extra packages
+        run: tests/lint.sh
 
       - name: Install pytest, pinned by hash
         run: |

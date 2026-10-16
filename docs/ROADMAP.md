@@ -8,7 +8,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 | Harden | Can someone get in? | Omarchy's own security commands |
 | Detect | Is something bad already here? | ClamUI for virus scanning and quarantine |
 | Supply | Can I trust what I installed? | Perplexity's Bumblebee for known-compromised components |
-| Privacy | What am I leaking? | Black Ops for telemetry blocking |
+| Privacy | What am I leaking? | Nobody: Vigil blocks telemetry itself, once, with settings (since 0.31) |
 | Care | Is the system tidy and recoverable? | pacman's own tools (paccache, pacman -Rns) and Omarchy's updater |
 
 ## Decisions
@@ -20,9 +20,12 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
   Only Omarchy's interactive tools (and choosing an SSH passphrase) still
   use a terminal. (Until 0.15 every root step ran in a visible terminal;
   closing the panel to type in it got in the way.)
-- **Hand off rather than rebuild.** Where a maintained tool already does the
-  job well (ClamUI, Bumblebee, Black Ops, Omarchy's own commands), Vigil
-  shows its status and opens it. It does not copy it.
+- **Hand off rather than rebuild, unless the job is only settings.** Where a
+  maintained program already does the job well (ClamUI, Bumblebee, Omarchy's
+  own commands), Vigil shows its status and opens it. It does not copy it.
+  Where the job is a handful of settings a button can write and a check can
+  read back (telemetry blocking, which Vigil used to leave to Black Ops), Vigil
+  does it itself in 0.31, with no listener, watchdog or service.
 - **Maintained sources only.** Vigil keeps no threat lists of its own. It
   checks against what the Arch security team, OSV.dev and the OpenSSF,
   ClamAV, Bumblebee and the AUR publish, fetched right before each scan in
@@ -103,7 +106,8 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 - [x] Weekly refresh of all three (`autoUpdate`, on by default), with a
       retry after a day on failure; ClamAV signatures through ClamAV's own
       `clamav-freshclam` service, turned on when Vigil installs ClamAV or
-      ClamUI; rkhunter data updated before each run.
+      ClamUI; rkhunter run as it is installed, with its own data never
+      updated and no network.
 - [x] False-alarm pass: file changes that match what a package shipped
       (pacman's mtree records) and system users added by packages are not
       reported; `/etc/hosts` is no longer watched; only changes to who can log
@@ -112,7 +116,50 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
       are information. Disk encryption, unfixable without a reinstall, is a
       warning that can be marked as reviewed.
 
-## 0.30.0 (this release): lists you tick, keyed ids, and a clearer Overview
+## 0.31.0 (this release): the update in Run all, telemetry done in Vigil, three new scans
+
+- [x] **Omarchy Update button** on the Overview, under the run buttons:
+      opens a terminal and runs Omarchy's own `omarchy-update` (system
+      packages, AUR packages, mise tools and the rest), on the usual card
+      with the exact script. Separate from the System updates row's **Update
+      now**, whose lookup covers pacman's waiting updates only. A last run
+      (from pacman's log) shows beside the button and in the Last run list.
+      It is not part of Run all: an earlier build that ran it inside Run all,
+      holding back its reboot question, was dropped as clunky.
+- [x] **Big cache folders on the Application caches row.** Folders directly
+      in `~/.cache` of 1 GB or more are listed (place and size) as a
+      checklist: tick and **Clear selected** empties each ticked folder
+      whole, or **Ignore** a folder to keep it (Keep under another name).
+      Clean all and Clear unused are unchanged: they still clear only files
+      unused for a week, in every folder.
+- [x] **Black Ops is no longer detected or handed anything.** Its protections
+      are written again as Vigil rows with their own buttons and Undo, and no
+      listener, watchdog or service: AI agent telemetry (Claude Code, pi,
+      Gemini CLI variables), telemetry hosts in `/etc/hosts`, Chromium's
+      privacy policy, the weather location rounded, a longer opt-out list
+      (Deno, Terraform, vcpkg, onnxruntime, gh, mise). The Bluetooth pairing
+      guard (it needs a login service), web app profiles, the Agents panel
+      rows, the Neovim and Proton VPN settings and the LAN discovery route
+      are not ported: each edits another program's files or needs something
+      running, which Vigil does not do.
+- [x] **Secrets in your git repositories**: gitleaks, in the weekly check,
+      as you. Redacted by gitleaks, so a secret never reaches Vigil; a
+      repository cannot switch its own findings off.
+- [x] **Rootkit scan**: rkhunter, in Run all only, behind your password,
+      with no network. Warnings about programs that are byte for byte what
+      a package shipped are explained and not counted. (Not suggested since
+      0.12; back in 0.31 because Run all is a button you press.)
+- [x] **AI model files that run code**: Vigil reads pickle model files'
+      instructions itself (Python's disassembler, never executing, size and
+      time capped) in the weekly check. From omarchy-security-scan's
+      picklescan idea, with no PyPI dependency.
+- [x] Install now also offers gitleaks and rkhunter.
+- Looked at and left out of omarchy-security-scan: AIDE (Vigil's file
+      change check and pacman verification already cover it, and it is from
+      the AUR), Lynis (retired in 0.13), a hand-written risk register, a
+      weekly HTML report, and systemd timers (Vigil installs none).
+
+## 0.30.0: lists you tick, keyed ids, and a clearer Overview
 
 - [x] **Leftover app data** on the Care tab: settings and data in
       `~/.config`, `~/.local/share`, `~/.local/state` and the dot-folders
@@ -490,7 +537,7 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 - [x] New: **Restart after updates**, when a newer kernel is installed than
       the one running.
 - [x] No longer suggested, because a newcomer gains too little or risks too
-      much: Rootkit Hunter (last released 2018, many false alarms on Arch),
+      much: Rootkit Hunter (brought back in 0.31, for Run all),
       setting up Secure Boot, and turning off rarely used network protocols
       (still shown, with Undo, where an earlier Vigil turned them off).
 
@@ -568,7 +615,6 @@ and osv-scanner is in Arch's `extra` repository.
 
 ## Phase 5: privacy and recovery
 
-- Black Ops status through its `rows.d` contract when installed.
 - Browser hardening checks for Chromium and Firefox profiles.
 - Snapshot and backup status (`omarchy-snapshot`, recent backups, whether
   they are encrypted), and a short "what to do if Vigil finds something"
