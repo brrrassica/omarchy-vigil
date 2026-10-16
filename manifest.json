@@ -51,7 +51,7 @@
         "type": "boolean",
         "label": "Notify about new findings",
         "defaultValue": true,
-        "description": "Send one desktop notification when a check that was fine starts failing. The notification only says how many; details stay in the panel. Also one a day, in fixed words, while ClamAV's virus signatures are over two days old, pointing to Run all. A weekly check or Run all you start also says when it finishes."
+        "description": "Send one desktop notification when a check that was fine starts failing or warning (checks with no weight never notify). The notification only says how many; details stay in the panel. Also one a day, in fixed words, while ClamAV's virus signatures are over two days old, pointing to Run all. A weekly check or Run all you start also says when it finishes."
       },
       {
         "key": "autoUpdate",

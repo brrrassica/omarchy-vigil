@@ -189,3 +189,41 @@ def test_docs_name_the_root_steps_and_the_update():
     assert "rkhunter --check --sk --nocolors" in model and "GITLEAKS_CONFIG_TOML" in model
     readme = (REPO / "README.md").read_text()
     assert "**Omarchy Update** (under the run buttons)" in readme and "Run all does not update the system" in readme
+
+
+def test_docs_and_the_code_agree_on_updates_installs_and_warnings():
+    """Drift findings a review caught once: docs saying Run all updates the system, an Install list
+    missing two packages, Run all's root steps missing one, and a notification described as
+    failure-only. Each is pinned here so it cannot come back quietly."""
+    model = (REPO / "docs" / "SECURITY-MODEL.md").read_text()
+    readme = (REPO / "README.md").read_text()
+    helper = (REPO / "bin" / "vigil").read_text()
+    model_js = (REPO / "Model.js").read_text()
+    # Run all never runs Omarchy's updater; the Omarchy Update button and Update now do.
+    assert "Run all also runs Omarchy's own updater" not in model
+    assert "Run all never runs Omarchy's own updater" in model
+    assert "Run all does not update the system" in readme
+    # The Install list in both docs names every package the install script installs.
+    named = re.search(r"Technical: pacman -S --needed ([^,]+)", model_js).group(1).split()
+    assert named == ["clamav", "clamui", "arch-audit", "osv-scanner", "fwupd", "gitleaks", "rkhunter"]
+    for name in named:
+        assert name in model.lower(), name
+        assert name in readme.lower(), name
+    # Run all's root steps, as the card lists them and as the docs describe them.
+    assert "only Run all has any" in model and "the rootkit scan, when rkhunter is installed" in model
+    assert 'hasSource(report, "rkhunter")' in model_js and "the rootkit scan (rkhunter" in model_js
+    # A notification follows a warning too, not only a failure, and the docs say so.
+    assert 'c["status"] in ("fail", "warn") and c["weight"] > 0' in helper
+    assert "starts failing or warning" in readme
+    assert "starts failing or warning" in (REPO / "manifest.json").read_text()
+    # The Omarchy commands the landscape names are the ones Vigil really surfaces.
+    landscape = (REPO / "docs" / "LANDSCAPE.md").read_text()
+    for gone in ("`-sshd`", "`-ssh-agent`"):
+        assert gone not in landscape, gone
+    for name in ("omarchy-setup-security-fido2", "omarchy-setup-security-fingerprint",
+                 "omarchy-sudo-passwordless", "omarchy-remove-security-sudoless-docker"):
+        assert name in landscape and name in model_js, name
+    # rkhunter runs as it is installed; nothing updates its data (the roadmap said otherwise once).
+    roadmap = (REPO / "docs" / "ROADMAP.md").read_text()
+    assert "rkhunter data updated before each run" not in roadmap
+    assert "its own data never" in roadmap and "It never updates rkhunter's data" in model

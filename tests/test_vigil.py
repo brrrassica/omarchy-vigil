@@ -1124,6 +1124,96 @@ def test_clear_caches_will_not_walk_through_a_linked_cache_folder(v, tmp_path):
     assert not res["ok"] and (elsewhere / "a").exists()
 
 
+def test_a_linked_cache_folder_is_reported_not_shown_empty(v, tmp_path):
+    """A ~/.cache that is a link: the row says so (na, dimmed, no button) instead of reporting a size
+    no Clear button could ever empty, and the Clear verb refuses in plain words, not a traceback."""
+    elsewhere = tmp_path / "elsewhere"
+    put(elsewhere / "huge" / "f", "x" * 4_000_000)
+    os.symlink(elsewhere, Path(v.HOME, ".cache"))
+    c = v.check_user_cache()
+    assert c["status"] == "na" and c["summary"].startswith("Not measured: ~/.cache is a link"), c
+    assert c["fix"]["kind"] == "none" and not c.get("items")
+    assert v.check_thumbnails()["status"] == "na"
+    res = v.clear_caches([v.item_id("cache", "huge")])
+    assert not res["ok"] and "Left alone" in res["message"] and (elsewhere / "huge" / "f").exists()
+
+
+def test_a_cache_nested_deeper_than_the_stack_still_scans_and_clears(v):
+    """1,200 folders deep: the walk is iterative now, so the check and the Clear button work instead of
+    dying with a RecursionError. Below CACHE_WALK_DEPTH the walk stops, and the row says "at least"."""
+    v.CACHE_BIG_BYTES = 3_000_000
+    big = Path(v.HOME, ".cache", "huge")
+    put(big / "top.bin", "x" * 4_000_000)
+    deep = big
+    for _ in range(1200):
+        deep = deep / "d"                    # short names: the path has to fit in PATH_MAX
+        os.mkdir(deep)                       # os.makedirs is recursive itself
+    put(deep / "bottom.bin", "x")
+    c = v.check_user_cache()
+    assert c["status"] == "info" and c["summary"].startswith("at least ") and len(c["items"]) == 1, c
+    res = v.clear_caches([v.item_id("cache", "huge")])
+    assert res["ok"] and res["message"].startswith("Cleared huge") and not (big / "top.bin").exists()
+    assert (big / "d").is_dir(), "past the walk's depth the folders are left as they are"
+    # Leave nothing behind for pytest's own, recursive cleanup to trip over.
+    os.unlink(deep / "bottom.bin")
+    while deep != big:
+        os.rmdir(deep)
+        deep = deep.parent
+
+
+def test_clear_caches_never_dies_on_a_folder_it_cannot_make_writable(v, monkeypatch):
+    """A folder the helper cannot chmod (a read-only filesystem, say) is named and skipped: the run
+    still answers the panel with JSON, and nothing outside the triggered work is touched."""
+    cache, big, small = big_caches(v)
+
+    def boom(dfd):
+        raise OSError(30, "Read-only file system")
+    monkeypatch.setattr(v, "_own_writable_dir", boom)
+    res = v.clear_caches([v.item_id("cache", "huge")])
+    assert not res["ok"] and "Read-only file system" in res["message"] and (big / "recent.bin").exists()
+
+
+def test_a_subfolder_that_is_not_yours_is_named_and_the_rest_clears(v, monkeypatch):
+    v.CACHE_BIG_BYTES = 3_000_000
+    big = Path(v.HOME, ".cache", "huge")
+    put(big / "top.bin", "x" * 4_000_000)
+    theirs = put(big / "theirs" / "f", "x" * 2_000_000)
+    real, calls = v._own_writable_dir, []
+
+    def first_only(dfd):                     # the folder itself is ours, the subfolder is not
+        calls.append(dfd)
+        return real(dfd) if len(calls) == 1 else False
+    monkeypatch.setattr(v, "_own_writable_dir", first_only)
+    res = v.clear_caches([v.item_id("cache", "huge")])
+    assert res["ok"] and "huge: " in res["message"] and "still there" in res["message"], res
+    assert theirs.exists() and not (big / "top.bin").exists()
+
+
+def test_the_cache_walk_stops_at_its_budget(v):
+    """The Clear walk takes a budget, not the whole folder it was pointed at."""
+    big = Path(v.HOME, ".cache", "huge")
+    for i in range(20):
+        put(big / ("f%02d" % i), "x")
+    dfd = v._open_home_dir([".cache", "huge"])
+    try:
+        n = v._clear_dir_contents(dfd, [5, time.monotonic() + 100])
+    finally:
+        os.close(dfd)
+    assert n == 5 and len(list(big.iterdir())) == 15
+
+
+def test_a_cache_folder_with_thousands_of_entries_clears_in_one_go(v):
+    v.CACHE_BIG_BYTES = 3_000_000
+    big = Path(v.HOME, ".cache", "huge")
+    put(big / "top.bin", "x" * 4_000_000)
+    many = big / "many"
+    many.mkdir()
+    for i in range(5000):
+        (many / ("f%05d" % i)).write_text("x")
+    res = v.clear_caches([v.item_id("cache", "huge")])
+    assert res["ok"] and not many.exists() and not (big / "top.bin").exists()
+
+
 def test_clear_caches_verb_takes_only_distinct_keyed_ids(v, capsys):
     cache, big, small = big_caches(v)
     good = v.item_id("cache", "huge")

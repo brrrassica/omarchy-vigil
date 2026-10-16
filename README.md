@@ -121,7 +121,7 @@ current (see below).
 |---|---|---|
 | **Daily check** | Looks up waiting system, Omarchy and Flatpak updates. Then: the **Arch security scan** (arch-audit downloads the Arch security team's list and compares your packages with it), the **OSV malware scan** (osv-scanner checks your AUR build folders and global npm, Bun, mise and pnpm installs against OSV.dev as it runs), the **AUR status lookup**, the **Bumblebee list** download followed by the **Bumblebee scan**, and the **Virus signatures** check followed by the **virus scan of what is new in Downloads** | once a day, in the background, at low priority |
 | **Weekly check** | The firmware lookup (fwupd fetches LVFS's list first), the **secrets scan of your git repositories** (gitleaks), the **AI model file scan**, then the **Virus signatures** check followed by the **virus scan of your whole home folder** | once a week, in the background, at low priority |
-| Omarchy update (`omarchy-update`) | | only when you press **Omarchy Update**, in a terminal |
+| Omarchy update (`omarchy-update`) | | only when you press **Omarchy Update**, or **Update now** on the System updates row, in a terminal |
 | Password scan (accounts without a password) and rootkit scan (rkhunter) | | only when you press **Run all**, since they need your password |
 | Cleaning (Care) | | only when you ask; Vigil only measures sizes by itself |
 
@@ -316,7 +316,7 @@ settings:
 | Key | Default | Meaning |
 |---|---|---|
 | `refreshMinutes` | `30` | How often to read your settings and files again in the background (5 to 1440). |
-| `notifyOnNew` | `true` | One desktop notification when a check that was fine starts failing. It only says how many. Also one a day, in fixed words, while ClamAV's virus signatures are over two days old. (A weekly check or Run all you start also says when it finishes, whatever this is set to.) |
+| `notifyOnNew` | `true` | One desktop notification when a check that was fine starts failing or warning (checks with no weight never notify). It only says how many. Also one a day, in fixed words, while ClamAV's virus signatures are over two days old. (A weekly check or Run all you start also says when it finishes, whatever this is set to.) |
 | `autoUpdate` | `true` | Run the daily check and the weekly check by themselves (see [When Vigil runs what](#when-vigil-runs-what) and [Where the data comes from](#where-the-data-comes-from)). Off means they run only when you press a Run, Scan now or Look up now button. |
 
 ## What Vigil checks
@@ -447,6 +447,9 @@ before, and need no ticking. What the list adds is your own choice: tick the
 folders you want and press **Clear selected** (there is no "all"). That deletes
 **everything inside** each ticked folder, in use or not, for good (the folder
 itself stays), so close the app first; the card lists each folder and says so.
+Each folder is walked for up to 100 seconds, two million entries and 128
+folders deep, and anything of a megabyte or more left after that is named in
+the answer.
 **Ignore** a folder you want to keep: it stays listed, locked at the bottom,
 and stops being pointed out in the row's summary (click the lock to list it
 again). Links are removed, never followed, and the helper checks again that
@@ -531,9 +534,13 @@ The panel always says which kind an action is:
 2. **Helper actions** run `bin/vigil fix <action>` as you, never as root:
    making `~/.ssh`, `~/.gnupg` and credential files private, the opt-out
    file, accepting file changes, removing leaked keys from shell history,
-   the thumbnail cache, the trash, unused application caches, big cache folders you tick, and the Scan
-   now / Look up now buttons. Each is a fixed action name; nothing from a
-   file or from the report reaches it. Keeping an item of any list, moving
+   the thumbnail cache, the trash, unused application caches, big cache
+   folders you tick, and the Scan now and Look up now buttons. (The one
+   exception is **Scan now** on Infected files, which the panel runs like a
+   weekly scan, with progress, because a scan of the whole home folder takes
+   a long time; the same action is still `vigil fix virus-scan-now`.) Each
+   is a fixed action name; nothing from a file or from the report reaches
+   it. Keeping an item of any list, moving
    leftover app data to the trash and marking false positives work the same
    way, named only by ids the helper made (`vigil keep|unkeep <id>...`,
    `vigil trash <id>...`, `vigil ignore|unignore <id>...`); Mark as
@@ -781,11 +788,15 @@ remove them:
 ```sh
 python3 -m pytest tests -q          # helper checks, fixes, and marketplace rules
 node --test tests/*.test.mjs        # Model.js validation and terminal scripts
+tests/lint.sh                       # syntax: the helper, Model.js, and Panel.qml where qmllint is
 omarchy plugin validate .
 ```
 
-The QML cannot be checked outside Omarchy: it imports `qs.Commons` and
-`qs.Ui`, which come from the running shell.
+The QML cannot be run outside Omarchy: it imports `qs.Commons` and `qs.Ui`,
+which come from the running shell. Qt 6's `qmllint` (`/usr/lib/qt6/bin/qmllint`
+on Omarchy, which `tests/lint.sh` finds; the Qt 5 one in `/usr/bin` cannot read
+Qt 6 QML) still checks `Panel.qml` for syntax errors, and reports the shell's
+own types as unresolved, which is expected.
 
 The same tests run on every push to `master` and every pull request, in a
 locked-down GitHub Actions job (no token permissions, no third-party

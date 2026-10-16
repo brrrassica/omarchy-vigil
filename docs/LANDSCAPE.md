@@ -70,7 +70,9 @@ rather than rebuilding them:
 ## What Omarchy already ships
 
 Recent Omarchy has its own security commands, which Vigil surfaces rather
-than duplicates: `omarchy-setup-security-fido2`, `-fingerprint`, `-sshd`,
-`-ssh-agent`, `omarchy-sudo-passwordless` and
-`omarchy-remove-security-sudoless-docker`. Omarchy also configures ufw
-(deny incoming, LocalSend allowed) and a 10-attempt login lockout at install.
+than duplicates: `omarchy-setup-security-fido2` and
+`omarchy-setup-security-fingerprint` (and their remove variants),
+`omarchy-sudo-passwordless` and `omarchy-remove-security-sudoless-docker`.
+Vigil hardens sshd itself, with its own drop-in (`sshd-harden`). Omarchy also
+configures ufw (deny incoming, LocalSend allowed) and a 10-attempt login
+lockout at install.

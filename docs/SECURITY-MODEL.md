@@ -99,8 +99,9 @@ These hold for every pillar, now and in later phases:
    it on those schedules (the `autoUpdate` setting) or when you press a run
    button. Nothing the checks fetch is ever run, except that a Daily check or
    Run all you press installs the waiting updates for your own Flatpak apps,
-   through Flatpak; Run all also runs Omarchy's own updater, in a terminal
-   (see Commands); results are size-capped and validated like any other
+   through Flatpak. Run all never runs Omarchy's own updater: that is the
+   Omarchy Update button, or Update now on the System updates row, alone (see
+   Commands). Results are size-capped and validated like any other
    input. The one program Vigil downloads,
    Bumblebee, is installed only from a button you press (Install, or
    Install Bumblebee on its row after a Vigil update raised the pinned
@@ -337,9 +338,10 @@ program it is running, process group and all, and starts no further step.
   the script exactly as it is passed, unabridged; for a terminal action, the
   command the terminal runs. The run cards show the helper's root steps the
   same way; only Run all has any: the virus signatures update (only when
-  they are over two days old, which the report states as `signaturesDue`)
-  and the password scan. The panel lets the helper run the signatures
-  update only when the Run all card you confirmed showed that exact command
+  they are over two days old, which the report states as `signaturesDue`),
+  the password scan, and the rootkit scan, when rkhunter is installed. The
+  panel lets the helper run the signatures update only when the Run all card
+  you confirmed showed that exact command
   (`refresh-feeds --full --signatures`, the one combination the helper
   accepts); without the flag the helper never asks for that password, so a
   card drawn before the signatures grew old cannot lead to a prompt it did
@@ -366,7 +368,8 @@ program it is running, process group and all, and starts no further step.
 - **Install** (shown in red as "MISSING … INSTALL" when a helper is
   missing) is one constant root script: `pacman -S --needed --noconfirm`
   for ClamAV, ClamUI (skipped when you already have it from Flathub),
-  arch-audit, osv-scanner and fwupd, then Bumblebee. Everything except
+  arch-audit, osv-scanner, fwupd, gitleaks and rkhunter, then Bumblebee.
+  Everything except
   Bumblebee comes from the Arch repositories, so `omarchy-update` keeps it
   current. Bumblebee is installed by one constant root script
   (`BUMBLEBEE_SCRIPT` in `bin/vigil`, identical to `BUMBLEBEE_INSTALL` in
@@ -567,11 +570,17 @@ plain: they are the same on every machine.
 - Deletion (thumbnail cache, the trash, unused application caches, and the
   big cache folders you tick: `vigil clear-caches <keyed id>...`, which
   re-lists the folders of 1 GB or more first and empties only ids still on
-  that list and not ignored, each opened with the no-follow walk from your home folder, with
-  a deadline) works
-  relative to held directory descriptors and never follows a symlink.
-  Leftover app data is never deleted, only moved to the trash (see below). The opt-out file is removed only if its bytes
-  are exactly what Vigil wrote.
+  that list and not ignored, each opened with the no-follow walk from your
+  home folder) works relative to held directory descriptors and never
+  follows a symlink. The walk itself is iterative, one held descriptor per
+  folder and one entry at a time, so a folder nested deeper than the
+  interpreter's stack, or holding millions of entries, cannot stop it, and
+  one ticked folder is bounded: 100 seconds, two million entries and 128
+  folders deep. Whatever a run leaves behind, of a megabyte or more, is
+  named in the answer it posts; below 128 folders deep the folders are left
+  as they are.
+  Leftover app data is never deleted, only moved to the trash (see below).
+  The opt-out file is removed only if its bytes are exactly what Vigil wrote.
 
 ## Network
 

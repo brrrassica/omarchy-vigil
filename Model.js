@@ -207,7 +207,7 @@ function hasSource(report, id) {
 function confirmationText(kind, id, report) {
   if (kind === "clean-all") return cleanAllConfirmation(report)
   if (kind === "ignore") return ignoreConfirmation(id, report)
-if (kind === "clear-caches") return clearCachesConfirmation(id, report)
+  if (kind === "clear-caches") return clearCachesConfirmation(id, report)
   if (kind === "trash") return trashConfirmation(id, report)
   if (kind === "remove-orphans" || kind === "remove-foreign") return removePackagesConfirmation(kind, id, report)
   if (kind === "remove-plugins") return removePluginsConfirmation(id, report)
@@ -351,7 +351,7 @@ function clearCachesConfirmation(ids, report) {
   lines.push("Everything inside " + (list.length === 1 ? "this folder" : "each folder") + " is deleted for good, in use or not; the folder itself stays. Close the app first.")
   lines.push("Apps rebuild a cache or download it again when they need it, which can take a while and use your connection.")
   lines.push("Unlike Clean all, which clears only files nothing has used for a week, this empties the whole folder.")
-  lines.push("Technical: deletes the files and folders inside ~/.cache/<name>, relative to a held folder, never following a link. Vigil checks again that each is still listed, 1 GB or more, and not ignored.")
+  lines.push("Technical: deletes the files and folders inside ~/.cache/<name>, relative to a held folder, never following a link, up to 100 seconds, two million entries and 128 folders deep per folder. Vigil checks again that each is still listed, 1 GB or more, and not ignored. Anything of a megabyte or more left behind is named in the answer.")
   return { title: list.length === 1 ? "Clear this cache folder?" : "Clear " + list.length + " cache folders?", lines: lines }
 }
 

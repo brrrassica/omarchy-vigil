@@ -106,7 +106,8 @@ its own and keeps the rules in [SECURITY-MODEL.md](SECURITY-MODEL.md).
 - [x] Weekly refresh of all three (`autoUpdate`, on by default), with a
       retry after a day on failure; ClamAV signatures through ClamAV's own
       `clamav-freshclam` service, turned on when Vigil installs ClamAV or
-      ClamUI; rkhunter data updated before each run.
+      ClamUI; rkhunter run as it is installed, with its own data never
+      updated and no network.
 - [x] False-alarm pass: file changes that match what a package shipped
       (pacman's mtree records) and system users added by packages are not
       reported; `/etc/hosts` is no longer watched; only changes to who can log

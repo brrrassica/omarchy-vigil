@@ -5376,10 +5376,26 @@ def human(n):
         n /= 1024.0
 
 
-def _size_check(cid, title, path, why, action, label, big):
-    if not exists(path):
+def _size_check(cid, title, parts, why, action, label, big):
+    """One Care row about a folder in your home folder, measured through the no-follow walk
+    from your home: a ~/.cache that is a link (or is not a real folder of yours) is reported,
+    not guessed at as empty, since the same walk is what the Clear buttons later use."""
+    shown = "~/" + "/".join(parts)
+    try:
+        dfd = _open_home_dir(list(parts))
+    except FileNotFoundError:
         return result(cid, "care", title, "pass", "Empty.", why, weight=0)
-    size, complete = _dir_size(path, time.monotonic() + WALK_MAX_SECONDS)
+    except Refused:
+        # Not a normal folder inside your home folder (a link, say). Nothing here for Vigil to
+        # measure or clear, and the walk the Clear buttons use would refuse it too, so say so
+        # instead of reporting it empty. na: visible, dimmed, not counted, no button.
+        return result(cid, "care", title, "na",
+                      "Not measured: %s is a link or is not a folder of yours, so Vigil leaves it "
+                      "alone." % shown, why, weight=0)
+    try:
+        size, _, complete = _cache_scan(dfd, 0, time.monotonic() + WALK_MAX_SECONDS, [WALK_MAX_ENTRIES])
+    finally:
+        os.close(dfd)
     approx = "" if complete else "at least "
     status = "warn" if size >= big else "info"
     return result(cid, "care", title, status if size else "pass", "%s%s." % (approx, human(size)) if size else "Empty.",
@@ -5388,14 +5404,14 @@ def _size_check(cid, title, path, why, action, label, big):
 
 @check
 def check_thumbnails():
-    return _size_check("thumbnails", "Thumbnail cache", home_path(".cache", "thumbnails"),
+    return _size_check("thumbnails", "Thumbnail cache", (".cache", "thumbnails"),
                        "Small previews of every image and video you have browsed. They can reveal files you "
                        "have since deleted.", ("helper", "clean-thumbnails"), "Clear", 512 * 1024 * 1024)
 
 
 @check
 def check_trash():
-    return _size_check("trash", "Trash", home_path(".local", "share", "Trash"),
+    return _size_check("trash", "Trash", TRASH,
                        "Files you deleted from the file manager are kept here until the trash is emptied.",
                        ("helper", "empty-trash"), "Empty", 1024 * 1024 * 1024)
 
@@ -5403,33 +5419,76 @@ def check_trash():
 CACHE_UNUSED_DAYS = 7
 CACHE_SKIP = {"thumbnails"}            # its own row and its own cleanup
 
+# What one Clear selected run reaches in a single folder: a deadline, an entry budget, and a
+# depth. They are what keeps one ticked folder from holding the machine or the helper for
+# hours; the row and the panel's card say the same three numbers. A walk that stops early is
+# reported, never passed off as the whole folder (see complete in _cache_scan).
+CACHE_CLEAR_SECONDS = 100
+CACHE_CLEAR_ENTRIES = 2000000
+CACHE_WALK_DEPTH = 128
+
+# One empty iterator, shared: a folder whose entry list could not be read at all.
+_NO_ENTRIES = iter(())
+
+
+def _close_cache_frame(frame):
+    """Close one walk frame: its entry list, then its descriptor when the walk opened it."""
+    if frame[2] is not None and frame[2] is not _NO_ENTRIES:
+        frame[2].close()
+    if frame[1]:
+        os.close(frame[0])
+
 
 def _cache_scan(dfd, cutoff, deadline, budget):
-    """(total bytes, bytes in files unused since cutoff) below dfd, never following symlinks."""
+    """(total bytes, bytes in files unused since cutoff, complete) below dfd, never following
+    symlinks. Iterative, with one held descriptor per folder and one entry at a time: a folder
+    nested deeper than the interpreter's stack still scans, and a folder holding millions of
+    entries is never listed whole before it is measured. complete is False when the walk
+    stopped before it saw everything (its entry budget, its deadline, a folder or an entry it
+    could not read, or CACHE_WALK_DEPTH), so a caller can say "at least" instead of a total.
+    Frames are [dirfd, owned, entries, parent dirfd, name]; only this walk and
+    _clear_dir_contents use that shape."""
     total = old = 0
-    with os.scandir(dfd) as it:
-        entries = list(it)[:max(0, budget[0])]
-    for e in entries:
-        budget[0] -= 1
-        if budget[0] <= 0 or time.monotonic() > deadline:
-            break
-        try:
-            if e.is_dir(follow_symlinks=False):
-                sub = os.open(e.name, O_DIR, dir_fd=dfd)
+    complete = True
+    stack = [[dfd, False, None, None, ""]]
+    try:
+        while stack:
+            frame = stack[-1]
+            if frame[2] is None:
                 try:
-                    t, o = _cache_scan(sub, cutoff, deadline, budget)
-                finally:
-                    os.close(sub)
-                total, old = total + t, old + o
-            elif e.is_file(follow_symlinks=False):
-                st = e.stat(follow_symlinks=False)
-                size = st.st_blocks * 512
-                total += size
-                if st.st_uid == os.geteuid() and max(st.st_atime, st.st_mtime) < cutoff:
-                    old += size
-        except OSError:
-            continue
-    return total, old
+                    frame[2] = os.scandir(frame[0])
+                except OSError:
+                    frame[2] = _NO_ENTRIES
+                    complete = False
+            for e in frame[2]:
+                budget[0] -= 1
+                if budget[0] <= 0 or time.monotonic() > deadline:
+                    return total, old, False
+                try:
+                    if e.is_dir(follow_symlinks=False):
+                        if len(stack) >= CACHE_WALK_DEPTH:
+                            complete = False
+                            continue
+                        sub = os.open(e.name, O_DIR, dir_fd=frame[0])
+                        stack.append([sub, True, None, frame[0], e.name])
+                        break                       # down into it; the frame keeps its place
+                    if e.is_file(follow_symlinks=False):
+                        st = e.stat(follow_symlinks=False)
+                        size = st.st_blocks * 512
+                        total += size
+                        if st.st_uid == os.geteuid() and max(st.st_atime, st.st_mtime) < cutoff:
+                            old += size
+                except OSError:
+                    complete = False
+                    continue
+            else:                                   # the frame's own entries are all seen
+                stack.pop()
+                _close_cache_frame(frame)
+                continue
+    finally:
+        for frame in stack:
+            _close_cache_frame(frame)
+    return total, old, complete
 
 
 def _cache_cutoff():
@@ -5444,11 +5503,13 @@ CACHE_BIG_MAX = 40
 
 
 def cache_survey():
-    """[(name, is_dir, total, old)] for what sits directly in ~/.cache (not the thumbnails, which have their
-    own row), measured without following links; None when there is no ~/.cache."""
+    """[(name, is_dir, total, old, complete)] for what sits directly in ~/.cache (not the
+    thumbnails, which have their own row), measured without following links; None when there is
+    no ~/.cache at all, and Refused when ~/.cache is not a real folder of yours (a symlink, say),
+    which the row says rather than reporting it empty."""
     try:
         dfd = _open_home_dir([".cache"])
-    except (OSError, Refused):
+    except FileNotFoundError:
         return None
     out = []
     try:
@@ -5463,14 +5524,14 @@ def cache_survey():
                 if stat.S_ISDIR(st.st_mode):
                     sub = os.open(name, O_DIR, dir_fd=dfd)
                     try:
-                        t, o = _cache_scan(sub, cutoff, deadline, budget)
+                        t, o, c = _cache_scan(sub, cutoff, deadline, budget)
                     finally:
                         os.close(sub)
-                    out.append((name, True, t, o))
+                    out.append((name, True, t, o, c))
                 elif stat.S_ISREG(st.st_mode):
                     t = st.st_blocks * 512
                     o = t if st.st_uid == os.geteuid() and max(st.st_atime, st.st_mtime) < cutoff else 0
-                    out.append((name, False, t, o))
+                    out.append((name, False, t, o, True))
             except OSError:
                 continue
     finally:
@@ -5480,9 +5541,13 @@ def cache_survey():
 
 def cache_records(survey=None):
     """The cache folders of 1 GB or more, biggest first, as pick-list records ({id, name, total, kind})."""
-    survey = cache_survey() if survey is None else survey
+    if survey is None:
+        try:
+            survey = cache_survey()
+        except (OSError, Refused):
+            return []           # no ~/.cache of ours to list: nothing to tick or ignore
     big = [{"id": item_id("cache", n), "name": n, "total": t, "kind": "cache"}
-           for n, is_dir, t, o in survey or [] if is_dir and t >= CACHE_BIG_BYTES]
+           for n, is_dir, t, o, c in survey or [] if is_dir and t >= CACHE_BIG_BYTES]
     return sorted(big, key=lambda c: -c["total"])[:CACHE_BIG_MAX]
 
 
@@ -5497,10 +5562,17 @@ def check_user_cache():
     cid, cat, title = "user-cache", "care", "Application caches"
     why = ("Browsers and apps keep caches in ~/.cache and rebuild them when needed, so this is "
            "about disk space.")
-    survey = cache_survey()
+    try:
+        survey = cache_survey()
+    except (OSError, Refused):
+        return result(cid, cat, title, "na",
+                      "Not measured: ~/.cache is a link or is not a folder of yours, so Vigil leaves it "
+                      "alone. Its Clear buttons need a real folder inside your home folder to work on.",
+                      why, weight=0)
     if survey is None:
         return result(cid, cat, title, "pass", "Empty.", why, weight=0)
     total, old = sum(e[2] for e in survey), sum(e[3] for e in survey)
+    shown = ("" if all(e[4] for e in survey) else "at least ") + human(total)
     kept = kept_items()
     items = [{"id": c["id"], "kind": "cache", "text": _cache_text(c), "kept": is_kept_record(c, kept), "ignored": False}
              for c in cache_records(survey)]
@@ -5516,13 +5588,13 @@ def check_user_cache():
                                                             human(CACHE_BIG_BYTES))) if live else ""
     if old < 1024 * 1024:
         if not live:
-            out = result(cid, cat, title, "pass", "%s, all of it in use." % human(total), why, weight=0)
+            out = result(cid, cat, title, "pass", "%s, all of it in use." % shown, why, weight=0)
         else:
-            out = result(cid, cat, title, "info", "%s, all of it in use.%s" % (human(total), note), why, weight=0,
+            out = result(cid, cat, title, "info", "%s, all of it in use.%s" % (shown, note), why, weight=0,
                          howto=howto)
     else:
         out = result(cid, cat, title, "warn" if old >= 5 * 1024 ** 3 else "info",
-                     "%s; %s not used in the past week.%s" % (human(total), human(old), note), why,
+                     "%s; %s not used in the past week.%s" % (shown, human(old), note), why,
                      fix=fix("helper", "clean-app-cache", "Clear unused"), weight=0, howto=howto)
     if items:
         out["items"] = quiet_last(items)
@@ -6920,35 +6992,65 @@ def _own_writable_dir(dfd):
 
 def _clear_dir_contents(dfd, budget):
     """Delete regular files and empty subdirectories below dfd without ever
-    following a symlink; symlinks themselves are unlinked, never followed."""
+    following a symlink; symlinks themselves are unlinked, never followed.
+
+    Iterative, with one held descriptor per folder and one entry at a time: a
+    folder nested deeper than the interpreter's stack still clears, a folder
+    holding millions of entries is never listed whole, and a subfolder that is
+    not ours or cannot be made writable is skipped instead of stopping the run.
+    Frames are [dirfd, owned, entries, parent dirfd, name], as in _cache_scan."""
     removed = 0
-    with os.scandir(dfd) as it:
-        entries = [(e.name, e.is_dir(follow_symlinks=False)) for e in it][:budget[0]]
-    for name, is_dir in entries:
-        if budget[0] <= 0 or (len(budget) > 1 and time.monotonic() > budget[1]):
-            break
-        budget[0] -= 1
-        if is_dir:
-            try:
-                sub = os.open(name, O_DIR, dir_fd=dfd)
-            except OSError:
-                continue
-            try:
-                if not _own_writable_dir(sub):
+    stack = [[dfd, False, None, None, ""]]
+    try:
+        while stack:
+            frame = stack[-1]
+            if frame[2] is None:
+                try:
+                    frame[2] = os.scandir(frame[0])
+                except OSError:
+                    frame[2] = _NO_ENTRIES
+            for e in frame[2]:
+                if budget[0] <= 0 or (len(budget) > 1 and time.monotonic() > budget[1]):
+                    return removed
+                budget[0] -= 1
+                try:
+                    is_dir = e.is_dir(follow_symlinks=False)
+                except OSError:
                     continue
-                removed += _clear_dir_contents(sub, budget)
-            finally:
-                os.close(sub)
-            try:
-                os.rmdir(name, dir_fd=dfd)
-            except OSError:
-                pass
-        else:
-            try:
-                os.unlink(name, dir_fd=dfd)
-                removed += 1
-            except OSError:
-                pass
+                if not is_dir:
+                    try:
+                        os.unlink(e.name, dir_fd=frame[0])
+                        removed += 1
+                    except OSError:
+                        pass
+                    continue
+                if len(stack) >= CACHE_WALK_DEPTH:
+                    continue                        # left as it is: too deep to be a cache folder
+                try:
+                    sub = os.open(e.name, O_DIR, dir_fd=frame[0])
+                except OSError:
+                    continue
+                try:
+                    ours = _own_writable_dir(sub)
+                except OSError:
+                    ours = False
+                if not ours:
+                    os.close(sub)
+                    continue
+                stack.append([sub, True, None, frame[0], e.name])
+                break                               # down into it; the frame keeps its place
+            else:                                   # the frame's own entries are all seen
+                stack.pop()
+                _close_cache_frame(frame)
+                if frame[3] is not None:            # it is empty now, so it can go too
+                    try:
+                        os.rmdir(frame[4], dir_fd=frame[3])
+                    except OSError:
+                        pass
+                continue
+    finally:
+        for frame in stack:
+            _close_cache_frame(frame)
     return removed
 
 
@@ -7084,11 +7186,12 @@ def fix_clean_app_cache():
 
 def clear_caches(ids):
     """`vigil clear-caches <id>...`: delete everything inside the ticked cache folders. Each must be listed right
-    now (1 GB or more) and not ignored. The folder itself stays; nothing is followed through a link."""
+    now (1 GB or more) and not ignored. The folder itself stays; nothing is followed through a link. One folder
+    that cannot be opened, emptied or measured is left alone and named: it never stops the others."""
     listed = {c["id"]: c for c in cache_records()}
     kept = kept_items()
     cleared, freed, problems = [], 0, []
-    deadline = time.monotonic() + 100
+    deadline = time.monotonic() + CACHE_CLEAR_SECONDS
     for cid in ids:
         c = listed.get(cid)
         if c is None:
@@ -7097,21 +7200,27 @@ def clear_caches(ids):
         if is_kept_record(c, kept):
             problems.append("%s is ignored (click its lock first)" % clean(c["name"], 60))
             continue
+        name = clean(c["name"], 60)
         try:
             dfd = _open_home_dir([".cache", c["name"]])
         except (OSError, Refused) as e:
-            problems.append("%s: %s" % (clean(c["name"], 60), e if isinstance(e, Refused) else "could not open it"))
+            problems.append("%s: %s" % (name, e if isinstance(e, Refused) else "could not open it"))
             continue
         try:
             if not _own_writable_dir(dfd):
-                problems.append("%s: not yours" % clean(c["name"], 60))
+                problems.append("%s: not yours" % name)
                 continue
-            _clear_dir_contents(dfd, [2000000, deadline])
-            left, _ = _cache_scan(dfd, 0, deadline, [WALK_MAX_ENTRIES])
+            _clear_dir_contents(dfd, [CACHE_CLEAR_ENTRIES, deadline])
+            left, _, _ = _cache_scan(dfd, 0, deadline, [WALK_MAX_ENTRIES])
+        except OSError as e:
+            problems.append("%s: %s" % (name, os.strerror(e.errno or 0) or "could not be emptied"))
+            continue
         finally:
             os.close(dfd)
         freed += max(0, c["total"] - left)
         cleared.append(c)
+        if left >= 1024 * 1024:
+            problems.append("%s: %s still there (in use, not yours, or deeper than Vigil walks)" % (name, human(left)))
     if cleared:
         msg = "Cleared %s, freed about %s." % (clean(cleared[0]["name"], 80) if len(cleared) == 1
                                                else "%d cache folders" % len(cleared), human(freed))
