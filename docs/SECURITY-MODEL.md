@@ -308,7 +308,12 @@ program it is running, process group and all, and starts no further step.
   Vigil allocate it; a file is also stopped after five seconds or five
   million instructions. Zip files (PyTorch's format) are opened with
   `zipfile` and only members ending in `.pkl` are read, at most eight, never
-  extracted. Imports are classified against two lists in Vigil's code:
+  extracted. Opening an archive is itself an allocation: `zipfile` reads the
+  whole table of contents in one read, sized by a number the archive itself
+  declares, and makes a record per member, all before the member count or the
+  64 MiB cap could apply, so that read is bounded by its own 1 MiB and an
+  archive declaring more is refused unread. Imports are classified against two
+  lists in Vigil's code:
   modules that can run programs (`os`, `subprocess`, `socket`, `ctypes`,
   `importlib` and the like, and `eval`, `exec` and `open` from `builtins`) and
   modules it knows are ordinary for models. A file it cannot read counts as
